@@ -32,12 +32,12 @@ export default async function AccountPage() {
     month: "long",
     year: "numeric",
   });
-  const reviewSummary = getHostReviewSummary(user.id);
-  const hostReviews = getHostReviews(user.id);
-  const reviewDist = getHostReviewDistribution(user.id);
+  const reviewSummary = await getHostReviewSummary(user.id);
+  const hostReviews = await getHostReviews(user.id);
+  const reviewDist = await getHostReviewDistribution(user.id);
   const reviewDistTotal = reviewDist.reduce((s, d) => s + d.count, 0);
-  const favorites = getFavoriteVillaIds(user.id);
-  const myVillas: Villa[] = getVillasByOwner(user.id).map((v) => ({
+  const favorites = await getFavoriteVillaIds(user.id);
+  const myVillas: Villa[] = (await getVillasByOwner(user.id)).map((v) => ({
     id: v.id,
     name: v.name,
     city: v.city,

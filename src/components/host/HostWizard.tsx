@@ -11,6 +11,12 @@ import {
 } from "@/lib/actions";
 import { useMounted } from "@/lib/useMounted";
 import SignInGate from "@/components/account/SignInGate";
+import {
+  DEFAULT_DRAFT,
+  FACILITY_CHIPS,
+  SERVICES,
+  type Draft,
+} from "./draft";
 
 const STEPS = [
   "Personal Details",
@@ -22,64 +28,6 @@ const STEPS = [
 ] as const;
 
 const DRAFT_KEY = "myvilla.hostDraft";
-
-export type Draft = {
-  step: number;
-  personal: {
-    fullName: string;
-    gender: string;
-    email: string;
-    dob: string;
-    address: string;
-    emergency: string;
-  };
-  villa: {
-    kind: string;
-    name: string;
-    description: string;
-    area: string;
-    address: string;
-    city: string;
-    rooms: string;
-    bathrooms: string;
-    maxGuests: string;
-    facilities: string[];
-  };
-  images: string[];
-  services: { selected: string[]; custom: string };
-  price: number;
-  payment: { methods: string[]; accountType: string; cardNumber: string };
-};
-
-const DEFAULT_IMAGES = [
-  "/images/host/photo-1.jpg",
-  "/images/host/photo-2.jpg",
-  "/images/host/photo-3.jpg",
-  "/images/host/photo-4.jpg",
-  "/images/host/photo-5.jpg",
-  "/images/host/photo-6.jpg",
-];
-
-export const DEFAULT_DRAFT: Draft = {
-  step: 0,
-  personal: { fullName: "", gender: "", email: "", dob: "", address: "", emergency: "" },
-  villa: {
-    kind: "Villa Living",
-    name: "",
-    description: "",
-    area: "",
-    address: "",
-    city: "",
-    rooms: "",
-    bathrooms: "",
-    maxGuests: "",
-    facilities: [],
-  },
-  images: DEFAULT_IMAGES,
-  services: { selected: [], custom: "" },
-  price: 135,
-  payment: { methods: ["Mastercard", "G Pay", "PayPal", "VISA"], accountType: "", cardNumber: "" },
-};
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -329,82 +277,6 @@ function StepPersonal({
 /* ---------------- Step 2: Villa Details ---------------- */
 
 const VILLA_KINDS = ["Villa Living", "Combinative Villa", "Hotel", "Resort", "Bungalow", "Others (specify)"];
-const FACILITY_CHIPS = [
-  "Wifi", "Free Parking", "Air Conditioner", "Long Stays", "Smoke Alarm",
-  "Swimming Pool", "Jaccuzzi", "BBQ Corner", "TV",
-];
-
-function ChipIcon({ name }: { name: string }) {
-  const stroke = { stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round" as const, fill: "none" };
-  switch (name) {
-    case "Wifi":
-      return (
-        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M2.5 9a14 14 0 0119 0M5.5 12.5a9.6 9.6 0 0113 0M8.5 16a5.3 5.3 0 017 0" {...stroke} />
-          <circle cx="12" cy="19" r="1.2" fill="currentColor" />
-        </svg>
-      );
-    case "Free Parking":
-      return (
-        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M4 13l1.5-4.5A2 2 0 017.4 7h9.2a2 2 0 011.9 1.5L20 13" {...stroke} />
-          <rect x="3.5" y="12.5" width="17" height="5" rx="1.4" {...stroke} />
-          <circle cx="7.5" cy="15" r="0.9" fill="currentColor" />
-          <circle cx="16.5" cy="15" r="0.9" fill="currentColor" />
-        </svg>
-      );
-    case "Air Conditioner":
-      return (
-        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="3" y="5" width="18" height="7" rx="1.6" {...stroke} />
-          <path d="M7 15c0 1.4-1 1.4-1 2.8M12 15c0 1.4-1 1.4-1 2.8M17 15c0 1.4-1 1.4-1 2.8" {...stroke} />
-        </svg>
-      );
-    case "Long Stays":
-      return (
-        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="3.5" y="5" width="17" height="15" rx="1.8" {...stroke} />
-          <path d="M3.5 9.5h17M8 3v4M16 3v4" {...stroke} />
-        </svg>
-      );
-    case "Smoke Alarm":
-      return (
-        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="12" cy="12" r="8.5" {...stroke} />
-          <circle cx="12" cy="12" r="4" {...stroke} />
-          <circle cx="12" cy="12" r="1" fill="currentColor" />
-        </svg>
-      );
-    case "Swimming Pool":
-      return (
-        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M2.5 17c1.6 1.4 3.2 1.4 4.8 0s3.2-1.4 4.8 0 3.2 1.4 4.8 0 3.2-1.4 4.6 0" {...stroke} />
-          <path d="M9 14V6.5A1.5 1.5 0 0110.5 5M15 14V6.5A1.5 1.5 0 0116.5 5M9 8h6M9 11.5h6" {...stroke} />
-        </svg>
-      );
-    case "Jaccuzzi":
-      return (
-        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M3 13h18v3a4 4 0 01-4 4H7a4 4 0 01-4-4z" {...stroke} />
-          <path d="M8 10c0-1.4 1-1.4 1-2.8M12 10c0-1.4 1-1.4 1-2.8M16 10c0-1.4 1-1.4 1-2.8" {...stroke} />
-        </svg>
-      );
-    case "BBQ Corner":
-      return (
-        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M5 9h14a7 7 0 01-14 0z" {...stroke} />
-          <path d="M8.5 16l-2 5M15.5 16l2 5M6.5 18.5h11" {...stroke} />
-        </svg>
-      );
-    default: // TV
-      return (
-        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="3" y="6.5" width="18" height="12" rx="1.6" {...stroke} />
-          <path d="M9 3l3 3.5L15 3" {...stroke} />
-        </svg>
-      );
-  }
-}
 
 function VillaMapPreview() {
   return (
@@ -440,14 +312,6 @@ function StepVilla({
 }) {
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
   const [kind, setKind] = useState(draft.villa.kind);
-  const [facilities, setFacilities] = useState<string[]>(draft.villa.facilities);
-  const [extraChips, setExtraChips] = useState<string[]>([]);
-
-  function toggleFacility(f: string) {
-    setFacilities((cur) =>
-      cur.includes(f) ? cur.filter((x) => x !== f) : [...cur, f],
-    );
-  }
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -463,7 +327,8 @@ function StepVilla({
       rooms: get("rooms"),
       bathrooms: get("bathrooms"),
       maxGuests: get("maxGuests"),
-      facilities,
+      // Facilities are picked on the Extra Services step.
+      facilities: draft.villa.facilities,
     };
     const next: typeof errors = {};
     if (!villa.name) next.name = "Villa name is required.";
@@ -619,42 +484,6 @@ function StepVilla({
       </div>
 
       <h3 className="mt-7 mb-3 text-[15px] font-semibold text-brand">
-        Select Facilities Provided
-      </h3>
-      <div className="flex flex-wrap gap-2.5">
-        {[...FACILITY_CHIPS, ...extraChips].map((f) => (
-          <button
-            key={f}
-            type="button"
-            onClick={() => toggleFacility(f)}
-            aria-pressed={facilities.includes(f)}
-            className={`flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-sm transition-colors ${
-              facilities.includes(f)
-                ? "bg-brand text-white"
-                : "bg-[#ececee] text-[#384652] hover:bg-line/50"
-            }`}
-          >
-            <ChipIcon name={f} />
-            {f}
-          </button>
-        ))}
-        <button
-          type="button"
-          onClick={() => {
-            const extra = window.prompt("Add a facility");
-            const v = extra?.trim();
-            if (v && ![...FACILITY_CHIPS, ...extraChips].includes(v)) {
-              setExtraChips((cur) => [...cur, v]);
-              setFacilities((cur) => [...cur, v]);
-            }
-          }}
-          className="rounded-full px-3 py-1.5 text-sm text-[#384652] hover:bg-line/30"
-        >
-          + Add More
-        </button>
-      </div>
-
-      <h3 className="mt-7 mb-3 text-[15px] font-semibold text-brand">
         Villa Location on Map
       </h3>
       <VillaMapPreview />
@@ -764,16 +593,6 @@ function StepImages({
 
 /* ---------------- Step 4: Extra Services ---------------- */
 
-const SERVICES = [
-  "Free Cancellation before a week",
-  "Free Wifi",
-  "Free meal on first day",
-  "Pre-order mean preperations",
-  "Long Stays",
-  "Butler",
-  "House Keeping",
-];
-
 function StepServices({
   draft,
   onNext,
@@ -781,47 +600,155 @@ function StepServices({
   draft: Draft;
   onNext: (d: Partial<Draft>) => void;
 }) {
+  // One uniform list — every row (service or facility) has a checkbox and a
+  // price box. Selections split apart on save: facility-type picks stay
+  // searchable amenities, and anything with a price becomes a chargeable extra.
+  const customFacilities = draft.villa.facilities.filter(
+    (f) => !FACILITY_CHIPS.includes(f) && !SERVICES.includes(f),
+  );
+  // Owner-added services; old drafts stored one free-text service in `custom`.
+  const legacyCustom = (draft.services.custom ?? "").trim();
+  const [customServices, setCustomServices] = useState<string[]>(() => {
+    const list = draft.services.customs ?? [];
+    return legacyCustom && !list.includes(legacyCustom)
+      ? [...list, legacyCustom]
+      : list;
+  });
+  const saved = [
+    ...new Set([
+      ...draft.services.selected,
+      ...(legacyCustom ? [legacyCustom] : []),
+      ...draft.villa.facilities,
+    ]),
+  ];
   const [selected, setSelected] = useState<string[]>(
-    draft.services.selected.length
-      ? draft.services.selected
+    saved.length
+      ? saved
       : ["Free Cancellation before a week", "Free Wifi", "Long Stays"],
   );
+  const [prices, setPrices] = useState<Record<string, string>>(
+    draft.services.prices ?? {},
+  );
+  const [newService, setNewService] = useState("");
+
+  const serviceRows = [...SERVICES, ...customServices];
+  const facilityRows = [
+    ...FACILITY_CHIPS.filter((f) => !SERVICES.includes(f)),
+    ...customFacilities,
+  ];
+
+  function toggle(name: string) {
+    setSelected((cur) =>
+      cur.includes(name) ? cur.filter((x) => x !== name) : [...cur, name],
+    );
+  }
+
+  function addService() {
+    const name = newService.trim();
+    if (name && !serviceRows.includes(name) && !facilityRows.includes(name)) {
+      setCustomServices((cur) => [...cur, name]);
+      setSelected((cur) => [...cur, name]);
+    }
+    setNewService("");
+  }
+
+  const priceNum = (name: string) => parseFloat(prices[name] ?? "") || 0;
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    const custom = String(new FormData(e.currentTarget).get("custom") ?? "").trim();
-    onNext({ services: { selected, custom } });
+    const facilityNames = selected.filter(
+      (f) => FACILITY_CHIPS.includes(f) || customFacilities.includes(f),
+    );
+    const serviceNames = selected.filter((s) => serviceRows.includes(s));
+    onNext({
+      services: {
+        // Service-type picks, plus any facility the owner put a price on — a
+        // priced facility becomes a chargeable extra too. Free facilities stay
+        // amenities only (in villa.facilities below), so they don't clutter the
+        // guest's checkout with $0 rows.
+        selected: [
+          ...serviceNames,
+          ...facilityNames.filter(
+            (f) => priceNum(f) > 0 && !serviceNames.includes(f),
+          ),
+        ],
+        prices,
+        customs: customServices,
+        custom: "",
+      },
+      // Facility-type picks stay searchable amenities + villa-page icons.
+      villa: { ...draft.villa, facilities: facilityNames },
+    });
   }
+
+  // Every row — services and facilities alike — renders with a price box.
+  const PricedRow = (name: string) => (
+    <div key={name} className="flex items-center gap-3">
+      <label className="flex min-w-0 flex-1 items-center gap-2.5 text-sm text-body">
+        <input
+          type="checkbox"
+          checked={selected.includes(name)}
+          onChange={() => toggle(name)}
+          className="checkbox-brand"
+        />
+        {name}
+      </label>
+      <label className="flex shrink-0 items-center gap-1 rounded-[6px] border border-[#d9d9d9] bg-white px-2.5 py-1.5 text-sm text-body focus-within:border-brand">
+        <span className="sr-only">Price for {name} (leave empty if free)</span>
+        <span aria-hidden className="text-[#9d9da6]">$</span>
+        <input
+          type="text"
+          inputMode="decimal"
+          value={prices[name] ?? ""}
+          onChange={(e) => {
+            const v = e.target.value.replace(/[^\d.]/g, "");
+            setPrices((cur) => ({ ...cur, [name]: v }));
+          }}
+          placeholder="Free"
+          className="w-16 bg-transparent focus:outline-none"
+        />
+      </label>
+    </div>
+  );
 
   return (
     <form onSubmit={handleSubmit} noValidate>
       <h2 className="text-[17px] font-bold text-ink">
         Select the extra services you would be providing to your guests.
       </h2>
-      <div className="mt-5 grid max-w-xl grid-cols-1 gap-x-10 gap-y-3.5 sm:grid-cols-2">
-        {SERVICES.map((s) => (
-          <label key={s} className="flex items-center gap-2.5 text-sm text-body">
-            <input
-              type="checkbox"
-              checked={selected.includes(s)}
-              onChange={() =>
-                setSelected((cur) =>
-                  cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s],
-                )
+      <p className="mt-2 text-sm text-body">
+        Set a price to charge guests for a service — leave it empty and the
+        service is free.
+      </p>
+
+      <div className="mt-5 flex max-w-xl flex-col gap-y-3.5">
+        {[...serviceRows, ...facilityRows].map((name) => PricedRow(name))}
+
+        <div className="mt-1.5 flex items-center gap-3">
+          <input
+            type="text"
+            value={newService}
+            onChange={(e) => setNewService(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addService();
               }
-              className="checkbox-brand"
-            />
-            {s}
-          </label>
-        ))}
+            }}
+            placeholder="Add your own service"
+            aria-label="Add your own service"
+            className={input}
+          />
+          <button
+            type="button"
+            onClick={addService}
+            className="shrink-0 rounded-[8px] border border-brand px-5 py-2.5 text-sm font-semibold text-brand transition-colors hover:bg-brand/5"
+          >
+            Add Service
+          </button>
+        </div>
       </div>
-      <textarea
-        name="custom"
-        defaultValue={draft.services.custom}
-        placeholder="Add your own services"
-        rows={3}
-        className={`${input} mt-6 max-w-2xl resize-none`}
-      />
+
       <SaveAndNext />
     </form>
   );
@@ -1189,10 +1116,10 @@ export default function HostWizard({
           bathrooms: parseInt(merged.villa.bathrooms, 10) || 1,
           maxGuests: parseInt(merged.villa.maxGuests, 10) || 1,
           facilities: merged.villa.facilities,
-          services: [
-            ...merged.services.selected,
-            ...(merged.services.custom ? [merged.services.custom] : []),
-          ],
+          services: merged.services.selected.map((name) => ({
+            name,
+            price: parseFloat(merged.services.prices?.[name] ?? "") || 0,
+          })),
           price: merged.price,
           images: merged.images,
         };

@@ -12,5 +12,5 @@ export default async function RentRequestsPage() {
   const user = await getCurrentUser();
   if (!user) return null; // layout renders the sign-in gate
 
-  return <RentRequests requests={getRequestsForOwner(user.id)} />;
+  return <RentRequests requests={await getRequestsForOwner(user.id)} />;
 }

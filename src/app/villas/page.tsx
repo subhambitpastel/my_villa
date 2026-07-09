@@ -18,13 +18,13 @@ export const metadata: Metadata = {
 
 export default async function VillasPage() {
   const user = await getCurrentUser();
-  const favorites = user ? getFavoriteVillaIds(user.id) : new Set<number>();
-  const cities = getVillaCities();
+  const favorites = user ? await getFavoriteVillaIds(user.id) : new Set<number>();
+  const cities = await getVillaCities();
 
-  const villas: Villa[] = searchVillas({
+  const villas: Villa[] = (await searchVillas({
     sort: "newest",
     excludeOwnerId: user?.id,
-  }).map((v) => ({
+  })).map((v) => ({
     id: v.id,
     name: v.name,
     city: v.city,

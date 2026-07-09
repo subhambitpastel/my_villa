@@ -44,18 +44,19 @@ export async function registerAction(formData: FormData): Promise<ActionResult> 
     return fail("Password must be at least 8 characters.");
 
   const db = getDb();
-  const existing = db
+  const existing = await db
     .prepare("SELECT id FROM users WHERE email = ?")
     .get(email);
   if (existing) return fail("An account with this email already exists.");
 
-  const userId = db
-    .prepare(
-      `INSERT INTO users (email, password_hash, phone_code, phone_number, country)
-       VALUES (?, ?, ?, ?, ?)`,
-    )
-    .run(email, hashPasswordSync(password), phoneCode, phoneNumber, country)
-    .lastInsertRowid as number;
+  const userId = (
+    await db
+      .prepare(
+        `INSERT INTO users (email, password_hash, phone_code, phone_number, country)
+         VALUES (?, ?, ?, ?, ?) RETURNING id`,
+      )
+      .run(email, hashPasswordSync(password), phoneCode, phoneNumber, country)
+  ).lastInsertRowid as number;
 
   await createSession(userId);
   return { ok: true };
@@ -67,9 +68,9 @@ export async function loginAction(formData: FormData): Promise<ActionResult> {
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
   const password = String(formData.get("password") ?? "");
 
-  const user = getDb()
+  const user = (await getDb()
     .prepare("SELECT id, password_hash FROM users WHERE email = ?")
-    .get(email) as Pick<UserRow, "id" | "password_hash"> | undefined;
+    .get(email)) as Pick<UserRow, "id" | "password_hash"> | undefined;
 
   if (!user || !verifyPassword(password, user.password_hash)) {
     return fail("Incorrect email or password.");
@@ -89,16 +90,16 @@ export async function recoverAction(formData: FormData): Promise<ActionResult> {
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
   if (!EMAIL_RE.test(email)) return fail("Enter a valid email address.");
 
-  const user = getDb()
+  const user = (await getDb()
     .prepare("SELECT id FROM users WHERE email = ?")
-    .get(email) as Pick<UserRow, "id"> | undefined;
+    .get(email)) as Pick<UserRow, "id"> | undefined;
 
   // Only send a link if the account exists, but ALWAYS return the same generic
   // success so this endpoint can't be used to enumerate registered emails.
   if (user) {
     const token = randomBytes(32).toString("hex");
     const expires = new Date(Date.now() + 15 * 60 * 1000);
-    getDb()
+    await getDb()
       .prepare(
         "INSERT INTO password_resets (token, user_id, expires_at) VALUES (?, ?, ?)",
       )
@@ -131,25 +132,25 @@ export async function resetPasswordAction(
   if (!token) return fail("Invalid or expired reset link. Start over.");
 
   const db = getDb();
-  const reset = db
+  const reset = (await db
     .prepare(
       "SELECT user_id FROM password_resets WHERE token = ? AND expires_at > ?",
     )
-    .get(token, new Date().toISOString()) as { user_id: number } | undefined;
+    .get(token, new Date().toISOString())) as { user_id: number } | undefined;
   if (!reset) return fail("Invalid or expired reset link. Start over.");
 
   // Set the password, consume the token, and revoke every existing session for
   // the account (a reset should log out anyone already signed in) — atomically.
   try {
-    tx(() => {
-      db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
+    await tx(async () => {
+      await db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
         hashPasswordSync(password),
         reset.user_id,
       );
-      db.prepare("DELETE FROM password_resets WHERE user_id = ?").run(
+      await db.prepare("DELETE FROM password_resets WHERE user_id = ?").run(
         reset.user_id,
       );
-      db.prepare("DELETE FROM sessions WHERE user_id = ?").run(reset.user_id);
+      await db.prepare("DELETE FROM sessions WHERE user_id = ?").run(reset.user_id);
     });
   } catch {
     return fail("Something went wrong resetting your password. Please try again.");
@@ -174,12 +175,12 @@ export async function updateProfileAction(profile: {
   if (!EMAIL_RE.test(email)) return fail("Enter a valid email address.");
 
   const db = getDb();
-  const clash = db
+  const clash = await db
     .prepare("SELECT id FROM users WHERE email = ? AND id != ?")
     .get(email, user.id);
   if (clash) return fail("That email is already in use.");
 
-  db.prepare(
+  await db.prepare(
     `UPDATE users
      SET full_name = ?, gender = ?, email = ?, dob = ?, address = ?, emergency = ?
      WHERE id = ?`,
@@ -203,9 +204,9 @@ export async function setHostingModeAction(
   if (!user) return fail("You must be signed in.");
 
   if (!enabled) {
-    const owns = getDb()
+    const owns = (await getDb()
       .prepare("SELECT COUNT(*) AS n FROM villas WHERE owner_id = ?")
-      .get(user.id) as { n: number };
+      .get(user.id)) as { n: number };
     if (owns.n > 0) {
       return fail(
         "You still have listed villas. Remove them from My Property first.",
@@ -213,7 +214,7 @@ export async function setHostingModeAction(
     }
   }
 
-  getDb()
+  await getDb()
     .prepare("UPDATE users SET hosting_enabled = ? WHERE id = ?")
     .run(enabled ? 1 : 0, user.id);
   revalidatePath("/profile", "layout");
@@ -239,7 +240,7 @@ export async function completeGuestProfileAction(input: {
   if (age > 120) return fail("Please enter a valid date of birth.");
   if (!input.address.trim()) return fail("Home address is required.");
 
-  getDb()
+  await getDb()
     .prepare(
       `UPDATE users SET full_name = ?, gender = ?, dob = ?, address = ?, emergency = ?
        WHERE id = ?`,
@@ -269,10 +270,26 @@ type VillaInput = {
   bathrooms: number;
   maxGuests: number;
   facilities: string[];
-  services: string[];
+  /** Extra services with the per-stay price the owner charges (0 = free). */
+  services: { name: string; price: number }[];
   price: number;
   images?: string[];
 };
+
+/** Drop empty names, clamp prices to a sane non-negative amount (0 = free). */
+function normalizeServices(
+  services: VillaInput["services"] | undefined,
+): { name: string; price: number }[] {
+  return (services ?? [])
+    .map((s) => ({
+      name: String(s.name ?? "").trim(),
+      price:
+        Number.isFinite(Number(s.price)) && Number(s.price) > 0
+          ? Math.round(Number(s.price) * 100) / 100
+          : 0,
+    }))
+    .filter((s) => s.name !== "");
+}
 
 function validateVillaInput(input: VillaInput): string | null {
   if (!input.name.trim()) return "Villa name is required.";
@@ -313,8 +330,8 @@ export async function createVillaAction(
   const db = getDb();
   // Villa insert + host-unlock + optional profile save commit together.
   try {
-    tx(() => {
-      db.prepare(
+    await tx(async () => {
+      await db.prepare(
         `INSERT INTO villas
            (owner_id, name, kind, description, area, address, city, rooms, bathrooms,
             max_guests, facilities, services, price, image, images)
@@ -331,18 +348,18 @@ export async function createVillaAction(
         Math.max(1, Math.trunc(input.bathrooms) || 1),
         normalizeMaxGuests(input.maxGuests),
         JSON.stringify(input.facilities ?? []),
-        JSON.stringify(input.services ?? []),
+        JSON.stringify(normalizeServices(input.services)),
         input.price,
         images[0],
         JSON.stringify(images),
       );
 
       // Listing a villa makes you a host — unlock the host tools permanently.
-      db.prepare("UPDATE users SET hosting_enabled = 1 WHERE id = ?").run(user.id);
+      await db.prepare("UPDATE users SET hosting_enabled = 1 WHERE id = ?").run(user.id);
 
       // The wizard's first step doubles as the host's profile — keep it saved.
       if (input.hostProfile) {
-        db.prepare(
+        await db.prepare(
           `UPDATE users SET full_name = ?, gender = ?, dob = ?, address = ?, emergency = ?
            WHERE id = ?`,
         ).run(
@@ -377,7 +394,7 @@ export async function updateVillaAction(
       ? input.images
       : ["/images/host/photo-1.jpg"];
 
-  const res = getDb()
+  const res = await getDb()
     .prepare(
       `UPDATE villas
        SET name = ?, kind = ?, description = ?, area = ?, address = ?, city = ?,
@@ -396,7 +413,7 @@ export async function updateVillaAction(
       Math.max(1, Math.trunc(input.bathrooms) || 1),
       normalizeMaxGuests(input.maxGuests),
       JSON.stringify(input.facilities ?? []),
-      JSON.stringify(input.services ?? []),
+      JSON.stringify(normalizeServices(input.services)),
       input.price,
       images[0],
       JSON.stringify(images),
@@ -414,7 +431,7 @@ export async function deleteVillaAction(villaId: number): Promise<ActionResult> 
   if (!user) return fail("You must be signed in.");
 
   const db = getDb();
-  const villa = db
+  const villa = await db
     .prepare("SELECT id FROM villas WHERE id = ? AND owner_id = ?")
     .get(villaId, user.id);
   if (!villa) return fail("Property not found.");
@@ -422,18 +439,18 @@ export async function deleteVillaAction(villaId: number): Promise<ActionResult> 
   // Deleting a villa cascades to its bookings — refuse while guests have
   // upcoming confirmed stays so their reservations aren't silently erased.
   const today = new Date().toISOString().slice(0, 10);
-  const upcoming = db
+  const upcoming = (await db
     .prepare(
       `SELECT COUNT(*) AS n FROM bookings
        WHERE villa_id = ? AND status = 'accepted' AND check_out >= ?`,
     )
-    .get(villaId, today) as { n: number };
+    .get(villaId, today)) as { n: number };
   if (upcoming.n > 0)
     return fail(
       "This villa has upcoming guest bookings. You can remove it once those stays are completed or cancelled.",
     );
 
-  db.prepare("DELETE FROM villas WHERE id = ?").run(villaId);
+  await db.prepare("DELETE FROM villas WHERE id = ?").run(villaId);
   revalidateVillaViews();
   return { ok: true };
 }
@@ -464,9 +481,9 @@ export async function createBookingAction(input: {
   if (!(guests >= 1)) return fail("Guests must be at least 1.");
 
   const db = getDb();
-  const villa = db
+  const villa = (await db
     .prepare("SELECT id, owner_id, max_guests FROM villas WHERE id = ?")
-    .get(input.villaId) as
+    .get(input.villaId)) as
     | { id: number; owner_id: number; max_guests: number }
     | undefined;
   if (!villa) return fail("This villa no longer exists.");
@@ -482,12 +499,13 @@ export async function createBookingAction(input: {
   // write lock before the check; a re-check inside the tx is the guard.
   let bookingId: number | null = null;
   try {
-    bookingId = tx(() => {
-      if (!isVillaAvailable(villa.id, input.checkIn, input.checkOut)) return null;
-      const inserted = db
+    bookingId = await tx(async () => {
+      if (!(await isVillaAvailable(villa.id, input.checkIn, input.checkOut)))
+        return null;
+      const inserted = await db
         .prepare(
           `INSERT INTO bookings (villa_id, guest_id, dates, check_in, check_out, guests, status)
-           VALUES (?, ?, ?, ?, ?, ?, 'accepted')`,
+           VALUES (?, ?, ?, ?, ?, ?, 'accepted') RETURNING id`,
         )
         .run(
           villa.id,
@@ -498,7 +516,7 @@ export async function createBookingAction(input: {
           guests,
         );
       // The wishlist tracks places still to book — a booked villa leaves it.
-      db.prepare(
+      await db.prepare(
         "DELETE FROM favorites WHERE user_id = ? AND villa_id = ?",
       ).run(user.id, villa.id);
       return inserted.lastInsertRowid as number;
@@ -526,7 +544,7 @@ export async function cancelBookingAction(
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in.");
 
-  const res = getDb()
+  const res = await getDb()
     .prepare(
       `UPDATE bookings SET status = 'cancelled'
        WHERE id = ? AND guest_id = ? AND status = 'accepted'`,
@@ -537,6 +555,109 @@ export async function cancelBookingAction(
   revalidatePath("/profile/bookings");
   revalidatePath("/profile/requests");
   // Cancelling frees those dates — refresh availability everywhere it shows.
+  revalidatePath("/place");
+  revalidatePath("/search");
+  revalidatePath("/");
+  return { ok: true };
+}
+
+/** Host-side cancel: the owner refunds the guest in full (policy shown in the
+ *  confirm dialog), so the booking just flips to cancelled. */
+export async function ownerCancelBookingAction(
+  bookingId: number,
+): Promise<ActionResult> {
+  const user = await getCurrentUser();
+  if (!user) return fail("You must be signed in.");
+
+  const res = await getDb()
+    .prepare(
+      `UPDATE bookings SET status = 'cancelled'
+       WHERE id = ? AND status = 'accepted'
+         AND villa_id IN (SELECT id FROM villas WHERE owner_id = ?)`,
+    )
+    .run(bookingId, user.id);
+  if (res.changes === 0) return fail("Booking not found.");
+
+  revalidatePath("/profile/bookings");
+  revalidatePath("/profile/requests");
+  // Cancelling frees those dates — refresh availability everywhere it shows.
+  revalidatePath("/place");
+  revalidatePath("/search");
+  revalidatePath("/");
+  return { ok: true };
+}
+
+/** Change an existing booking's dates and/or guest count (the guest's own,
+ *  still-active booking). Availability is re-checked EXCLUDING this booking so
+ *  keeping or nudging its own dates is allowed, and the whole thing is atomic. */
+export async function updateBookingAction(
+  bookingId: number,
+  input: { checkIn: string; checkOut: string; guests: number },
+): Promise<ActionResult> {
+  const user = await getCurrentUser();
+  if (!user) return fail("You must be signed in.");
+
+  if (!parseDay(input.checkIn) || !parseDay(input.checkOut))
+    return fail("Please pick valid check-in and check-out dates.");
+  if (nightsBetween(input.checkIn, input.checkOut) < 1)
+    return fail("Check-out must be after check-in.");
+  if (input.checkIn < new Date().toISOString().slice(0, 10))
+    return fail("Check-in cannot be in the past.");
+
+  const guests = Math.trunc(input.guests);
+  if (!(guests >= 1)) return fail("Guests must be at least 1.");
+
+  const db = getDb();
+  const booking = (await db
+    .prepare(
+      `SELECT b.id, b.villa_id, b.status, v.max_guests
+       FROM bookings b JOIN villas v ON v.id = b.villa_id
+       WHERE b.id = ? AND b.guest_id = ?`,
+    )
+    .get(bookingId, user.id)) as
+    | { id: number; villa_id: number; status: string; max_guests: number }
+    | undefined;
+  if (!booking) return fail("Booking not found.");
+  if (booking.status !== "accepted")
+    return fail("Only active bookings can be changed.");
+  if (guests > booking.max_guests)
+    return fail(
+      `This villa sleeps up to ${booking.max_guests} guest${booking.max_guests === 1 ? "" : "s"}.`,
+    );
+
+  let ok = false;
+  try {
+    ok = await tx(async () => {
+      // Exclude THIS booking so its own current dates never count as a clash.
+      if (
+        !(await isVillaAvailable(
+          booking.villa_id,
+          input.checkIn,
+          input.checkOut,
+          booking.id,
+        ))
+      )
+        return false;
+      await db.prepare(
+        `UPDATE bookings SET check_in = ?, check_out = ?, dates = ?, guests = ?
+         WHERE id = ? AND guest_id = ? AND status = 'accepted'`,
+      ).run(
+        input.checkIn,
+        input.checkOut,
+        formatRange(input.checkIn, input.checkOut),
+        guests,
+        bookingId,
+        user.id,
+      );
+      return true;
+    });
+  } catch {
+    return fail("Something went wrong updating your booking. Please try again.");
+  }
+  if (!ok)
+    return fail("Those dates are already booked. Please choose different dates.");
+
+  revalidatePath("/profile/bookings");
   revalidatePath("/place");
   revalidatePath("/search");
   revalidatePath("/");
@@ -557,12 +678,12 @@ export async function rateStayAction(
   const text = comment.trim().slice(0, 1000);
 
   const db = getDb();
-  const booking = db
+  const booking = (await db
     .prepare(
       `SELECT id, villa_id, status, check_out FROM bookings
        WHERE id = ? AND guest_id = ?`,
     )
-    .get(bookingId, user.id) as
+    .get(bookingId, user.id)) as
     | { id: number; villa_id: number; status: string; check_out: string }
     | undefined;
   if (!booking) return fail("Booking not found.");
@@ -578,20 +699,20 @@ export async function rateStayAction(
   if (!completed)
     return fail("You can rate this stay after your checkout date.");
 
-  const already = db
+  const already = await db
     .prepare("SELECT id FROM reviews WHERE booking_id = ?")
     .get(bookingId);
   if (already) return fail("You have already rated this stay.");
 
   // Insert the review and fold it into the villa's running average atomically.
   try {
-    tx(() => {
-      db.prepare(
+    await tx(async () => {
+      await db.prepare(
         "INSERT INTO reviews (booking_id, villa_id, user_id, stars, comment) VALUES (?, ?, ?, ?, ?)",
       ).run(bookingId, booking.villa_id, user.id, value, text);
-      db.prepare(
+      await db.prepare(
         `UPDATE villas
-         SET rating = ROUND((rating * reviews + ?) / (reviews + 1.0), 2),
+         SET rating = ROUND(((rating * reviews + ?) / (reviews + 1.0))::numeric, 2),
              reviews = reviews + 1
          WHERE id = ?`,
       ).run(value, booking.villa_id);
@@ -618,7 +739,7 @@ export async function toggleFavoriteAction(
   if (!user) return { ok: false, error: "signed-out" };
 
   const db = getDb();
-  const removed = db
+  const removed = await db
     .prepare("DELETE FROM favorites WHERE user_id = ? AND villa_id = ?")
     .run(user.id, villaId);
   if (removed.changes > 0) {
@@ -626,10 +747,10 @@ export async function toggleFavoriteAction(
     return { ok: true, liked: false };
   }
 
-  const villa = db.prepare("SELECT id FROM villas WHERE id = ?").get(villaId);
+  const villa = await db.prepare("SELECT id FROM villas WHERE id = ?").get(villaId);
   if (!villa) return { ok: false, error: "This villa no longer exists." };
 
-  db.prepare("INSERT INTO favorites (user_id, villa_id) VALUES (?, ?)").run(
+  await db.prepare("INSERT INTO favorites (user_id, villa_id) VALUES (?, ?)").run(
     user.id,
     villaId,
   );
@@ -726,7 +847,7 @@ export async function updateAvatarAction(
     return fail("Only JPG, PNG, WEBP, GIF or AVIF images up to 8 MB are allowed.");
   }
 
-  getDb().prepare("UPDATE users SET avatar = ? WHERE id = ?").run(saved, user.id);
+  await getDb().prepare("UPDATE users SET avatar = ? WHERE id = ?").run(saved, user.id);
   revalidatePath("/profile", "layout");
   revalidatePath("/account");
   return { ok: true };

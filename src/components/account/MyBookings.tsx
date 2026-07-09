@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { cancelBookingAction, rateStayAction } from "@/lib/actions";
+import { rateStayAction } from "@/lib/actions";
 import type { BookingItem } from "@/lib/queries";
 
 /* eslint-disable @next/next/no-img-element */
@@ -131,13 +132,6 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
   );
   const [comment, setComment] = useState("");
 
-  function cancel(id: number) {
-    startTransition(async () => {
-      await cancelBookingAction(id);
-      router.refresh();
-    });
-  }
-
   // Clicking a star on a completed stay opens the composer with that rating.
   function openReview(id: number, stars: number) {
     setReviewing({ id, stars });
@@ -193,14 +187,12 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
               >
                 Confirmed
               </span>
-              <button
-                type="button"
-                disabled={pending}
-                onClick={() => cancel(b.id)}
-                className="text-[13px] text-[#eb5757] underline hover:opacity-80 disabled:opacity-50"
+              <Link
+                href={`/booking?id=${b.id}`}
+                className="text-[13px] text-[#eb5757] underline hover:opacity-80"
               >
                 Cancel Booking
-              </button>
+              </Link>
             </span>
           </li>
         ))}

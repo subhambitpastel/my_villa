@@ -1,10 +1,13 @@
 import type { Metadata } from "next";
 import Header from "@/components/site/Header";
 import Footer from "@/components/site/Footer";
-import HostWizard, {
+import HostWizard from "@/components/host/HostWizard";
+import {
   DEFAULT_DRAFT,
+  FACILITY_CHIPS,
+  SERVICES,
   type Draft,
-} from "@/components/host/HostWizard";
+} from "@/components/host/draft";
 import { getCurrentUser } from "@/lib/session";
 import { getVillaDetail } from "@/lib/queries";
 
@@ -47,7 +50,7 @@ export default async function HostPage({
   let editId: number | undefined;
   let editDraft: Draft | undefined;
   if (edit && user) {
-    const villa = getVillaDetail(Number(edit));
+    const villa = await getVillaDetail(Number(edit));
     if (villa && villa.owner_id === user.id) {
       editId = villa.id;
       editDraft = {
@@ -67,7 +70,17 @@ export default async function HostPage({
           facilities: villa.facilityList,
         },
         images: villa.gallery,
-        services: { selected: villa.serviceList, custom: "" },
+        services: {
+          selected: villa.serviceList.map((s) => s.name),
+          prices: Object.fromEntries(
+            villa.serviceList
+              .filter((s) => s.price > 0)
+              .map((s) => [s.name, String(s.price)]),
+          ),
+          customs: villa.serviceList
+            .map((s) => s.name)
+            .filter((n) => !SERVICES.includes(n) && !FACILITY_CHIPS.includes(n)),
+        },
         price: villa.price,
       };
     }

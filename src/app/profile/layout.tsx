@@ -13,7 +13,8 @@ export default async function ProfileLayout({
   const user = await getCurrentUser();
   // Host tabs show for anyone in hosting mode (or who owns villas).
   const isHost = user
-    ? user.hosting_enabled === 1 || getVillasByOwner(user.id).length > 0
+    ? user.hosting_enabled === 1 ||
+      (await getVillasByOwner(user.id)).length > 0
     : false;
 
   return (

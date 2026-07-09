@@ -55,12 +55,12 @@ function DealCard({
 export default async function PromotionsPage() {
   const user = await getCurrentUser();
   const excludeOwnerId = user?.id;
-  const under110 = searchVillas({ max: 110, excludeOwnerId }).length;
-  const topRated = searchVillas({ rating: 4.5, excludeOwnerId }).length;
-  const newListings = searchVillas({ excludeOwnerId }).filter(
+  const under110 = (await searchVillas({ max: 110, excludeOwnerId })).length;
+  const topRated = (await searchVillas({ rating: 4.5, excludeOwnerId })).length;
+  const newListings = (await searchVillas({ excludeOwnerId })).filter(
     (v) => v.reviews === 0,
   ).length;
-  const cities = getVillaCities();
+  const cities = await getVillaCities();
 
   return (
     <>

@@ -12,11 +12,11 @@ import { getCurrentUser } from "@/lib/session";
 
 export default async function HomeContent() {
   const user = await getCurrentUser();
-  const favorites = user ? getFavoriteVillaIds(user.id) : new Set<number>();
+  const favorites = user ? await getFavoriteVillaIds(user.id) : new Set<number>();
 
   // Hosts browse other people's villas — their own are managed in My Property.
   // Fetch with `kind` so the hero's Resort / Hotels / Rent tabs filter live.
-  const villas: ShowcaseVilla[] = getCatalogVillas(24, user?.id).map((v) => ({
+  const villas: ShowcaseVilla[] = (await getCatalogVillas(24, user?.id)).map((v) => ({
     id: v.id,
     name: v.name,
     kind: v.kind,
@@ -32,7 +32,7 @@ export default async function HomeContent() {
       <main className="bg-[#fafafa]">
         <HomeShowcase
           villas={villas}
-          cities={getVillaCities()}
+          cities={await getVillaCities()}
           authed={user !== null}
         />
 

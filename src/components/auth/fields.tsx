@@ -104,7 +104,7 @@ export function PhoneField({
             Code
           </option>
           {DIAL_CODE_OPTIONS.map((d) => (
-            <option key={d.code} value={d.code} className="text-[#121212]">
+            <option key={d.value} value={d.value} className="text-[#121212]">
               {d.label}
             </option>
           ))}

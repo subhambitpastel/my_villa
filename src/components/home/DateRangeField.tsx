@@ -347,6 +347,11 @@ export default function DateRangeField({
                 ? "Now select your check-out date"
                 : "Select your check-out date"}
           </p>
+          {bookedRanges.length > 0 && (
+            <p className="mt-1 text-[13px] text-soft">
+              Crossed-out dates are unavailable — they are already booked.
+            </p>
+          )}
         </div>
       )}
     </div>

@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { registerAction } from "@/lib/actions";
+import { dialCodeFromValue } from "@/lib/countries";
 import { safeNext } from "@/lib/returnTo";
 import {
   CountryField,
@@ -52,6 +53,10 @@ export default function RegisterForm() {
 
     setErrors(next);
     if (Object.keys(next).length > 0) return;
+
+    // The option value carries the country for uniqueness ("+1|Canada");
+    // only the plain dial code is stored.
+    data.set("phoneCode", dialCodeFromValue(phoneCode));
 
     setSubmitting(true);
     const result = await registerAction(data);

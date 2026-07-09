@@ -12,5 +12,5 @@ export default async function MyPropertyPage() {
   const user = await getCurrentUser();
   if (!user) return null; // layout renders the sign-in gate
 
-  return <MyProperties properties={getVillasByOwner(user.id)} />;
+  return <MyProperties properties={await getVillasByOwner(user.id)} />;
 }

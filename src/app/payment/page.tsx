@@ -9,7 +9,9 @@ import {
   getVillaById,
   isVillaAvailable,
   getOwnBookingForRange,
+  parseServiceList,
 } from "@/lib/queries";
+import type { VillaService } from "@/components/host/draft";
 import { getCurrentUser } from "@/lib/session";
 import { dayFromNow, formatDay, nightsBetween, parseDay } from "@/lib/dates";
 import { quote } from "@/lib/pricing";
@@ -23,8 +25,18 @@ export const metadata: Metadata = {
 
 /* eslint-disable @next/next/no-img-element */
 
-function BookingSummary({ villa, nights }: { villa: VillaRow; nights: number }) {
+function BookingSummary({
+  villa,
+  nights,
+  extras,
+}: {
+  villa: VillaRow;
+  nights: number;
+  /** Extra services the guest picked in the Reserve dialog. */
+  extras: VillaService[];
+}) {
   const q = quote(villa.price, nights);
+  const extrasTotal = extras.reduce((sum, s) => sum + s.price, 0);
   return (
     <aside className="h-fit w-full min-w-0 max-w-[758px] rounded-[10px] bg-white pb-12 shadow-[0px_15px_50px_0px_rgba(0,0,0,0.18)]">
       <div className="flex flex-col gap-6 p-6 sm:flex-row sm:gap-[22px]">
@@ -77,9 +89,17 @@ function BookingSummary({ villa, nights }: { villa: VillaRow; nights: number }) 
           </dt>
           <dd>${q.serviceFee.toFixed(2)}</dd>
         </div>
+        {extras.map((s) => (
+          <div key={s.name} className="flex items-center justify-between gap-6">
+            <dt className="min-w-0 truncate">{s.name}</dt>
+            <dd className="shrink-0">
+              {s.price > 0 ? `$${s.price.toFixed(2)}` : "Free"}
+            </dd>
+          </div>
+        ))}
         <div className="flex items-center justify-between pt-8 font-semibold">
           <dt>Total (USD)</dt>
-          <dd>${q.total.toFixed(2)}</dd>
+          <dd>${(q.total + extrasTotal).toFixed(2)}</dd>
         </div>
       </dl>
     </aside>
@@ -94,16 +114,17 @@ export default async function PaymentPage({
     in?: string;
     out?: string;
     guests?: string;
+    svc?: string;
   }>;
 }) {
   const params = await searchParams;
 
   // Booking needs an account — send guests to sign in and bring them straight
-  // back to this checkout (villa, dates and guests preserved).
+  // back to this checkout (villa, dates, guests and services preserved).
   const user = await getCurrentUser();
   if (!user) {
     const qs = new URLSearchParams();
-    for (const key of ["villa", "in", "out", "guests"] as const) {
+    for (const key of ["villa", "in", "out", "guests", "svc"] as const) {
       if (params[key]) qs.set(key, params[key]!);
     }
     redirect(loginHref(`/payment${qs.size ? "?" + qs.toString() : ""}`));
@@ -114,7 +135,7 @@ export default async function PaymentPage({
   // a place they never selected (which is exactly how a wrong-villa booking
   // slipped through before).
   const villaId = Number(params.villa);
-  const villa = Number.isInteger(villaId) ? getVillaById(villaId) : null;
+  const villa = Number.isInteger(villaId) ? await getVillaById(villaId) : null;
   if (!villa) redirect("/search");
 
   // Owners can't book their own villa — send them to its manage view.
@@ -141,13 +162,25 @@ export default async function PaymentPage({
   const checkIn = params.in!;
   const checkOut = params.out!;
   const nights = nightsBetween(checkIn, checkOut);
-  const available = isVillaAvailable(villa.id, checkIn, checkOut);
+  const available = await isVillaAvailable(villa.id, checkIn, checkOut);
+
+  // Extra services the guest picked on the villa page, passed as indices into
+  // the villa's service list — prices always come from the DB, never the URL.
+  const villaServices = parseServiceList(villa.services);
+  const extras = [
+    ...new Set(
+      (params.svc ?? "")
+        .split(",")
+        .map((n) => Number(n))
+        .filter((n) => Number.isInteger(n) && n >= 0 && n < villaServices.length),
+    ),
+  ].map((i) => villaServices[i]);
   // If the dates are taken, is it the guest's OWN booking? (e.g. they just paid
   // and refreshed, or came back to checkout.) Then reassure them instead of
   // telling them the villa was snatched away.
   const ownBooking = available
     ? null
-    : getOwnBookingForRange(user.id, villa.id, checkIn, checkOut);
+    : await getOwnBookingForRange(user.id, villa.id, checkIn, checkOut);
 
   return (
     <>
@@ -266,7 +299,7 @@ export default async function PaymentPage({
                 </div>
               )}
             </div>
-            <BookingSummary villa={villa} nights={nights} />
+            <BookingSummary villa={villa} nights={nights} extras={extras} />
           </div>
         </div>
       </main>

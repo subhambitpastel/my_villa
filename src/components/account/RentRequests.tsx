@@ -1,7 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import Image from "next/image";
+import { ownerCancelBookingAction } from "@/lib/actions";
 import type { RequestItem } from "@/lib/queries";
 
 const GRID = "grid grid-cols-[1.4fr_1.2fr_1fr_0.9fr_0.8fr] items-center gap-2";
@@ -9,10 +11,24 @@ const GRID = "grid grid-cols-[1.4fr_1.2fr_1fr_0.9fr_0.8fr] items-center gap-2";
 const STATUS_LABEL: Record<string, string> = {
   accepted: "Confirmed",
   declined: "Declined",
+  cancelled: "Cancelled",
 };
 
 export default function RentRequests({ requests }: { requests: RequestItem[] }) {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
   const [latestFirst, setLatestFirst] = useState(true);
+  const [cancelling, setCancelling] = useState<RequestItem | null>(null);
+
+  function confirmCancel() {
+    if (!cancelling) return;
+    const id = cancelling.id;
+    startTransition(async () => {
+      await ownerCancelBookingAction(id);
+      setCancelling(null);
+      router.refresh();
+    });
+  }
 
   const sorted = [...requests].sort((a, b) =>
     latestFirst
@@ -70,12 +86,26 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
             <span className="truncate">{r.villa}</span>
             <span>{r.dates}</span>
             <span>{r.guests}</span>
-            <span
-              className={`text-right text-[13px] font-semibold ${
-                r.status === "declined" ? "text-[#eb5757]" : "text-brand"
-              }`}
-            >
-              {STATUS_LABEL[r.status] ?? "Confirmed"}
+            <span className="flex flex-col items-end gap-1.5 text-right">
+              <span
+                className={`text-[13px] font-semibold ${
+                  r.status === "declined" || r.status === "cancelled"
+                    ? "text-[#eb5757]"
+                    : "text-brand"
+                }`}
+              >
+                {STATUS_LABEL[r.status] ?? "Confirmed"}
+              </span>
+              {r.status === "accepted" && (
+                <button
+                  type="button"
+                  disabled={pending}
+                  onClick={() => setCancelling(r)}
+                  className="text-[13px] text-[#eb5757] underline hover:opacity-80 disabled:opacity-50"
+                >
+                  Cancel Booking
+                </button>
+              )}
             </span>
           </li>
         ))}
@@ -91,6 +121,50 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
         automatically — no approval needed. The booked dates are blocked for
         other guests right away.
       </p>
+
+      {cancelling && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Cancel this booking"
+          onClick={(e) => e.target === e.currentTarget && !pending && setCancelling(null)}
+        >
+          <div className="w-full max-w-[440px] rounded-[12px] bg-white p-6 shadow-[0px_20px_60px_0px_rgba(0,0,0,0.25)]">
+            <h3 className="text-[18px] font-semibold text-[#121212]">
+              Cancel this booking?
+            </h3>
+            <p className="mt-2 text-[14px] leading-relaxed text-[#4a4a4a]">
+              If you cancel {cancelling.tenant}&rsquo;s booking of{" "}
+              <span className="font-medium">{cancelling.villa}</span> (
+              {cancelling.dates}), you will need to give a{" "}
+              <span className="font-semibold text-[#eb5757]">100% refund</span>{" "}
+              of the amount paid.
+            </p>
+            <p className="mt-3 text-[14px] font-medium text-[#121212]">
+              Are you sure you want to cancel the booking?
+            </p>
+            <div className="mt-5 flex items-center justify-end gap-4">
+              <button
+                type="button"
+                disabled={pending}
+                onClick={() => setCancelling(null)}
+                className="text-[14px] text-[#7a7a85] underline disabled:opacity-50"
+              >
+                Keep booking
+              </button>
+              <button
+                type="button"
+                disabled={pending}
+                onClick={confirmCancel}
+                className="rounded-[8px] bg-[#eb5757] px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-[#d64545] disabled:opacity-60"
+              >
+                {pending ? "Cancelling…" : "Yes, cancel booking"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

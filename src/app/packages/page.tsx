@@ -79,9 +79,9 @@ function PackageCard({
 export default async function PackagesPage() {
   const user = await getCurrentUser();
   const excludeOwnerId = user?.id;
-  const cheapest = searchVillas({ sort: "price_asc", excludeOwnerId }).slice(0, 3);
-  const topRated = searchVillas({ sort: "rating", excludeOwnerId }).slice(0, 3);
-  const newest = searchVillas({ sort: "newest", excludeOwnerId }).slice(0, 3);
+  const cheapest = (await searchVillas({ sort: "price_asc", excludeOwnerId })).slice(0, 3);
+  const topRated = (await searchVillas({ sort: "rating", excludeOwnerId })).slice(0, 3);
+  const newest = (await searchVillas({ sort: "newest", excludeOwnerId })).slice(0, 3);
 
   const tiers: Tier[] = [
     {

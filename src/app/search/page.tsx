@@ -155,10 +155,13 @@ export default async function SearchPage({
   const checkIn = hasDates ? checkInRaw! : undefined;
   const checkOut = hasDates ? checkOutRaw! : undefined;
 
-  const favorites = user ? getFavoriteVillaIds(user.id) : new Set<number>();
-  let results = searchVillas(filters);
+  const favorites = user ? await getFavoriteVillaIds(user.id) : new Set<number>();
+  let results = await searchVillas(filters);
   if (checkIn && checkOut) {
-    results = results.filter((v) => isVillaAvailable(v.id, checkIn, checkOut));
+    const avail = await Promise.all(
+      results.map((v) => isVillaAvailable(v.id, checkIn, checkOut)),
+    );
+    results = results.filter((_, i) => avail[i]);
   }
 
   // Guest count from the hero flows through to the villa's booking card.

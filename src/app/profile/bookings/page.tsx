@@ -12,5 +12,5 @@ export default async function MyBookingsPage() {
   const user = await getCurrentUser();
   if (!user) return null; // layout renders the sign-in gate
 
-  return <MyBookings bookings={getBookingsForGuest(user.id)} />;
+  return <MyBookings bookings={await getBookingsForGuest(user.id)} />;
 }

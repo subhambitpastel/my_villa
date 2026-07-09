@@ -83,7 +83,7 @@ export default async function SettingsPage() {
   const user = await getCurrentUser();
   if (!user) return null; // layout renders the sign-in gate
 
-  const ownsVillas = getVillasByOwner(user.id).length > 0;
+  const ownsVillas = (await getVillasByOwner(user.id)).length > 0;
 
   return (
     <div className="rounded-lg border border-line/60 bg-white p-6 sm:p-[44px]">

@@ -1,14 +1,23 @@
-// SQLite data layer — server-side only. Uses Node's built-in sqlite module,
-// so there are no native dependencies to install.
-import { DatabaseSync } from "node:sqlite";
-import path from "node:path";
-import fs from "node:fs";
+// Postgres data layer — server-side only. Uses node-postgres (`pg`) with a
+// connection pool. A thin async facade keeps the old `getDb().prepare(sql)
+// .get/.all/.run(...)` shape, converts SQLite-style `?` placeholders to `$n`,
+// and routes queries made inside `tx()` to that transaction's client via
+// AsyncLocalStorage. Connection comes from DATABASE_URL.
+import pg from "pg";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { hashPasswordSync } from "./password";
 import { dayFromNow, formatRange } from "./dates";
+
+const { Pool } = pg;
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/db.ts must never be imported from client code.");
 }
+
+// bigint (COUNT/SUM) → number, numeric (ROUND/AVG) → number, so callers get
+// plain numbers instead of strings.
+pg.types.setTypeParser(20, (v) => parseInt(v, 10)); // int8 / bigint
+pg.types.setTypeParser(1700, (v) => parseFloat(v)); // numeric
 
 export type UserRow = {
   id: number;
@@ -68,13 +77,13 @@ export type BookingRow = {
   created_at: string;
 };
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const DB_PATH = path.join(DATA_DIR, "myvilla.db");
-
+// created_at stays a UTC "YYYY-MM-DD HH:MM:SS" text string (what timeAgo and the
+// host-joined parser expect); expires_at stays an ISO string compared against
+// new Date().toISOString(). SERIAL ids, REAL money, integer 0/1 flags.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  id            SERIAL PRIMARY KEY,
+  email         TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   full_name     TEXT NOT NULL DEFAULT '',
   gender        TEXT NOT NULL DEFAULT '',
@@ -86,18 +95,11 @@ CREATE TABLE IF NOT EXISTS users (
   country       TEXT NOT NULL DEFAULT '',
   avatar        TEXT NOT NULL DEFAULT '/images/host/avatar.png',
   hosting_enabled INTEGER NOT NULL DEFAULT 0,
-  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-  token      TEXT PRIMARY KEY,
-  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  expires_at TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at    TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
 CREATE TABLE IF NOT EXISTS villas (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  id          SERIAL PRIMARY KEY,
   owner_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name        TEXT NOT NULL,
   kind        TEXT NOT NULL DEFAULT 'Villa Living',
@@ -115,11 +117,18 @@ CREATE TABLE IF NOT EXISTS villas (
   reviews     INTEGER NOT NULL DEFAULT 0,
   image       TEXT NOT NULL DEFAULT '/images/host/photo-1.jpg',
   images      TEXT NOT NULL DEFAULT '[]',
-  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at  TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  token      TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
 CREATE TABLE IF NOT EXISTS bookings (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  id         SERIAL PRIMARY KEY,
   villa_id   INTEGER NOT NULL REFERENCES villas(id) ON DELETE CASCADE,
   guest_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   dates      TEXT NOT NULL DEFAULT '',
@@ -128,31 +137,31 @@ CREATE TABLE IF NOT EXISTS bookings (
   guests     INTEGER NOT NULL DEFAULT 1,
   status     TEXT NOT NULL DEFAULT 'accepted'
              CHECK (status IN ('pending','accepted','declined','cancelled','completed')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
 CREATE TABLE IF NOT EXISTS password_resets (
   token      TEXT PRIMARY KEY,
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   expires_at TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
 CREATE TABLE IF NOT EXISTS favorites (
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   villa_id   INTEGER NOT NULL REFERENCES villas(id) ON DELETE CASCADE,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS'),
   PRIMARY KEY (user_id, villa_id)
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  id         SERIAL PRIMARY KEY,
   booking_id INTEGER NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE,
   villa_id   INTEGER NOT NULL REFERENCES villas(id) ON DELETE CASCADE,
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   stars      INTEGER NOT NULL CHECK (stars BETWEEN 1 AND 5),
   comment    TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -162,62 +171,77 @@ CREATE INDEX IF NOT EXISTS idx_bookings_villa ON bookings(villa_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_villa ON reviews(villa_id);
 `;
 
-function seed(db: DatabaseSync) {
-  const hasUsers = db.prepare("SELECT COUNT(*) AS n FROM users").get() as {
-    n: number;
-  };
-  if (hasUsers.n > 0) return;
+/** Timestamp text (UTC "YYYY-MM-DD HH:MM:SS") offset by a Postgres interval. */
+const TS = (offsetParam: string) =>
+  `to_char((now() AT TIME ZONE 'UTC') + (${offsetParam})::interval, 'YYYY-MM-DD HH24:MI:SS')`;
+
+async function seed(pool: pg.Pool) {
+  const { rows } = await pool.query("SELECT COUNT(*)::int AS n FROM users");
+  if ((rows[0] as { n: number }).n > 0) return;
 
   const demoHash = hashPasswordSync("myvilla123");
-  const insertUser = db.prepare(
-    `INSERT INTO users (email, password_hash, full_name, gender, dob, address, country, avatar)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
+  const insUser = (
+    email: string,
+    name: string,
+    gender: string,
+    dob: string,
+    address: string,
+    country: string,
+    avatar: string,
+  ) =>
+    pool
+      .query(
+        `INSERT INTO users (email, password_hash, full_name, gender, dob, address, country, avatar)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+        [email, demoHash, name, gender, dob, address, country, avatar],
+      )
+      .then((r) => (r.rows[0] as { id: number }).id);
 
-  const tatiana = insertUser.run(
+  const tatiana = await insUser(
     "tatiana@myvilla.com",
-    demoHash,
     "Tatiana David",
     "Female",
     "January 16, 1991",
     "The Bund, Shanghai",
     "China",
     "/images/host/avatar.png",
-  ).lastInsertRowid as number;
+  );
 
-  const tenants = [
+  const tenants: number[] = [];
+  for (const [email, name, avatar] of [
     ["alena@myvilla.com", "Alena James", "/images/profile/tenant-1.jpg"],
     ["rachiel@myvilla.com", "Rachiel Simen", "/images/profile/tenant-2.jpg"],
     ["micheal@myvilla.com", "Micheal Han", "/images/profile/tenant-3.jpg"],
     ["alex@myvilla.com", "Alex Whitmen", "/images/profile/tenant-4.jpg"],
-  ].map(
-    ([email, name, avatar]) =>
-      insertUser.run(email, demoHash, name, "", "", "", "", avatar)
-        .lastInsertRowid as number,
-  );
+  ]) {
+    tenants.push(await insUser(email, name, "", "", "", "", avatar));
+  }
 
-  const insertVilla = db.prepare(
-    `INSERT INTO villas (owner_id, name, kind, city, address, price, rating, reviews, image, facilities, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?))`,
-  );
   const FACILITIES = JSON.stringify(["Wifi", "Free Parking"]);
+  const insVilla = (
+    owner: number,
+    name: string,
+    kind: string,
+    city: string,
+    address: string,
+    price: number,
+    rating: number,
+    reviews: number,
+    image: string,
+    createdOffset: string,
+  ) =>
+    pool
+      .query(
+        `INSERT INTO villas (owner_id, name, kind, city, address, price, rating, reviews, image, facilities, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, ${TS("$11")}) RETURNING id`,
+        [owner, name, kind, city, address, price, rating, reviews, image, FACILITIES, createdOffset],
+      )
+      .then((r) => (r.rows[0] as { id: number }).id);
 
-  // Tatiana's own listings (shown under Profile > My Properties).
-  const bund = insertVilla.run(
-    tatiana, "The Bund", "Villa Living", "Shanghai", "The Bund, Shanghai",
-    137, 4.69, 32, "/images/profile/prop-1.jpg", FACILITIES, "-21 days",
-  ).lastInsertRowid as number;
-  insertVilla.run(
-    tatiana, "The Bund", "Villa Living", "Shanghai", "The Bund, Shanghai",
-    137, 4.69, 32, "/images/profile/prop-2.jpg", FACILITIES, "-2 months",
-  );
-  const hunza = insertVilla.run(
-    tatiana, "Hunza Luxus", "Resort", "Pakistan", "Hunza Valley, Pakistan",
-    105, 4.69, 32, "/images/profile/prop-3.jpg", FACILITIES, "-4 months",
-  ).lastInsertRowid as number;
+  const bund = await insVilla(tatiana, "The Bund", "Villa Living", "Shanghai", "The Bund, Shanghai", 137, 4.69, 32, "/images/profile/prop-1.jpg", "-21 days");
+  await insVilla(tatiana, "The Bund", "Villa Living", "Shanghai", "The Bund, Shanghai", 137, 4.69, 32, "/images/profile/prop-2.jpg", "-2 months");
+  const hunza = await insVilla(tatiana, "Hunza Luxus", "Resort", "Pakistan", "Hunza Valley, Pakistan", 105, 4.69, 32, "/images/profile/prop-3.jpg", "-4 months");
 
-  // Browsing catalog (home page cards + search results). Kinds are spread so
-  // the hero's Resort / Hotels / Rent tabs each return results.
   const catalog: Array<[string, string, string, number, string]> = [
     ["The Bund", "Resort", "Shanghai", 137, "/images/card-bund-1.png"],
     ["The Bund", "Hotel", "Shanghai", 137, "/images/card-bund-2.png"],
@@ -230,24 +254,29 @@ function seed(db: DatabaseSync) {
   ];
   let shan = 0;
   for (const [name, kind, city, price, image] of catalog) {
-    const id = insertVilla.run(
-      tatiana, name, kind, city, `${name}, ${city}`,
-      price, 4.69, 32, image, FACILITIES, "-5 months",
-    ).lastInsertRowid as number;
+    const id = await insVilla(tatiana, name, kind, city, `${name}, ${city}`, price, 4.69, 32, image, "-5 months");
     if (name === "The Shan Luxus") shan = id;
   }
 
-  // Bookings on Tatiana's villas → they appear as her rent requests, and as
-  // the tenants' bookings. Paid at checkout, so active stays are confirmed.
-  // Every booking carries real check_in/check_out dates (not just a text
-  // label) so it participates in availability: an active stay genuinely blocks
-  // those days on the villa's calendar, and the display label is derived from
-  // the same dates so lists and the calendar can never disagree.
-  const insertBooking = db.prepare(
-    `INSERT INTO bookings (villa_id, guest_id, dates, check_in, check_out, guests, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', ?))`,
-  );
-  function book(
+  const insBooking = (
+    villaId: number,
+    guestId: number,
+    dates: string,
+    checkIn: string,
+    checkOut: string,
+    guests: number,
+    status: string,
+    createdOffset: string,
+  ) =>
+    pool
+      .query(
+        `INSERT INTO bookings (villa_id, guest_id, dates, check_in, check_out, guests, status, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7, ${TS("$8")}) RETURNING id`,
+        [villaId, guestId, dates, checkIn, checkOut, guests, status, createdOffset],
+      )
+      .then((r) => (r.rows[0] as { id: number }).id);
+
+  const book = (
     villaId: number,
     tenantIdx: number,
     inOffset: number,
@@ -255,34 +284,19 @@ function seed(db: DatabaseSync) {
     guests: number,
     status: string,
     createdOffset: string,
-  ): number {
+  ) => {
     const checkIn = dayFromNow(inOffset);
     const checkOut = dayFromNow(outOffset);
-    return insertBooking.run(
-      villaId,
-      tenants[tenantIdx],
-      formatRange(checkIn, checkOut),
-      checkIn,
-      checkOut,
-      guests,
-      status,
-      createdOffset,
-    ).lastInsertRowid as number;
-  }
+    return insBooking(villaId, tenants[tenantIdx], formatRange(checkIn, checkOut), checkIn, checkOut, guests, status, createdOffset);
+  };
 
-  // Active confirmed stays sit in the near future so they really do block those
-  // dates on the villa's calendar (this is what demonstrates availability);
-  // completed stays are safely in the past and never block.
-  book(bund, 0, 20, 23, 3, "accepted", "-3 days");
-  book(bund, 1, 33, 36, 4, "accepted", "-2 days");
-  book(hunza, 2, 14, 21, 1, "accepted", "-5 days");
-  book(hunza, 3, 45, 47, 5, "accepted", "-1 days");
-  book(bund, 0, -48, -45, 3, "completed", "-2 months");
-  book(hunza, 1, -80, -76, 4, "completed", "-3 months");
+  await book(bund, 0, 20, 23, 3, "accepted", "-3 days");
+  await book(bund, 1, 33, 36, 4, "accepted", "-2 days");
+  await book(hunza, 2, 14, 21, 1, "accepted", "-5 days");
+  await book(hunza, 3, 45, 47, 5, "accepted", "-1 days");
+  await book(bund, 0, -48, -45, 3, "completed", "-2 months");
+  await book(hunza, 1, -80, -76, 4, "completed", "-3 months");
 
-  // Real written reviews — each is a completed stay so the villa pages render
-  // genuine review cards (and the aggregates below are derived from them, not
-  // fabricated). villaId, tenantIdx, inOffset, outOffset, guests, ageOffset, stars, comment.
   const seedReviews: Array<[number, number, number, number, number, string, number, string]> = [
     [bund, 0, -60, -57, 3, "-2 months", 5, "Absolutely stunning views over the Bund. Spotless throughout, and the host left a welcome basket. Would book again in a heartbeat."],
     [bund, 1, -95, -91, 2, "-3 months", 4, "Great location right by the water. Warm, comfortable apartment and a smooth check-in."],
@@ -291,80 +305,30 @@ function seed(db: DatabaseSync) {
     [shan, 0, -62, -58, 2, "-2 months", 5, "The Shan Luxus lived up to its name — modern, quiet and beautifully finished. Highly recommend."],
     [shan, 3, -35, -32, 3, "-1 months", 4, "Comfortable stay, responsive host, and a lovely neighbourhood to explore in the evenings."],
   ];
-  const insertReview = db.prepare(
-    `INSERT INTO reviews (booking_id, villa_id, user_id, stars, comment, created_at)
-     VALUES (?, ?, ?, ?, ?, datetime('now', ?))`,
-  );
   for (const [villaId, tIdx, inOff, outOff, guests, age, stars, comment] of seedReviews) {
-    const bookingId = book(villaId, tIdx, inOff, outOff, guests, "completed", age);
-    insertReview.run(bookingId, villaId, tenants[tIdx], stars, comment, age);
+    const bookingId = await book(villaId, tIdx, inOff, outOff, guests, "completed", age);
+    await pool.query(
+      `INSERT INTO reviews (booking_id, villa_id, user_id, stars, comment, created_at)
+       VALUES ($1,$2,$3,$4,$5, ${TS("$6")})`,
+      [bookingId, villaId, tenants[tIdx], stars, comment, age],
+    );
   }
-  // Derive the reviewed villas' aggregates from their real reviews so the
-  // displayed rating/count matches the cards shown.
-  db.exec(
+
+  // Seed villas are inserted without a gallery — give each its cover plus stock
+  // interior shots (matches the old SQLite backfill).
+  await pool.query(
+    `UPDATE villas
+       SET images = json_build_array(image, '/images/interior-living.jpg', '/images/interior-kitchen.jpg', '/images/bedroom.jpg', '/images/interior-bath.jpg')::text
+     WHERE images = '[]'`,
+  );
+
+  // Derive reviewed villas' aggregates from their real reviews.
+  await pool.query(
     `UPDATE villas SET
        reviews = (SELECT COUNT(*) FROM reviews WHERE villa_id = villas.id),
-       rating  = COALESCE((SELECT ROUND(AVG(stars), 2) FROM reviews WHERE villa_id = villas.id), 0)
+       rating  = COALESCE((SELECT ROUND(AVG(stars)::numeric, 2) FROM reviews WHERE villa_id = villas.id), 0)
      WHERE id IN (SELECT DISTINCT villa_id FROM reviews)`,
   );
-}
-
-/** Add columns introduced after the first release to databases created before them. */
-function migrate(db: DatabaseSync) {
-  const cols = (table: string) =>
-    (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(
-      (c) => c.name,
-    );
-
-  // try/catch: concurrent processes (e.g. parallel build workers) may race on
-  // the same ALTER; "duplicate column name" from the loser is harmless.
-  const addColumn = (table: string, column: string, ddl: string) => {
-    if (cols(table).includes(column)) return;
-    try {
-      db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
-    } catch {
-      /* another process added it first */
-    }
-  };
-  addColumn("villas", "images", "images TEXT NOT NULL DEFAULT '[]'");
-  addColumn("villas", "max_guests", "max_guests INTEGER NOT NULL DEFAULT 8");
-  addColumn("bookings", "check_in", "check_in TEXT NOT NULL DEFAULT ''");
-  addColumn("bookings", "check_out", "check_out TEXT NOT NULL DEFAULT ''");
-  addColumn(
-    "users",
-    "hosting_enabled",
-    "hosting_enabled INTEGER NOT NULL DEFAULT 0",
-  );
-  addColumn("reviews", "comment", "comment TEXT NOT NULL DEFAULT ''");
-  // Existing hosts keep their tools unlocked.
-  db.exec(
-    "UPDATE users SET hosting_enabled = 1 WHERE hosting_enabled = 0 AND id IN (SELECT DISTINCT owner_id FROM villas)",
-  );
-
-  // Bookings are paid at checkout and confirm instantly — the owner no longer
-  // accepts/declines. Requests still waiting on the old flow count as paid,
-  // so confirm them rather than leaving them stuck forever.
-  db.exec("UPDATE bookings SET status = 'accepted' WHERE status = 'pending'");
-
-  // Villas without a gallery get their cover plus stock interior shots.
-  const bare = db
-    .prepare("SELECT id, image FROM villas WHERE images = '[]'")
-    .all() as { id: number; image: string }[];
-  if (bare.length > 0) {
-    const fill = db.prepare("UPDATE villas SET images = ? WHERE id = ?");
-    for (const v of bare) {
-      fill.run(
-        JSON.stringify([
-          v.image,
-          "/images/interior-living.jpg",
-          "/images/interior-kitchen.jpg",
-          "/images/bedroom.jpg",
-          "/images/interior-bath.jpg",
-        ]),
-        v.id,
-      );
-    }
-  }
 }
 
 /**
@@ -379,67 +343,133 @@ function shouldSeedDemo(): boolean {
   return process.env.NODE_ENV !== "production";
 }
 
-function open(): DatabaseSync {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const db = new DatabaseSync(DB_PATH);
-  db.exec("PRAGMA journal_mode = WAL;");
-  db.exec("PRAGMA foreign_keys = ON;");
-  db.exec(SCHEMA);
-  migrate(db);
-  if (shouldSeedDemo()) seed(db);
-  // Sweep expired sessions/reset tokens so those tables don't grow forever
-  // (they were previously only filtered out at read time).
+function connectionConfig(): pg.PoolConfig {
+  const connectionString =
+    process.env.DATABASE_URL ||
+    "postgresql://myvilla:myvilla@localhost:5432/myvilla";
+  // Cloud SQL over public IP wants SSL; the Auth Proxy / local Postgres don't.
+  const ssl =
+    process.env.PGSSLMODE === "require"
+      ? { rejectUnauthorized: false }
+      : undefined;
+  return { connectionString, ssl, max: 10 };
+}
+
+async function init(): Promise<pg.Pool> {
+  const pool = new Pool(connectionConfig());
+  await pool.query(SCHEMA);
+  if (shouldSeedDemo()) await seed(pool);
+  // Sweep expired sessions / reset tokens so those tables don't grow forever.
   try {
-    db.exec(
-      "DELETE FROM sessions WHERE expires_at < datetime('now');" +
-        "DELETE FROM password_resets WHERE expires_at < datetime('now');",
-    );
+    const now = new Date().toISOString();
+    await pool.query("DELETE FROM sessions WHERE expires_at < $1", [now]);
+    await pool.query("DELETE FROM password_resets WHERE expires_at < $1", [now]);
   } catch {
     /* non-fatal housekeeping */
   }
-  // Fold the WAL back into the main file so data survives hard process kills.
-  try {
-    db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
-  } catch {
-    /* another connection holds the WAL — checkpoint later */
-  }
-  return db;
+  return pool;
 }
 
-// Reuse one connection across hot reloads in dev (module state resets on HMR).
-const globalForDb = globalThis as unknown as { __myvillaDb?: DatabaseSync };
+// One pool + one init across hot reloads (module state resets on HMR).
+const globalForDb = globalThis as unknown as { __myvillaPool?: Promise<pg.Pool> };
 
-export function getDb(): DatabaseSync {
-  if (!globalForDb.__myvillaDb) {
-    globalForDb.__myvillaDb = open();
-  }
-  return globalForDb.__myvillaDb;
+function getReady(): Promise<pg.Pool> {
+  if (!globalForDb.__myvillaPool) globalForDb.__myvillaPool = init();
+  return globalForDb.__myvillaPool;
+}
+
+// Queries made inside tx() run on that transaction's client (set here) instead
+// of a fresh pooled connection, so a check-then-write stays atomic.
+const txStore = new AsyncLocalStorage<pg.PoolClient>();
+
+/** SQLite-style `?` placeholders → Postgres `$1, $2, …`. */
+function toPg(sql: string): string {
+  let i = 0;
+  return sql.replace(/\?/g, () => `$${++i}`);
+}
+
+async function run(
+  sql: string,
+  params: unknown[],
+): Promise<pg.QueryResult> {
+  const runner = txStore.getStore() ?? (await getReady());
+  return runner.query(sql, params);
+}
+
+type Stmt = {
+  get: <T = unknown>(...params: unknown[]) => Promise<T | undefined>;
+  all: <T = unknown>(...params: unknown[]) => Promise<T[]>;
+  run: (
+    ...params: unknown[]
+  ) => Promise<{ changes: number; lastInsertRowid?: number }>;
+};
+
+type Db = {
+  prepare: (sql: string) => Stmt;
+  exec: (sql: string) => Promise<void>;
+};
+
+/**
+ * Async facade over the pool that mirrors the old sqlite API: `getDb()
+ * .prepare(sql).get/all/run(...params)`. Placeholders are `?` (converted to
+ * `$n`); INSERTs that need the new id must add `RETURNING id` and read
+ * `.run().lastInsertRowid`.
+ */
+export function getDb(): Db {
+  return {
+    prepare(sql: string): Stmt {
+      const text = toPg(sql);
+      return {
+        async get<T>(...params: unknown[]) {
+          const r = await run(text, params);
+          return r.rows[0] as T | undefined;
+        },
+        async all<T>(...params: unknown[]) {
+          const r = await run(text, params);
+          return r.rows as T[];
+        },
+        async run(...params: unknown[]) {
+          const r = await run(text, params);
+          return {
+            changes: r.rowCount ?? 0,
+            lastInsertRowid: (r.rows[0] as { id?: number } | undefined)?.id,
+          };
+        },
+      };
+    },
+    async exec(sql: string) {
+      await run(toPg(sql), []);
+    },
+  };
 }
 
 /**
- * Run `fn` inside an IMMEDIATE write transaction — everything commits together
- * or rolls back on throw. IMMEDIATE takes the write lock up front so a
- * check-then-insert (e.g. availability → booking) can't interleave with
- * another writer. Safe to call with a single shared connection.
+ * Run `fn` inside a transaction — everything commits together or rolls back on
+ * throw. All queries made inside `fn` (via getDb()) run on the transaction's
+ * client through AsyncLocalStorage, so a check-then-write can't interleave with
+ * another writer.
  */
-export function tx<T>(fn: () => T): T {
-  const db = getDb();
-  db.exec("BEGIN IMMEDIATE");
+export async function tx<T>(fn: () => Promise<T> | T): Promise<T> {
+  const pool = await getReady();
+  const client = await pool.connect();
   try {
-    const result = fn();
-    db.exec("COMMIT");
+    await client.query("BEGIN");
+    const result = await txStore.run(client, async () => fn());
+    await client.query("COMMIT");
     return result;
   } catch (e) {
     try {
-      db.exec("ROLLBACK");
+      await client.query("ROLLBACK");
     } catch {
-      /* transaction already aborted by SQLite */
+      /* already aborted */
     }
     throw e;
+  } finally {
+    client.release();
   }
 }
 
-/** "Posted 3 weeks ago" style label from a sqlite datetime('now') timestamp. */
+/** "Posted 3 weeks ago" style label from a UTC "YYYY-MM-DD HH:MM:SS" timestamp. */
 export function timeAgo(sqliteUtc: string, prefix = ""): string {
   const then = new Date(sqliteUtc.replace(" ", "T") + "Z").getTime();
   const mins = Math.max(0, Math.round((Date.now() - then) / 60000));

@@ -2,11 +2,13 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { nightsBetween, formatRange } from "@/lib/dates";
 import { quote } from "@/lib/pricing";
 import { loginHref } from "@/lib/returnTo";
 import DateRangeField from "@/components/home/DateRangeField";
 import type { BookedRange } from "@/lib/queries";
+import type { VillaService } from "@/components/host/draft";
 
 /* eslint-disable @next/next/no-img-element */
 
@@ -22,6 +24,7 @@ export default function BookingCard({
   today,
   bookedRanges,
   authed,
+  services = [],
 }: {
   villaId: number;
   price: number;
@@ -35,6 +38,8 @@ export default function BookingCard({
   today: string;
   bookedRanges: BookedRange[];
   authed: boolean;
+  /** Extra services the host offers; picked in a dialog on Reserve. */
+  services?: VillaService[];
 }) {
   // The guest picker runs 1..maxGuests (owner-defined); at least 1 option.
   const guestOptions = Math.max(1, maxGuests);
@@ -43,22 +48,47 @@ export default function BookingCard({
   const [guests, setGuests] = useState(
     Math.min(Math.max(1, defaultGuests), guestOptions),
   );
+  const router = useRouter();
+  // Availability isn't announced up front — the message only appears if the
+  // guest tries to reserve a range that's actually taken (checked on click).
+  const [showUnavailable, setShowUnavailable] = useState(false);
 
   const nights = Math.max(0, nightsBetween(checkIn, checkOut));
   const unavailable =
     nights >= 1 &&
     bookedRanges.some((r) => r.checkIn < checkOut && r.checkOut > checkIn);
-  const valid = nights >= 1 && !unavailable && checkIn >= today;
+  const datesReady = nights >= 1 && checkIn >= today;
   const q = quote(price, nights);
 
+  // Extra services chosen in the Reserve dialog (indices into `services`).
+  const [showServices, setShowServices] = useState(false);
+  const [chosen, setChosen] = useState<number[]>([]);
+  const chosenTotal = chosen.reduce((sum, i) => sum + (services[i]?.price ?? 0), 0);
+
   const paymentUrl = `/payment?villa=${villaId}&in=${checkIn}&out=${checkOut}&guests=${guests}`;
-  // Booking requires an account — signed-out guests sign in first and land
-  // back on this exact checkout.
-  const reserveHref = valid
-    ? authed
-      ? paymentUrl
-      : loginHref(paymentUrl)
-    : undefined;
+
+  // Checkout carries the picked services as indices; prices are re-read from
+  // the villa on the server, so the client can never set its own amounts.
+  function goToPayment(serviceIdx: number[]) {
+    const url =
+      serviceIdx.length > 0 ? `${paymentUrl}&svc=${serviceIdx.join(",")}` : paymentUrl;
+    // Booking requires an account — signed-out guests sign in first and land
+    // back on this exact checkout.
+    router.push(authed ? url : loginHref(url));
+  }
+
+  function handleReserve() {
+    if (!datesReady) return;
+    if (unavailable) {
+      setShowUnavailable(true);
+      return;
+    }
+    if (services.length > 0) {
+      setShowServices(true);
+      return;
+    }
+    goToPayment([]);
+  }
 
   return (
     <aside className="h-fit w-full min-w-0 max-w-[576px] rounded-[20px] bg-white px-[41px] py-[48px] shadow-[0px_15px_50px_0px_rgba(0,0,0,0.18)] lg:mt-[60px]">
@@ -87,6 +117,7 @@ export default function BookingCard({
           onChange={(nextIn, nextOut) => {
             setCheckIn(nextIn ?? "");
             setCheckOut(nextOut ?? "");
+            setShowUnavailable(false);
           }}
         />
       </div>
@@ -127,46 +158,31 @@ export default function BookingCard({
         </select>
       </label>
 
-      {/* Availability is spelled out before the guest ever reaches payment:
-          green when the chosen range is free, red when it clashes with a
-          confirmed stay. */}
-      {nights >= 1 && checkIn >= today && (
+      <button
+        type="button"
+        onClick={handleReserve}
+        disabled={!datesReady}
+        className="mt-[25px] flex h-16 w-full items-center justify-center rounded-[10px] bg-brand text-[20px] font-medium text-white transition-colors hover:bg-brand-dark disabled:cursor-not-allowed disabled:bg-brand/40"
+      >
+        Reserve
+      </button>
+
+      {/* Only shown when the guest actually tries to book a taken range. */}
+      {showUnavailable && unavailable && (
         <p
-          role="status"
-          className={`mt-[22px] flex items-center gap-2.5 rounded-[10px] px-4 py-3 text-[15px] font-medium ${
-            unavailable
-              ? "bg-[#fdecec] text-[#c0392b]"
-              : "bg-[#eafaf1] text-[#1b8a4b]"
-          }`}
+          role="alert"
+          className="mt-4 flex items-center gap-2.5 rounded-[10px] bg-[#fdecec] px-4 py-3 text-[15px] font-medium text-[#c0392b]"
         >
           <span
             aria-hidden
-            className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[13px] leading-none text-white ${
-              unavailable ? "bg-[#c0392b]" : "bg-[#1b8a4b]"
-            }`}
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#c0392b] text-[13px] leading-none text-white"
           >
-            {unavailable ? "!" : "✓"}
+            !
           </span>
           <span>
-            {unavailable
-              ? `Already booked for ${formatRange(checkIn, checkOut)}`
-              : `Available for ${formatRange(checkIn, checkOut)}`}
+            This villa is already booked for {formatRange(checkIn, checkOut)}.
+            Please choose different dates.
           </span>
-        </p>
-      )}
-
-      {reserveHref ? (
-        <Link
-          href={reserveHref}
-          className="mt-[25px] flex h-16 items-center justify-center rounded-[10px] bg-brand text-[20px] font-medium text-white transition-colors hover:bg-brand-dark"
-        >
-          Reserve
-        </Link>
-      ) : (
-        <p className="mt-[25px] flex h-16 items-center justify-center rounded-[10px] bg-brand/40 px-4 text-center text-[16px] font-medium text-white">
-          {unavailable
-            ? "Choose different dates to reserve"
-            : "Pick valid dates to reserve"}
         </p>
       )}
 
@@ -196,6 +212,75 @@ export default function BookingCard({
       <p className="mt-4 text-center text-[13px] text-[#7a7a85]">
         Stay 7+ nights for 15% off, 28+ nights for 30% off — applied automatically.
       </p>
+
+      {showServices && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Add extra services"
+          onClick={(e) => e.target === e.currentTarget && setShowServices(false)}
+        >
+          <div className="w-full max-w-[460px] rounded-[12px] bg-white p-6 shadow-[0px_20px_60px_0px_rgba(0,0,0,0.25)]">
+            <h3 className="text-[18px] font-semibold text-[#121212]">
+              Add extra services
+            </h3>
+            <p className="mt-1 text-[13px] text-[#7a7a85]">
+              Services offered by the host for your stay — paid ones are added
+              to your total.
+            </p>
+            <ul className="mt-4 max-h-[300px] space-y-3 overflow-y-auto">
+              {services.map((s, i) => (
+                <li key={s.name}>
+                  <label className="flex cursor-pointer items-center gap-2.5 text-[14px] text-[#121212]">
+                    <input
+                      type="checkbox"
+                      checked={chosen.includes(i)}
+                      onChange={() =>
+                        setChosen((cur) =>
+                          cur.includes(i)
+                            ? cur.filter((x) => x !== i)
+                            : [...cur, i],
+                        )
+                      }
+                      className="checkbox-brand"
+                    />
+                    <span className="min-w-0 flex-1">{s.name}</span>
+                    <span
+                      className={`shrink-0 text-[13px] font-semibold ${
+                        s.price > 0 ? "text-brand" : "text-[#7a7a85]"
+                      }`}
+                    >
+                      {s.price > 0 ? `+$${s.price.toFixed(2)}` : "Free"}
+                    </span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+            <hr className="mt-4 border-t border-[#e3e3e8]" />
+            <div className="mt-3 flex items-center justify-between text-[15px] font-semibold text-[#121212]">
+              <span>Total before taxes</span>
+              <span>${(q.total + chosenTotal).toFixed(2)}</span>
+            </div>
+            <div className="mt-5 flex items-center justify-end gap-4">
+              <button
+                type="button"
+                onClick={() => goToPayment([])}
+                className="text-[14px] text-[#7a7a85] underline"
+              >
+                Skip
+              </button>
+              <button
+                type="button"
+                onClick={() => goToPayment(chosen)}
+                className="rounded-[8px] bg-brand px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-brand-dark"
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </aside>
   );
 }

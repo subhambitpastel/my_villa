@@ -11,7 +11,7 @@ export type SessionUser = Omit<UserRow, "password_hash">;
 export async function createSession(userId: number) {
   const token = randomBytes(32).toString("hex");
   const expires = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
-  getDb()
+  await getDb()
     .prepare("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)")
     .run(token, userId, expires.toISOString());
 
@@ -29,7 +29,7 @@ export async function destroySession() {
   const cookieStore = await cookies();
   const token = cookieStore.get(COOKIE_NAME)?.value;
   if (token) {
-    getDb().prepare("DELETE FROM sessions WHERE token = ?").run(token);
+    await getDb().prepare("DELETE FROM sessions WHERE token = ?").run(token);
   }
   cookieStore.delete(COOKIE_NAME);
 }
@@ -39,7 +39,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   const token = cookieStore.get(COOKIE_NAME)?.value;
   if (!token) return null;
 
-  const row = getDb()
+  const row = (await getDb()
     .prepare(
       `SELECT u.id, u.email, u.full_name, u.gender, u.dob, u.address, u.emergency,
               u.phone_code, u.phone_number, u.country, u.avatar, u.hosting_enabled,
@@ -47,7 +47,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
        FROM sessions s JOIN users u ON u.id = s.user_id
        WHERE s.token = ? AND s.expires_at > ?`,
     )
-    .get(token, new Date().toISOString()) as SessionUser | undefined;
+    .get(token, new Date().toISOString())) as SessionUser | undefined;
 
   return row ?? null;
 }

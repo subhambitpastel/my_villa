@@ -54,15 +54,14 @@ export const DIAL_CODES: { country: string; code: string }[] = [
   { country: "Vietnam", code: "+84" },
 ];
 
-/** Unique dial codes for pickers — countries sharing a code are merged
- *  into one option (e.g. "+1 Canada / United States"). */
-export const DIAL_CODE_OPTIONS: { code: string; label: string }[] = (() => {
-  const byCode = new Map<string, string[]>();
-  for (const { code, country } of DIAL_CODES) {
-    byCode.set(code, [...(byCode.get(code) ?? []), country]);
-  }
-  return [...byCode.entries()].map(([code, countries]) => ({
-    code,
-    label: `${code} ${countries.join(" / ")}`,
-  }));
-})();
+/** Picker options, one per country with the name first so the native
+ *  select type-ahead matches what users type ("i" → India). The value
+ *  carries the country too, keeping shared codes like +1 unique per
+ *  option — normalize with dialCodeFromValue() before storing. */
+export const DIAL_CODE_OPTIONS = DIAL_CODES.map(({ country, code }) => ({
+  value: `${code}|${country}`,
+  label: `${country} (${code})`,
+}));
+
+/** "+1|Canada" → "+1" (also passes through already-plain codes). */
+export const dialCodeFromValue = (value: string) => value.split("|")[0];

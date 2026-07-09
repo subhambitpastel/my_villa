@@ -13,7 +13,7 @@ export default async function MyFavoritesPage() {
   const user = await getCurrentUser();
   if (!user) return null; // layout renders the sign-in gate
 
-  const favorites: Villa[] = getFavoriteVillas(user.id).map((v) => ({
+  const favorites: Villa[] = (await getFavoriteVillas(user.id)).map((v) => ({
     id: v.id,
     name: v.name,
     city: v.city,
