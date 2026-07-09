@@ -1,0 +1,25 @@
+<svg preserveAspectRatio="none" width="100%" height="100%" overflow="visible" style="display: block;" viewBox="0 0 126 172" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Frame 176" filter="url(#filter0_d_0_293)">
+<rect x="50" y="50" width="26" height="72" rx="5" fill="var(--fill-0, white)" shape-rendering="crispEdges"/>
+<g id="ant-design:plus-outlined">
+<path id="Vector" d="M62.5312 62.375H63.4688C63.5521 62.375 63.5938 62.4167 63.5938 62.5V73.5C63.5938 73.5833 63.5521 73.625 63.4688 73.625H62.5312C62.4479 73.625 62.4062 73.5833 62.4062 73.5V62.5C62.4062 62.4167 62.4479 62.375 62.5312 62.375Z" fill="var(--fill-0, black)"/>
+<path id="Vector_2" d="M57.75 67.4062H68.25C68.3333 67.4062 68.375 67.4479 68.375 67.5312V68.4688C68.375 68.5521 68.3333 68.5938 68.25 68.5938H57.75C57.6667 68.5938 57.625 68.5521 57.625 68.4688V67.5312C57.625 67.4479 57.6667 67.4062 57.75 67.4062Z" fill="var(--fill-0, black)"/>
+</g>
+<line id="Line 11" x1="55.5" y1="85.825" x2="70.5" y2="85.825" stroke="var(--stroke-0, #9B9B9B)" stroke-width="0.35"/>
+<g id="ant-design:minus-outlined">
+<path id="Vector_3" d="M68.625 103.406H57.375C57.3062 103.406 57.25 103.462 57.25 103.531V104.469C57.25 104.538 57.3062 104.594 57.375 104.594H68.625C68.6938 104.594 68.75 104.538 68.75 104.469V103.531C68.75 103.462 68.6938 103.406 68.625 103.406Z" fill="var(--fill-0, black)"/>
+</g>
+</g>
+<defs>
+<filter id="filter0_d_0_293" x="0" y="0" width="126" height="172" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+<feFlood flood-opacity="0" result="BackgroundImageFix"/>
+<feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+<feOffset/>
+<feGaussianBlur stdDeviation="25"/>
+<feComposite in2="hardAlpha" operator="out"/>
+<feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.15 0"/>
+<feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_0_293"/>
+<feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_0_293" result="shape"/>
+</filter>
+</defs>
+</svg>

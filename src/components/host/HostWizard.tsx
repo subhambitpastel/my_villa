@@ -1,0 +1,1308 @@
+"use client";
+
+import { useRef, useState, useTransition } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import {
+  createVillaAction,
+  updateAvatarAction,
+  updateVillaAction,
+  uploadImagesAction,
+} from "@/lib/actions";
+import { useMounted } from "@/lib/useMounted";
+import SignInGate from "@/components/account/SignInGate";
+
+const STEPS = [
+  "Personal Details",
+  "Villa Details",
+  "Add Images",
+  "Extra Services",
+  "Pricing",
+  "Payment Method",
+] as const;
+
+const DRAFT_KEY = "myvilla.hostDraft";
+
+export type Draft = {
+  step: number;
+  personal: {
+    fullName: string;
+    gender: string;
+    email: string;
+    dob: string;
+    address: string;
+    emergency: string;
+  };
+  villa: {
+    kind: string;
+    name: string;
+    description: string;
+    area: string;
+    address: string;
+    city: string;
+    rooms: string;
+    bathrooms: string;
+    maxGuests: string;
+    facilities: string[];
+  };
+  images: string[];
+  services: { selected: string[]; custom: string };
+  price: number;
+  payment: { methods: string[]; accountType: string; cardNumber: string };
+};
+
+const DEFAULT_IMAGES = [
+  "/images/host/photo-1.jpg",
+  "/images/host/photo-2.jpg",
+  "/images/host/photo-3.jpg",
+  "/images/host/photo-4.jpg",
+  "/images/host/photo-5.jpg",
+  "/images/host/photo-6.jpg",
+];
+
+export const DEFAULT_DRAFT: Draft = {
+  step: 0,
+  personal: { fullName: "", gender: "", email: "", dob: "", address: "", emergency: "" },
+  villa: {
+    kind: "Villa Living",
+    name: "",
+    description: "",
+    area: "",
+    address: "",
+    city: "",
+    rooms: "",
+    bathrooms: "",
+    maxGuests: "",
+    facilities: [],
+  },
+  images: DEFAULT_IMAGES,
+  services: { selected: [], custom: "" },
+  price: 135,
+  payment: { methods: ["Mastercard", "G Pay", "PayPal", "VISA"], accountType: "", cardNumber: "" },
+};
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const label = "mb-2 block text-[16px] text-brand";
+const input =
+  "block w-full rounded-[8px] border border-[#d9d9d9] bg-white px-4 py-2.5 text-[15px] text-ink placeholder:text-[#9d9da6] focus:outline-none focus:border-brand focus:ring-2 focus:ring-brand/20";
+
+// Numeric-only fields (area, rooms, bathrooms, guests): strip anything that
+// isn't a digit as the guest types, so letters can never be entered. Works on
+// uncontrolled inputs (defaultValue + FormData) by correcting the DOM value.
+function onlyDigits(e: React.FormEvent<HTMLInputElement>) {
+  const el = e.currentTarget;
+  const cleaned = el.value.replace(/\D/g, "");
+  if (cleaned !== el.value) el.value = cleaned;
+}
+
+function ErrorText({ children }: { children: React.ReactNode }) {
+  return (
+    <p role="alert" className="mt-1 text-sm text-red-600">
+      {children}
+    </p>
+  );
+}
+
+function SaveAndNext({ children = "Save and Next" }: { children?: React.ReactNode }) {
+  return (
+    <div className="mt-8 flex justify-end">
+      <button
+        type="submit"
+        className="rounded-[8px] bg-brand px-7 py-2.5 text-[13px] font-semibold text-white transition-colors hover:bg-brand-dark"
+      >
+        {children}
+      </button>
+    </div>
+  );
+}
+
+/* ---------------- Stepper ---------------- */
+
+function Stepper({ current }: { current: number }) {
+  return (
+    <ol className="flex flex-row flex-wrap gap-x-6 gap-y-2 lg:flex-col lg:gap-0">
+      {STEPS.map((title, i) => (
+        <li key={title} className="flex items-start gap-[18px]">
+          <div className="flex flex-col items-center">
+            <span
+              className={`flex h-[29px] w-[29px] items-center justify-center rounded-full text-[15px] font-medium text-white ${
+                i <= current ? "bg-brand" : "bg-[#c4c4c4]"
+              }`}
+            >
+              {i + 1}
+            </span>
+            {i < STEPS.length - 1 && (
+              <span
+                aria-hidden="true"
+                className="hidden h-[10px] w-px bg-[#c4c4c4] lg:block"
+              />
+            )}
+          </div>
+          <span
+            className={`pt-0.5 text-[18px] ${
+              i <= current ? "font-medium text-brand" : "text-[#121212]"
+            }`}
+          >
+            {title}
+          </span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/* ---------------- Step 1: Personal Details ---------------- */
+
+function StepPersonal({
+  draft,
+  avatarUrl,
+  onNext,
+}: {
+  draft: Draft;
+  avatarUrl?: string;
+  onNext: (d: Partial<Draft>) => void;
+}) {
+  const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
+  const [avatar, setAvatar] = useState<string | null>(
+    avatarUrl || "/images/host/avatar.png",
+  );
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  async function changeAvatar(file: File) {
+    setAvatar(URL.createObjectURL(file)); // instant preview; persists below
+    const data = new FormData();
+    data.append("avatar", file);
+    await updateAvatarAction(data);
+  }
+
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const data = new FormData(e.currentTarget);
+    const get = (k: string) => String(data.get(k) ?? "").trim();
+    const personal = {
+      fullName: get("fullName"),
+      gender: get("gender"),
+      email: get("email"),
+      dob: get("dob"),
+      address: get("address"),
+      emergency: get("emergency"),
+    };
+    const next: typeof errors = {};
+    if (!personal.fullName) next.fullName = "Full name is required.";
+    if (!personal.gender) next.gender = "Please select your gender.";
+    if (!personal.email) next.email = "Email address is required.";
+    else if (!EMAIL_RE.test(personal.email)) next.email = "Enter a valid email address.";
+    if (!personal.dob) next.dob = "Date of birth is required.";
+    if (!personal.address) next.address = "Address is required.";
+    setErrors(next);
+    if (Object.keys(next).length > 0) return;
+    onNext({ personal });
+  }
+
+  return (
+    <form onSubmit={handleSubmit} noValidate>
+      <h2 className="text-[17px] font-bold text-ink">
+        First time hosting? You must add your personal details first to start
+        hosting
+      </h2>
+      <div className="mt-6 flex flex-col-reverse gap-8 sm:flex-row">
+        <div className="flex-1 space-y-4">
+          <div>
+            <label htmlFor="h-fullName" className={label}>Full name</label>
+            <input
+              id="h-fullName"
+              name="fullName"
+              defaultValue={draft.personal.fullName}
+              placeholder="Add Full name"
+              autoComplete="name"
+              aria-invalid={!!errors.fullName}
+              className={input}
+            />
+            {errors.fullName && <ErrorText>{errors.fullName}</ErrorText>}
+          </div>
+          <div>
+            <label htmlFor="h-gender" className={label}>Gender</label>
+            <select
+              id="h-gender"
+              name="gender"
+              defaultValue={draft.personal.gender}
+              aria-invalid={!!errors.gender}
+              className={input}
+            >
+              <option value="" disabled>Select your gender.</option>
+              {["Female", "Male", "Non-binary", "Prefer not to say"].map((g) => (
+                <option key={g}>{g}</option>
+              ))}
+            </select>
+            {errors.gender && <ErrorText>{errors.gender}</ErrorText>}
+          </div>
+          <div>
+            <label htmlFor="h-email" className={label}>Email Address</label>
+            <input
+              id="h-email"
+              name="email"
+              type="email"
+              defaultValue={draft.personal.email}
+              placeholder="Example1@myvilla.com"
+              autoComplete="email"
+              aria-invalid={!!errors.email}
+              className={input}
+            />
+            {errors.email && <ErrorText>{errors.email}</ErrorText>}
+          </div>
+          <div>
+            <label htmlFor="h-dob" className={label}>Date of Birth</label>
+            <input
+              id="h-dob"
+              name="dob"
+              type="date"
+              defaultValue={draft.personal.dob}
+              aria-invalid={!!errors.dob}
+              className={input}
+            />
+            {errors.dob && <ErrorText>{errors.dob}</ErrorText>}
+          </div>
+          <div>
+            <label htmlFor="h-address" className={label}>Address</label>
+            <input
+              id="h-address"
+              name="address"
+              defaultValue={draft.personal.address}
+              placeholder="Not Provided"
+              autoComplete="street-address"
+              aria-invalid={!!errors.address}
+              className={input}
+            />
+            {errors.address && <ErrorText>{errors.address}</ErrorText>}
+          </div>
+          <div>
+            <label htmlFor="h-emergency" className={label}>Emergency Contact</label>
+            <input
+              id="h-emergency"
+              name="emergency"
+              defaultValue={draft.personal.emergency}
+              placeholder="Not Provided"
+              autoComplete="tel"
+              className={input}
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-col items-center gap-3 sm:w-52">
+          <span className="relative block h-32 w-32 overflow-hidden rounded-full bg-line/40">
+            {avatar ? (
+              /* eslint-disable-next-line @next/next/no-img-element */
+              <img src={avatar} alt="Profile preview" className="h-full w-full object-cover" />
+            ) : (
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" className="h-full w-full p-6 text-muted">
+                <circle cx="12" cy="8" r="4" stroke="currentColor" strokeWidth="1.6" />
+                <path d="M4 20a8 8 0 0116 0" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+            )}
+          </span>
+          <button
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            className="w-32 text-center text-[13px] text-ink underline"
+          >
+            Upload your profile picture
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void changeAvatar(f);
+              e.target.value = "";
+            }}
+          />
+        </div>
+      </div>
+      <SaveAndNext />
+    </form>
+  );
+}
+
+/* ---------------- Step 2: Villa Details ---------------- */
+
+const VILLA_KINDS = ["Villa Living", "Combinative Villa", "Hotel", "Resort", "Bungalow", "Others (specify)"];
+const FACILITY_CHIPS = [
+  "Wifi", "Free Parking", "Air Conditioner", "Long Stays", "Smoke Alarm",
+  "Swimming Pool", "Jaccuzzi", "BBQ Corner", "TV",
+];
+
+function ChipIcon({ name }: { name: string }) {
+  const stroke = { stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round" as const, fill: "none" };
+  switch (name) {
+    case "Wifi":
+      return (
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M2.5 9a14 14 0 0119 0M5.5 12.5a9.6 9.6 0 0113 0M8.5 16a5.3 5.3 0 017 0" {...stroke} />
+          <circle cx="12" cy="19" r="1.2" fill="currentColor" />
+        </svg>
+      );
+    case "Free Parking":
+      return (
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 13l1.5-4.5A2 2 0 017.4 7h9.2a2 2 0 011.9 1.5L20 13" {...stroke} />
+          <rect x="3.5" y="12.5" width="17" height="5" rx="1.4" {...stroke} />
+          <circle cx="7.5" cy="15" r="0.9" fill="currentColor" />
+          <circle cx="16.5" cy="15" r="0.9" fill="currentColor" />
+        </svg>
+      );
+    case "Air Conditioner":
+      return (
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="5" width="18" height="7" rx="1.6" {...stroke} />
+          <path d="M7 15c0 1.4-1 1.4-1 2.8M12 15c0 1.4-1 1.4-1 2.8M17 15c0 1.4-1 1.4-1 2.8" {...stroke} />
+        </svg>
+      );
+    case "Long Stays":
+      return (
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3.5" y="5" width="17" height="15" rx="1.8" {...stroke} />
+          <path d="M3.5 9.5h17M8 3v4M16 3v4" {...stroke} />
+        </svg>
+      );
+    case "Smoke Alarm":
+      return (
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="8.5" {...stroke} />
+          <circle cx="12" cy="12" r="4" {...stroke} />
+          <circle cx="12" cy="12" r="1" fill="currentColor" />
+        </svg>
+      );
+    case "Swimming Pool":
+      return (
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M2.5 17c1.6 1.4 3.2 1.4 4.8 0s3.2-1.4 4.8 0 3.2 1.4 4.8 0 3.2-1.4 4.6 0" {...stroke} />
+          <path d="M9 14V6.5A1.5 1.5 0 0110.5 5M15 14V6.5A1.5 1.5 0 0116.5 5M9 8h6M9 11.5h6" {...stroke} />
+        </svg>
+      );
+    case "Jaccuzzi":
+      return (
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 13h18v3a4 4 0 01-4 4H7a4 4 0 01-4-4z" {...stroke} />
+          <path d="M8 10c0-1.4 1-1.4 1-2.8M12 10c0-1.4 1-1.4 1-2.8M16 10c0-1.4 1-1.4 1-2.8" {...stroke} />
+        </svg>
+      );
+    case "BBQ Corner":
+      return (
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 9h14a7 7 0 01-14 0z" {...stroke} />
+          <path d="M8.5 16l-2 5M15.5 16l2 5M6.5 18.5h11" {...stroke} />
+        </svg>
+      );
+    default: // TV
+      return (
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="6.5" width="18" height="12" rx="1.6" {...stroke} />
+          <path d="M9 3l3 3.5L15 3" {...stroke} />
+        </svg>
+      );
+  }
+}
+
+function VillaMapPreview() {
+  return (
+    <div className="relative h-[330px] w-full overflow-hidden rounded-[10px]" aria-label="Choose your villa location on the map">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src="/images/place/map.png"
+        alt=""
+        className="absolute inset-0 h-full w-full object-cover"
+      />
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src="/icons/place/map-home.svg"
+        alt="Villa location marker"
+        className="absolute left-[6%] top-[22%] w-[110px]"
+      />
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src="/icons/place/map-zoom.svg"
+        alt="Map zoom controls"
+        className="absolute right-3 top-2 w-10"
+      />
+    </div>
+  );
+}
+
+function StepVilla({
+  draft,
+  onNext,
+}: {
+  draft: Draft;
+  onNext: (d: Partial<Draft>) => void;
+}) {
+  const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
+  const [kind, setKind] = useState(draft.villa.kind);
+  const [facilities, setFacilities] = useState<string[]>(draft.villa.facilities);
+  const [extraChips, setExtraChips] = useState<string[]>([]);
+
+  function toggleFacility(f: string) {
+    setFacilities((cur) =>
+      cur.includes(f) ? cur.filter((x) => x !== f) : [...cur, f],
+    );
+  }
+
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const data = new FormData(e.currentTarget);
+    const get = (k: string) => String(data.get(k) ?? "").trim();
+    const villa = {
+      kind,
+      name: get("name"),
+      description: get("description"),
+      area: get("area"),
+      address: get("address"),
+      city: get("city"),
+      rooms: get("rooms"),
+      bathrooms: get("bathrooms"),
+      maxGuests: get("maxGuests"),
+      facilities,
+    };
+    const next: typeof errors = {};
+    if (!villa.name) next.name = "Villa name is required.";
+    if (!villa.area || !/^\d+$/.test(villa.area))
+      next.area = "Enter the build-up area in square yards (numbers only).";
+    if (!villa.address) next.address = "Villa address is required.";
+    if (!villa.city) next.city = "City is required.";
+    if (!villa.rooms || !/^\d+$/.test(villa.rooms)) next.rooms = "Enter the number of rooms.";
+    if (!villa.bathrooms || !/^\d+$/.test(villa.bathrooms)) next.bathrooms = "Enter the number of bathrooms.";
+    if (!villa.maxGuests || !/^\d+$/.test(villa.maxGuests) || Number(villa.maxGuests) < 1)
+      next.maxGuests = "Enter the maximum number of guests (at least 1).";
+    setErrors(next);
+    if (Object.keys(next).length > 0) return;
+    onNext({ villa });
+  }
+
+  return (
+    <form onSubmit={handleSubmit} noValidate>
+      <h2 className="text-[17px] font-bold text-ink">
+        What kind of a villa are you hosting?
+      </h2>
+      <div className="mt-4 flex flex-wrap gap-3">
+        {VILLA_KINDS.map((k) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => setKind(k)}
+            aria-pressed={kind === k}
+            className={`rounded-md px-5 py-2 text-sm font-medium transition-colors ${
+              kind === k
+                ? "bg-brand text-white"
+                : "border border-brand text-brand hover:bg-brand/5"
+            }`}
+          >
+            {k}
+          </button>
+        ))}
+      </div>
+
+      <h3 className="mt-7 text-[17px] font-bold text-ink">Details</h3>
+      <div className="mt-3 space-y-4">
+        <div>
+          <label htmlFor="v-name" className={label}>Name of your Villa</label>
+          <input
+            id="v-name"
+            name="name"
+            defaultValue={draft.villa.name}
+            placeholder="Complete Name"
+            aria-invalid={!!errors.name}
+            className={input}
+          />
+          {errors.name && <ErrorText>{errors.name}</ErrorText>}
+        </div>
+        <div>
+          <label htmlFor="v-description" className={label}>
+            Describe your Villa (Max 150 words)
+          </label>
+          <textarea
+            id="v-description"
+            name="description"
+            defaultValue={draft.villa.description}
+            placeholder="Description"
+            rows={3}
+            className={`${input} resize-none`}
+          />
+        </div>
+        <div>
+          <label htmlFor="v-area" className={label}>Villa Dimensions</label>
+          <input
+            id="v-area"
+            name="area"
+            defaultValue={draft.villa.area}
+            placeholder="Total Build up Area (in Square Yards)"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            onChange={onlyDigits}
+            aria-invalid={!!errors.area}
+            className={input}
+          />
+          {errors.area && <ErrorText>{errors.area}</ErrorText>}
+        </div>
+        <div>
+          <label htmlFor="v-address" className={label}>Villa Address</label>
+          <input
+            id="v-address"
+            name="address"
+            defaultValue={draft.villa.address}
+            placeholder="Registered Address of Villa"
+            aria-invalid={!!errors.address}
+            className={input}
+          />
+          {errors.address && <ErrorText>{errors.address}</ErrorText>}
+        </div>
+        <div>
+          <label htmlFor="v-city" className={label}>City</label>
+          <input
+            id="v-city"
+            name="city"
+            defaultValue={draft.villa.city}
+            placeholder="City where the Villa is located"
+            aria-invalid={!!errors.city}
+            className={input}
+          />
+          {errors.city && <ErrorText>{errors.city}</ErrorText>}
+        </div>
+        <div>
+          <label htmlFor="v-rooms" className={label}>Number of Rooms</label>
+          <input
+            id="v-rooms"
+            name="rooms"
+            defaultValue={draft.villa.rooms}
+            inputMode="numeric"
+            pattern="[0-9]*"
+            onChange={onlyDigits}
+            placeholder="e.g. 3"
+            aria-invalid={!!errors.rooms}
+            className={input}
+          />
+          {errors.rooms && <ErrorText>{errors.rooms}</ErrorText>}
+        </div>
+        <div>
+          <label htmlFor="v-bathrooms" className={label}>Number of Bathrooms</label>
+          <input
+            id="v-bathrooms"
+            name="bathrooms"
+            defaultValue={draft.villa.bathrooms}
+            inputMode="numeric"
+            pattern="[0-9]*"
+            onChange={onlyDigits}
+            placeholder="e.g. 2"
+            aria-invalid={!!errors.bathrooms}
+            className={input}
+          />
+          {errors.bathrooms && <ErrorText>{errors.bathrooms}</ErrorText>}
+        </div>
+        <div>
+          <label htmlFor="v-maxGuests" className={label}>
+            Maximum Number of Guests
+          </label>
+          <input
+            id="v-maxGuests"
+            name="maxGuests"
+            defaultValue={draft.villa.maxGuests}
+            inputMode="numeric"
+            pattern="[0-9]*"
+            onChange={onlyDigits}
+            placeholder="How many guests can stay? e.g. 6"
+            aria-invalid={!!errors.maxGuests}
+            className={input}
+          />
+          {errors.maxGuests && <ErrorText>{errors.maxGuests}</ErrorText>}
+        </div>
+      </div>
+
+      <h3 className="mt-7 mb-3 text-[15px] font-semibold text-brand">
+        Select Facilities Provided
+      </h3>
+      <div className="flex flex-wrap gap-2.5">
+        {[...FACILITY_CHIPS, ...extraChips].map((f) => (
+          <button
+            key={f}
+            type="button"
+            onClick={() => toggleFacility(f)}
+            aria-pressed={facilities.includes(f)}
+            className={`flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-sm transition-colors ${
+              facilities.includes(f)
+                ? "bg-brand text-white"
+                : "bg-[#ececee] text-[#384652] hover:bg-line/50"
+            }`}
+          >
+            <ChipIcon name={f} />
+            {f}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={() => {
+            const extra = window.prompt("Add a facility");
+            const v = extra?.trim();
+            if (v && ![...FACILITY_CHIPS, ...extraChips].includes(v)) {
+              setExtraChips((cur) => [...cur, v]);
+              setFacilities((cur) => [...cur, v]);
+            }
+          }}
+          className="rounded-full px-3 py-1.5 text-sm text-[#384652] hover:bg-line/30"
+        >
+          + Add More
+        </button>
+      </div>
+
+      <h3 className="mt-7 mb-3 text-[15px] font-semibold text-brand">
+        Villa Location on Map
+      </h3>
+      <VillaMapPreview />
+
+      <SaveAndNext />
+    </form>
+  );
+}
+
+/* ---------------- Step 3: Add Images ---------------- */
+
+function StepImages({
+  draft,
+  onNext,
+}: {
+  draft: Draft;
+  onNext: (d: Partial<Draft>) => void;
+}) {
+  const [images, setImages] = useState<string[]>(draft.images);
+  const [error, setError] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  async function addFiles(files: File[]) {
+    setUploading(true);
+    setError("");
+    const data = new FormData();
+    for (const f of files) data.append("files", f);
+    const result = await uploadImagesAction(data);
+    setUploading(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setImages((cur) => [...cur, ...result.paths]);
+  }
+
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (images.length === 0) {
+      setError("Please add at least one image of your villa.");
+      return;
+    }
+    setError("");
+    onNext({ images });
+  }
+
+  return (
+    <form onSubmit={handleSubmit} noValidate>
+      <h2 className="text-[17px] font-bold text-ink">
+        Add clear and sharp images of your villa.
+      </h2>
+      <p className="mt-1 text-sm text-body">
+        Its better to show the images of facilities you&apos;re providing as well.
+        <br />
+        (Minimum 7 Images)
+      </p>
+
+      <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+        {images.map((src, i) => (
+          <div key={`${src}-${i}`} className="group relative h-32 overflow-hidden rounded-[6px]">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={src} alt={`Villa photo ${i + 1}`} className="h-full w-full object-cover" />
+            <button
+              type="button"
+              aria-label={`Remove photo ${i + 1}`}
+              onClick={() => setImages((cur) => cur.filter((_, j) => j !== i))}
+              className="absolute right-2 top-2 hidden h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white group-hover:flex"
+            >
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                <path d="M1.5 1.5l9 9m0-9l-9 9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          disabled={uploading}
+          onClick={() => fileRef.current?.click()}
+          className="flex h-32 flex-col items-center justify-center gap-2 rounded-[6px] border border-[#d9d9d9] text-brand hover:bg-brand/5 disabled:opacity-50"
+        >
+          <svg width="26" height="26" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+            <circle cx="13" cy="13" r="11.5" stroke="currentColor" strokeWidth="1.6" />
+            <path d="M13 8.5v9M8.5 13h9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+          <span className="text-xs">{uploading ? "Uploading…" : "Add photo"}</span>
+        </button>
+      </div>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          if (files.length) void addFiles(files);
+          e.target.value = "";
+        }}
+      />
+      {error && <ErrorText>{error}</ErrorText>}
+
+      <SaveAndNext />
+    </form>
+  );
+}
+
+/* ---------------- Step 4: Extra Services ---------------- */
+
+const SERVICES = [
+  "Free Cancellation before a week",
+  "Free Wifi",
+  "Free meal on first day",
+  "Pre-order mean preperations",
+  "Long Stays",
+  "Butler",
+  "House Keeping",
+];
+
+function StepServices({
+  draft,
+  onNext,
+}: {
+  draft: Draft;
+  onNext: (d: Partial<Draft>) => void;
+}) {
+  const [selected, setSelected] = useState<string[]>(
+    draft.services.selected.length
+      ? draft.services.selected
+      : ["Free Cancellation before a week", "Free Wifi", "Long Stays"],
+  );
+
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const custom = String(new FormData(e.currentTarget).get("custom") ?? "").trim();
+    onNext({ services: { selected, custom } });
+  }
+
+  return (
+    <form onSubmit={handleSubmit} noValidate>
+      <h2 className="text-[17px] font-bold text-ink">
+        Select the extra services you would be providing to your guests.
+      </h2>
+      <div className="mt-5 grid max-w-xl grid-cols-1 gap-x-10 gap-y-3.5 sm:grid-cols-2">
+        {SERVICES.map((s) => (
+          <label key={s} className="flex items-center gap-2.5 text-sm text-body">
+            <input
+              type="checkbox"
+              checked={selected.includes(s)}
+              onChange={() =>
+                setSelected((cur) =>
+                  cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s],
+                )
+              }
+              className="checkbox-brand"
+            />
+            {s}
+          </label>
+        ))}
+      </div>
+      <textarea
+        name="custom"
+        defaultValue={draft.services.custom}
+        placeholder="Add your own services"
+        rows={3}
+        className={`${input} mt-6 max-w-2xl resize-none`}
+      />
+      <SaveAndNext />
+    </form>
+  );
+}
+
+/* ---------------- Step 5: Pricing ---------------- */
+
+function StepPricing({
+  draft,
+  onNext,
+}: {
+  draft: Draft;
+  onNext: (d: Partial<Draft>) => void;
+}) {
+  const [price, setPrice] = useState(draft.price);
+  const [error, setError] = useState("");
+
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!price || price <= 0) {
+      setError("Please set a nightly price for your villa.");
+      return;
+    }
+    setError("");
+    onNext({ price });
+  }
+
+  return (
+    <form onSubmit={handleSubmit} noValidate>
+      <h2 className="text-[17px] font-bold text-ink">
+        Set your price according to your place.
+      </h2>
+
+      <div className="mt-6 flex flex-wrap items-start justify-between gap-8">
+        <div>
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-body">You are offering</span>
+            <button
+              type="button"
+              aria-label="Increase price"
+              onClick={() => setPrice((p) => p + 5)}
+              className="text-xl font-bold text-brand"
+            >
+              +
+            </button>
+            <span className="rounded-md border border-brand px-1">
+              <input
+                type="text"
+                inputMode="numeric"
+                aria-label="Price per night in dollars"
+                value={`$${price}`}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value.replace(/\D/g, ""), 10);
+                  setPrice(Number.isNaN(n) ? 0 : n);
+                }}
+                className="w-20 bg-transparent py-1.5 text-center text-[15px] font-semibold text-muted focus:outline-none"
+              />
+            </span>
+            <button
+              type="button"
+              aria-label="Decrease price"
+              onClick={() => setPrice((p) => Math.max(5, p - 5))}
+              className="text-2xl font-bold text-brand"
+            >
+              −
+            </button>
+            <span className="text-sm text-body">per night for your villa!</span>
+          </div>
+          {error && <ErrorText>{error}</ErrorText>}
+
+          <p className="mt-5 flex items-center gap-2 text-xs text-body">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="shrink-0 text-brand">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.8" />
+              <path d="M12 7.2v6M12 16.4v.4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+            Places like yours have an average price range from $130 to $200.
+          </p>
+        </div>
+
+        <div className="relative max-w-56">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="absolute -top-7 left-1/2 -translate-x-1/2 text-brand">
+            <path
+              d="M12 2.5a6.5 6.5 0 00-3.6 11.9c.6.4 1 1 1.1 1.7l.1.9h4.8l.1-.9c.1-.7.5-1.3 1.1-1.7A6.5 6.5 0 0012 2.5zM9.8 19.5h4.4M10.6 21.5h2.8"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          <p className="rounded-md border border-line/60 bg-white px-4 py-3 text-xs leading-relaxed text-body shadow-sm">
+            Offer discount to your first 3 guests to help your villa get booked
+            faster!
+          </p>
+        </div>
+      </div>
+
+      <SaveAndNext />
+    </form>
+  );
+}
+
+/* ---------------- Step 6: Payment Method ---------------- */
+
+const PAY_METHODS = ["Mastercard", "G Pay", "PayPal", "VISA"];
+
+const PAY_LOGO_FILES: Record<string, { src: string; h: string }> = {
+  Mastercard: { src: "/images/pay/mastercard.png", h: "h-8" },
+  "G Pay": { src: "/images/pay/gpay.png", h: "h-7" },
+  PayPal: { src: "/images/pay/paypal.png", h: "h-6" },
+  VISA: { src: "/images/pay/visa.png", h: "h-4" },
+};
+
+function PayLogo({ method }: { method: string }) {
+  const logo = PAY_LOGO_FILES[method] ?? PAY_LOGO_FILES.VISA;
+  return (
+    /* eslint-disable-next-line @next/next/no-img-element */
+    <img src={logo.src} alt={method} className={`${logo.h} w-auto`} />
+  );
+}
+
+function StepPayment({
+  draft,
+  onNext,
+}: {
+  draft: Draft;
+  onNext: (d: Partial<Draft>) => void;
+}) {
+  const [methods, setMethods] = useState<string[]>(draft.payment.methods);
+  const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
+
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const data = new FormData(e.currentTarget);
+    const accountType = String(data.get("accountType") ?? "");
+    const cardNumber = String(data.get("cardNumber") ?? "").replace(/[\s-]/g, "");
+    const next: typeof errors = {};
+    if (methods.length === 0)
+      next.methods = "Select at least one way for guests to pay you.";
+    if (!accountType) next.accountType = "Please choose an account type.";
+    if (!cardNumber) next.cardNumber = "Account / card number is required.";
+    else if (!/^\d{8,19}$/.test(cardNumber))
+      next.cardNumber = "Enter a valid account or card number.";
+    setErrors(next);
+    if (Object.keys(next).length > 0) return;
+    onNext({ payment: { methods, accountType, cardNumber } });
+  }
+
+  return (
+    <form onSubmit={handleSubmit} noValidate>
+      <h2 className="text-[17px] font-bold text-ink">
+        Add payment method for guests.
+      </h2>
+      <p className="mt-3 text-sm text-body">Guests can pay using:</p>
+
+      <div className="mt-3 grid max-w-sm grid-cols-2 gap-3">
+        {PAY_METHODS.map((m) => (
+          <label
+            key={m}
+            className={`flex h-11 cursor-pointer items-center gap-3 rounded-[8px] border-[1.5px] bg-white px-3 ${
+              methods.includes(m) ? "border-brand" : "border-line"
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={methods.includes(m)}
+              onChange={() =>
+                setMethods((cur) =>
+                  cur.includes(m) ? cur.filter((x) => x !== m) : [...cur, m],
+                )
+              }
+              className="checkbox-brand"
+            />
+            <PayLogo method={m} />
+          </label>
+        ))}
+      </div>
+      {errors.methods && <ErrorText>{errors.methods}</ErrorText>}
+
+      <h3 className="mt-7 text-[15px] font-bold text-ink">
+        Add your account details:
+      </h3>
+      <p className="mt-1 text-xs text-body">
+        Payments from your guests will be transferred to this account.
+      </p>
+      <div className="mt-3 max-w-2xl space-y-4">
+        <div className="relative">
+          <select
+            name="accountType"
+            defaultValue={draft.payment.accountType || "Credit Card or Debit Card"}
+            aria-label="Account type"
+            aria-invalid={!!errors.accountType}
+            className={`${input} appearance-none pr-12`}
+          >
+            {["Credit Card or Debit Card", "Bank Account", "PayPal Account"].map((o) => (
+              <option key={o}>{o}</option>
+            ))}
+          </select>
+          <svg width="14" height="9" viewBox="0 0 14 9" fill="none" aria-hidden="true" className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-body">
+            <path d="M1 1.5l6 6 6-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </div>
+        {errors.accountType && <ErrorText>{errors.accountType}</ErrorText>}
+        <div>
+          <input
+            name="cardNumber"
+            defaultValue={draft.payment.cardNumber}
+            placeholder="Card Number"
+            inputMode="numeric"
+            aria-label="Card or account number"
+            aria-invalid={!!errors.cardNumber}
+            className={input}
+          />
+          {errors.cardNumber && <ErrorText>{errors.cardNumber}</ErrorText>}
+        </div>
+      </div>
+
+      <hr className="mt-7 max-w-2xl border-line/60" />
+      <p className="mt-4 max-w-2xl text-sm leading-relaxed text-body">
+        By clicking the button below, I agree to the{" "}
+        <Link href="#" className="underline">Host&apos;s House Rules</Link>,{" "}
+        <Link href="#" className="underline">MyVilla&apos;s COVID-19 Safety Requirements</Link>{" "}
+        and the <Link href="#" className="underline">Guest Refund Policy.</Link>
+      </p>
+
+      <div className="mt-6">
+        <button
+          type="submit"
+          className="rounded-[8px] bg-brand px-7 py-2.5 text-[13px] font-semibold text-white transition-colors hover:bg-brand-dark"
+        >
+          Host your Villa
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/* ---------------- Success ---------------- */
+
+function SuccessView({ draft, edited }: { draft: Draft; edited?: boolean }) {
+  const last4 = draft.payment.cardNumber.slice(-4);
+  return (
+    <div className="rounded-lg bg-white px-6 py-14 text-center shadow-[0_4px_20px_rgba(0,0,0,0.06)]">
+      <span className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-brand/10">
+        <svg width="38" height="38" viewBox="0 0 38 38" fill="none" aria-hidden="true">
+          <circle cx="19" cy="19" r="17" fill="#6c63ff" />
+          <path d="M11.5 19.5l5 5 10-10.5" stroke="white" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </span>
+      <h2 className="mt-6 text-2xl font-bold text-ink">
+        {edited ? "Your villa has been updated!" : "Your villa has been registered!"}
+      </h2>
+      <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-body">
+        {draft.villa.name ? (
+          <>
+            <span className="font-semibold">{draft.villa.name}</span> is now
+            under review.{" "}
+          </>
+        ) : (
+          "Your listing is now under review. "
+        )}
+        We&apos;ll notify you at{" "}
+        <span className="font-semibold">{draft.personal.email || "your email"}</span>{" "}
+        once it goes live. Guest payments will be transferred to your account
+        {last4 ? ` ending in ${last4}` : ""}.
+      </p>
+
+      <dl className="mx-auto mt-8 max-w-sm space-y-2.5 rounded-lg border border-line/60 p-5 text-left text-sm">
+        <div className="flex justify-between">
+          <dt className="text-gray">Villa</dt>
+          <dd className="font-semibold text-ink">{draft.villa.name || "—"}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-gray">Type</dt>
+          <dd className="text-body">{draft.villa.kind}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-gray">Price</dt>
+          <dd className="text-body">${draft.price}/night</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-gray">Payout account</dt>
+          <dd className="text-body">{last4 ? `•••• ${last4}` : "—"}</dd>
+        </div>
+      </dl>
+
+      <div className="mt-8 flex flex-wrap justify-center gap-4">
+        <Link
+          href="/"
+          className="rounded-md border border-brand px-6 py-2.5 text-sm font-semibold text-brand transition-colors hover:bg-brand/5"
+        >
+          Go to Home
+        </Link>
+        <Link
+          href="/profile/properties"
+          className="rounded-md bg-brand px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-brand-dark"
+        >
+          View in My Property
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Wizard shell ---------------- */
+
+export default function HostWizard({
+  authed,
+  initialPersonal,
+  avatarUrl,
+  editId,
+  editDraft,
+  skipPersonal = false,
+}: {
+  authed: boolean;
+  initialPersonal?: Draft["personal"];
+  avatarUrl?: string;
+  /** When set, the wizard edits this villa instead of creating a new one. */
+  editId?: number;
+  editDraft?: Draft;
+  /** Profile already has the personal details — start at Villa Details. */
+  skipPersonal?: boolean;
+}) {
+  const mounted = useMounted();
+  const router = useRouter();
+  const [submitting, startTransition] = useTransition();
+  const [submitError, setSubmitError] = useState("");
+  // Personal details are only collected from first-time hosts; when editing a
+  // villa or when the profile is already complete, the flow starts at step 1.
+  const minStep = editId || skipPersonal ? 1 : 0;
+  const [draft, setDraft] = useState<Draft>(() => {
+    if (editId && editDraft) return { ...editDraft, step: minStep }; // editing: never load the local draft
+    if (typeof window === "undefined") return DEFAULT_DRAFT;
+    try {
+      const raw = window.localStorage.getItem(DRAFT_KEY);
+      if (raw) {
+        const stored = { ...DEFAULT_DRAFT, ...JSON.parse(raw) } as Draft;
+        return { ...stored, step: Math.max(stored.step, minStep) };
+      }
+    } catch {
+      /* corrupted draft — start fresh */
+    }
+    // No draft yet — prefill personal details from the signed-in profile.
+    const base = initialPersonal
+      ? { ...DEFAULT_DRAFT, personal: { ...DEFAULT_DRAFT.personal, ...initialPersonal } }
+      : DEFAULT_DRAFT;
+    return { ...base, step: minStep };
+  });
+  const [done, setDone] = useState(false);
+
+  function advance(patch: Partial<Draft>) {
+    const merged = { ...draft, ...patch };
+
+    if (draft.step === STEPS.length - 1) {
+      // Final step submitted — persist the villa.
+      if (submitting) return;
+      startTransition(async () => {
+        const payload = {
+          name: merged.villa.name || "My Villa",
+          kind: merged.villa.kind,
+          description: merged.villa.description,
+          area: merged.villa.area,
+          address: merged.villa.address,
+          city: merged.villa.city,
+          rooms: parseInt(merged.villa.rooms, 10) || 1,
+          bathrooms: parseInt(merged.villa.bathrooms, 10) || 1,
+          maxGuests: parseInt(merged.villa.maxGuests, 10) || 1,
+          facilities: merged.villa.facilities,
+          services: [
+            ...merged.services.selected,
+            ...(merged.services.custom ? [merged.services.custom] : []),
+          ],
+          price: merged.price,
+          images: merged.images,
+        };
+        const result = editId
+          ? await updateVillaAction(editId, payload)
+          : await createVillaAction({ ...payload, hostProfile: merged.personal });
+        if (!result.ok) {
+          setSubmitError(result.error);
+          return;
+        }
+        if (!editId) window.localStorage.removeItem(DRAFT_KEY);
+        setSubmitError("");
+        setDraft(merged);
+        setDone(true);
+        router.refresh();
+        window.scrollTo({ top: 0 });
+      });
+      return;
+    }
+
+    const next = { ...merged, step: Math.min(draft.step + 1, STEPS.length - 1) };
+    if (!editId) window.localStorage.setItem(DRAFT_KEY, JSON.stringify(next));
+    setDraft(next);
+    window.scrollTo({ top: 0 });
+  }
+
+  function goBack() {
+    setDraft((cur) => {
+      const next = { ...cur, step: Math.max(minStep, cur.step - 1) };
+      if (!editId) window.localStorage.setItem(DRAFT_KEY, JSON.stringify(next));
+      return next;
+    });
+    window.scrollTo({ top: 0 });
+  }
+
+  if (!mounted) return <div className="min-h-[50vh]" aria-hidden="true" />;
+
+  const step = draft.step;
+
+  return (
+    <div>
+      {/* The Figma "Add your Villa Login & Signup" screen shows only the card,
+          without the breadcrumb / title row — so hide them until signed in. */}
+      {authed && (
+        <>
+          <nav aria-label="Breadcrumb" className="text-[20px] leading-[1.2] text-ink">
+            <Link href="/" className="underline">Home</Link>
+            <span className="font-light">{"  /  "}</span>
+            <Link href="#" className="underline">All Topics</Link>
+            <span className="font-light">{" / "}</span>
+            <Link href="#" className="underline">Legal Terms</Link>
+            <span className="font-light">{" / "}</span>
+            <span>Privacy Policy</span>
+          </nav>
+
+          <div className="mt-[30px] flex items-center justify-between">
+            <h1 className="text-[28px] font-semibold leading-[1.3] text-black">
+              {editId ? "Edit your Villa" : "Add your Villa"}
+            </h1>
+            {!done && step > minStep ? (
+              <button
+                type="button"
+                onClick={goBack}
+                className="text-[30px] leading-[1.35] text-black underline"
+              >
+                Back
+              </button>
+            ) : (
+              <Link
+                href={editId ? "/profile/properties" : "/"}
+                className="text-[30px] leading-[1.35] text-black underline"
+              >
+                Back
+              </Link>
+            )}
+          </div>
+        </>
+      )}
+
+      <div className="mt-6">
+        {!authed ? (
+          <SignInGate
+            title="To add your villa you must be signed in first."
+            subtitle="Login to your account to start hosting right now!"
+          />
+        ) : done ? (
+          <SuccessView draft={draft} edited={!!editId} />
+        ) : (
+          <div className="flex flex-col gap-8 lg:flex-row">
+            <div className="shrink-0 lg:w-56">
+              <Stepper current={step} />
+            </div>
+            <div className="min-w-0 flex-1 rounded-[10px] bg-white p-6 shadow-[0px_15px_50px_0px_rgba(0,0,0,0.08)] sm:p-8">
+              {submitError && (
+                <p role="alert" className="mb-4 rounded-md bg-red-50 px-4 py-2.5 text-sm text-red-600">
+                  {submitError}
+                </p>
+              )}
+              {step === 0 && (
+                <StepPersonal draft={draft} avatarUrl={avatarUrl} onNext={advance} />
+              )}
+              {step === 1 && <StepVilla draft={draft} onNext={advance} />}
+              {step === 2 && <StepImages draft={draft} onNext={advance} />}
+              {step === 3 && <StepServices draft={draft} onNext={advance} />}
+              {step === 4 && <StepPricing draft={draft} onNext={advance} />}
+              {step === 5 && <StepPayment draft={draft} onNext={advance} />}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
