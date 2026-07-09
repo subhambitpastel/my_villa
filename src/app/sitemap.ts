@@ -1,6 +1,10 @@
 import type { MetadataRoute } from "next";
 import { getCatalogVillas } from "@/lib/queries";
 
+// Generated on-demand at request time, not at build: it queries Postgres, which
+// isn't reachable during `next build` on a fresh host (Railway, etc.).
+export const dynamic = "force-dynamic";
+
 const base = (process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
