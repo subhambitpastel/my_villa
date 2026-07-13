@@ -160,6 +160,9 @@ export type PostalRule = {
   maxLength: number;
   /** Example shown in the placeholder / error (e.g. "734004"). */
   example: string;
+  /** Digits-only format — letters are stripped as you type. Defaults to true;
+   *  set false for alphanumeric formats (UK, Canada, Netherlands, Ireland). */
+  numeric?: boolean;
 };
 
 const numeric = (n: number): RegExp => new RegExp(`^\\d{${n}}$`);
@@ -173,7 +176,7 @@ const POSTAL_RULES: Record<string, PostalRule> = {
   Bangladesh: { regex: numeric(4), maxLength: 4, example: "1000" },
   Belgium: { regex: numeric(4), maxLength: 4, example: "1000" },
   Brazil: { regex: /^\d{5}-?\d{3}$/, maxLength: 9, example: "01000-000" },
-  Canada: { regex: /^[A-Za-z]\d[A-Za-z] ?\d[A-Za-z]\d$/, maxLength: 7, example: "A1A 1A1" },
+  Canada: { regex: /^[A-Za-z]\d[A-Za-z] ?\d[A-Za-z]\d$/, maxLength: 7, example: "A1A 1A1", numeric: false },
   China: { regex: numeric(6), maxLength: 6, example: "100000" },
   Denmark: { regex: numeric(4), maxLength: 4, example: "1050" },
   Egypt: { regex: numeric(5), maxLength: 5, example: "11511" },
@@ -182,7 +185,7 @@ const POSTAL_RULES: Record<string, PostalRule> = {
   Greece: { regex: numeric(5), maxLength: 5, example: "10552" },
   India: { regex: numeric(6), maxLength: 6, example: "734004" },
   Indonesia: { regex: numeric(5), maxLength: 5, example: "10110" },
-  Ireland: { regex: /^[A-Za-z]\d{2} ?[A-Za-z\d]{4}$/, maxLength: 8, example: "A65 F4E2" },
+  Ireland: { regex: /^[A-Za-z]\d{2} ?[A-Za-z\d]{4}$/, maxLength: 8, example: "A65 F4E2", numeric: false },
   Italy: { regex: numeric(5), maxLength: 5, example: "00100" },
   Japan: { regex: /^\d{3}-?\d{4}$/, maxLength: 8, example: "123-4567" },
   Malaysia: { regex: numeric(5), maxLength: 5, example: "50000" },
@@ -191,7 +194,7 @@ const POSTAL_RULES: Record<string, PostalRule> = {
   Mongolia: { regex: numeric(5), maxLength: 5, example: "15160" },
   Morocco: { regex: numeric(5), maxLength: 5, example: "10000" },
   Nepal: { regex: numeric(5), maxLength: 5, example: "44600" },
-  Netherlands: { regex: /^\d{4} ?[A-Za-z]{2}$/, maxLength: 7, example: "1234 AB" },
+  Netherlands: { regex: /^\d{4} ?[A-Za-z]{2}$/, maxLength: 7, example: "1234 AB", numeric: false },
   "New Zealand": { regex: numeric(4), maxLength: 4, example: "6011" },
   Norway: { regex: numeric(4), maxLength: 4, example: "0010" },
   Philippines: { regex: numeric(4), maxLength: 4, example: "1000" },
@@ -205,8 +208,8 @@ const POSTAL_RULES: Record<string, PostalRule> = {
   Switzerland: { regex: numeric(4), maxLength: 4, example: "8001" },
   Thailand: { regex: numeric(5), maxLength: 5, example: "10200" },
   Turkey: { regex: numeric(5), maxLength: 5, example: "34000" },
-  "United Arab Emirates": { regex: /^.{0,12}$/, maxLength: 12, example: "optional" },
-  "United Kingdom": { regex: /^[A-Za-z]{1,2}\d[A-Za-z\d]? ?\d[A-Za-z]{2}$/, maxLength: 8, example: "SW1A 1AA" },
+  "United Arab Emirates": { regex: /^.{0,12}$/, maxLength: 12, example: "optional", numeric: false },
+  "United Kingdom": { regex: /^[A-Za-z]{1,2}\d[A-Za-z\d]? ?\d[A-Za-z]{2}$/, maxLength: 8, example: "SW1A 1AA", numeric: false },
   "United States": { regex: /^\d{5}(-\d{4})?$/, maxLength: 10, example: "12345 or 12345-6789" },
   Vietnam: { regex: numeric(6), maxLength: 6, example: "700000" },
 };
@@ -216,6 +219,7 @@ const DEFAULT_POSTAL: PostalRule = {
   regex: /^[A-Za-z0-9][A-Za-z0-9 -]{1,9}$/,
   maxLength: 10,
   example: "postal code",
+  numeric: false,
 };
 
 /** The postal-code rule for a country (falls back to a generic rule). */
@@ -223,9 +227,24 @@ export function postalRuleFor(country: string): PostalRule {
   return POSTAL_RULES[country] ?? DEFAULT_POSTAL;
 }
 
-/** Strip characters a postal code never contains and cap to `max` length. */
-export function capPostalCode(value: string, max: number): string {
-  return value.replace(/[^A-Za-z0-9 -]/g, "").slice(0, max);
+/** True when the country's postal code is digits-only (no letters allowed). */
+export function postalIsNumeric(country: string): boolean {
+  return postalRuleFor(country).numeric !== false;
+}
+
+/**
+ * Sanitize a postal code as the guest types: strip characters the country's
+ * format never contains — letters too for digits-only countries (India, US…) —
+ * and cap to the country's max length. Alphanumeric formats (UK, Canada…) keep
+ * their letters.
+ */
+export function capPostalCode(value: string, country: string): string {
+  const rule = postalRuleFor(country);
+  const cleaned =
+    rule.numeric === false
+      ? value.replace(/[^A-Za-z0-9\s-]/g, "")
+      : value.replace(/[^\d\s-]/g, "");
+  return cleaned.slice(0, rule.maxLength);
 }
 
 /** Canonical stored form: "+CC digits" (empty when there's no number). */

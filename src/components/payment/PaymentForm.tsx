@@ -10,6 +10,7 @@ import {
   capPhoneNumber,
   isValidPhoneNumber,
   postalRuleFor,
+  postalIsNumeric,
   capPostalCode,
 } from "@/lib/countries";
 import { createBookingAction } from "@/lib/actions";
@@ -151,9 +152,9 @@ export default function PaymentForm({
   // Postal-code format (regex/length/example) for the selected country — e.g.
   // India accepts 6 digits ("734004"), the US 5 or 5+4.
   const zipRule = postalRuleFor(country);
-  // Show a numeric keypad only when the format is purely digits (India, US…),
-  // not for alphanumeric ones (UK, Canada, Netherlands).
-  const zipNumeric = /^[\d\s-]*$/.test(zipRule.example);
+  // Digits-only formats (India, US, China…) get a numeric keypad and reject
+  // typed letters; alphanumeric ones (UK, Canada, Netherlands) keep their letters.
+  const zipNumeric = postalIsNumeric(country);
   // The phone number field is uncontrolled — a ref lets us re-trim it to the
   // new country's max length when the dial code changes.
   const phoneRef = useRef<HTMLInputElement>(null);
@@ -419,7 +420,7 @@ export default function PaymentForm({
                 // Re-trim any entered ZIP to the new country's format/length.
                 const next = e.target.value;
                 setCountry(next);
-                setZip((z) => capPostalCode(z, postalRuleFor(next).maxLength));
+                setZip((z) => capPostalCode(z, next));
               }}
               className={`${boxBase} h-[79px] w-full appearance-none rounded-t-[10px] bg-white pl-[25px] pr-[70px] ${
                 country ? "text-[#121212]" : "text-[#696969]"
@@ -481,7 +482,7 @@ export default function PaymentForm({
               aria-label="Zip code"
               maxLength={zipRule.maxLength}
               value={zip}
-              onChange={(e) => setZip(capPostalCode(e.target.value, zipRule.maxLength))}
+              onChange={(e) => setZip(capPostalCode(e.target.value, country))}
               aria-invalid={!!errors.zip}
               className={`${boxBase} -ml-px h-[79px] flex-1 rounded-br-[10px] pl-[25px] pr-[10px]`}
             />
