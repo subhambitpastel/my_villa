@@ -11,9 +11,10 @@ const label = "mb-2 block text-[16px] text-brand";
 const input =
   "block w-full rounded-[8px] border border-[#d9d9d9] bg-white px-4 py-2.5 text-[15px] text-ink placeholder:text-[#9d9da6] focus:outline-none focus:border-brand focus:ring-2 focus:ring-brand/20";
 
-// "Prefer not to say" is the select's empty default option, not a list entry —
-// listing it here too made it appear twice in the dropdown.
+// "Prefer not to say" is rendered as the first option (and is the default),
+// so it's not repeated in this list — that made it appear twice before.
 const GENDERS = ["Female", "Male", "Non-binary"];
+const DEFAULT_GENDER = "Prefer not to say";
 
 type Defaults = {
   fullName: string;
@@ -150,10 +151,10 @@ export default function GuestDetailsForm({
             <select
               id="g-gender"
               name="gender"
-              defaultValue={defaults.gender}
+              defaultValue={defaults.gender || DEFAULT_GENDER}
               className={input}
             >
-              <option value="">Prefer not to say</option>
+              <option value={DEFAULT_GENDER}>{DEFAULT_GENDER}</option>
               {GENDERS.map((g) => (
                 <option key={g}>{g}</option>
               ))}
