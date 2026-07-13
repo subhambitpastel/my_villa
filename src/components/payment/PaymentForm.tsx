@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { COUNTRIES, DIAL_CODE_OPTIONS } from "@/lib/countries";
 import { createBookingAction } from "@/lib/actions";
-import { formatDay, nightsBetween } from "@/lib/dates";
+import { addDays, formatDay, formatMonthDay, nightsBetween } from "@/lib/dates";
 
 /* eslint-disable @next/next/no-img-element */
 
@@ -42,6 +43,23 @@ const formatExpiration = (value: string) => {
   return digits.length > 2 ? `${digits.slice(0, 2)}/${digits.slice(2)}` : digits;
 };
 
+/** True when a well-formed MM/YY expiry is in the past. A card is valid through
+ *  the end of its expiry month, so it lapses on the 1st of the next month. */
+const isExpiryPast = (mmYY: string): boolean => {
+  const [mm, yy] = mmYY.split("/").map(Number);
+  // JS months are 0-indexed, so `mm` (1–12) is the 1st of the month AFTER expiry.
+  return new Date(2000 + yy, mm, 1) <= new Date();
+};
+
+/** Digits only, at most 4 — a CVV is 3 digits (Visa/Mastercard) or 4 (Amex). */
+const formatCvv = (value: string) => value.replace(/\D/g, "").slice(0, 4);
+
+/** "123456789" → "12345-6789" — a US ZIP (5 digits) or ZIP+4, digits only. */
+const formatZip = (value: string) => {
+  const digits = value.replace(/\D/g, "").slice(0, 9);
+  return digits.length > 5 ? `${digits.slice(0, 5)}-${digits.slice(5)}` : digits;
+};
+
 const boxBase =
   "border border-[#4a4a4a] bg-transparent text-[22px] text-[#121212] placeholder:text-[#696969] focus:outline-none focus:border-brand";
 
@@ -70,22 +88,38 @@ export default function PaymentForm({
   checkIn,
   checkOut,
   guests,
+  rooms = 1,
+  services = [],
+  packageId,
 }: {
   villaId: number;
   checkIn: string;
   checkOut: string;
   guests: number;
+  /** Rooms to reserve — hotels/resorts only; ignored elsewhere. */
+  rooms?: number;
+  /** Chosen paid add-ons, as indices into the villa's service list. */
+  services?: number[];
+  /** Set when booking a fixed package instead of a nightly stay. */
+  packageId?: number;
 }) {
+  const router = useRouter();
   const [errors, setErrors] = useState<Errors>({});
   const [formError, setFormError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [reference, setReference] = useState<string | null>(null);
   const [cardNumber, setCardNumber] = useState("");
   const [expiration, setExpiration] = useState("");
+  const [cvv, setCvv] = useState("");
+  const [zip, setZip] = useState("");
   const [method, setMethod] = useState(CARD_METHOD);
   const [phoneCode, setPhoneCode] = useState("");
   const payingByCard = method === CARD_METHOD;
   const nights = nightsBetween(checkIn, checkOut);
+  // Cancellation windows, both at 12:00 PM: a full free cancellation up to 2
+  // days before check-in, then a partial refund (minus first night + service
+  // fee) up to 1 day before. Dates are derived from the actual check-in.
+  const freeCancelBy = formatMonthDay(addDays(checkIn, -2));
+  const partialCancelBy = formatMonthDay(addDays(checkIn, -1));
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -101,11 +135,16 @@ export default function PaymentForm({
       else if (!/^\d{13,19}$/.test(card)) next.card = "Enter a valid card number.";
       if (!/^(0[1-9]|1[0-2])\/\d{2}$/.test(get("expiration")))
         next.expiration = "Enter expiration as MM/YY.";
+      else if (isExpiryPast(get("expiration")))
+        next.expiration = "Card has expired — enter a valid future expiry date.";
       if (!/^\d{3,4}$/.test(get("cvv"))) next.cvv = "Enter a valid CVV.";
       if (!get("street")) next.street = "Street name is required.";
       if (!get("city")) next.city = "City is required.";
       if (!get("state")) next.state = "State is required.";
-      if (!get("zip")) next.zip = "Zip code is required.";
+      const zipValue = get("zip");
+      if (!zipValue) next.zip = "Zip code is required.";
+      else if (!/^\d{5}(-\d{4})?$/.test(zipValue))
+        next.zip = "Enter a valid ZIP code (e.g. 12345 or 12345-6789).";
       if (!get("country")) next.country = "Please choose your country or region.";
       const email = get("email");
       if (!email) next.email = "E-mail address is required.";
@@ -117,7 +156,6 @@ export default function PaymentForm({
     }
 
     setErrors(next);
-    setReference(null);
     setFormError("");
     if (Object.keys(next).length > 0) return;
 
@@ -128,13 +166,18 @@ export default function PaymentForm({
       checkIn,
       checkOut,
       guests,
+      rooms,
+      services,
+      packageId,
     });
-    setSubmitting(false);
     if (!result.ok) {
+      setSubmitting(false);
       setFormError(result.error);
       return;
     }
-    setReference(result.reference);
+    // Booking created — take villas AND hotels to the same confirmation page.
+    // Keep `submitting` true so the button stays disabled through navigation.
+    router.push(`/booking/confirmed?ref=${encodeURIComponent(result.reference)}`);
   }
 
   return (
@@ -260,6 +303,9 @@ export default function PaymentForm({
               autoComplete="cc-csc"
               placeholder="CVV"
               aria-label="CVV"
+              maxLength={4}
+              value={cvv}
+              onChange={(e) => setCvv(formatCvv(e.target.value))}
               aria-invalid={!!errors.cvv}
               className={`${boxBase} -ml-px h-[79px] flex-1 rounded-br-[10px] pl-[25px] pr-[10px]`}
             />
@@ -318,6 +364,9 @@ export default function PaymentForm({
               autoComplete="postal-code"
               placeholder="Zip Code"
               aria-label="Zip code"
+              maxLength={10}
+              value={zip}
+              onChange={(e) => setZip(formatZip(e.target.value))}
               aria-invalid={!!errors.zip}
               className={`${boxBase} -ml-px h-[79px] flex-1 rounded-br-[10px] pl-[25px] pr-[10px]`}
             />
@@ -409,9 +458,9 @@ export default function PaymentForm({
           Cancellation Policy
         </h2>
         <p className="mt-[15px] text-[20px] leading-[1.42] text-black">
-          Free cancellation before 12:00 PM on Feb 01. After that, cancel before
-          12:00 PM on Feb 02 and get a full refund, minus the first night and
-          service fee.
+          Free cancellation before 12:00 PM on {freeCancelBy}. After that, cancel
+          before 12:00 PM on {partialCancelBy} and get a full refund, minus the
+          first night and service fee.
           <br />
           <Link href="#" className="font-semibold underline">
             Learn More
@@ -444,24 +493,10 @@ export default function PaymentForm({
           {formError}
         </p>
       )}
-      {reference && (
-        <p
-          role="status"
-          className="mt-5 max-w-xl rounded-md bg-brand/10 px-4 py-3 text-sm text-brand-dark"
-        >
-          Booking confirmed — reference{" "}
-          <span className="font-semibold">{reference}</span>. Your stay is
-          booked and the host has been notified; find it under{" "}
-          <Link href="/profile/bookings" className="font-semibold underline">
-            My Bookings
-          </Link>
-          .
-        </p>
-      )}
 
       <button
         type="submit"
-        disabled={submitting || reference !== null}
+        disabled={submitting}
         className="mt-[39px] flex h-16 w-[282px] items-center justify-center rounded-[10px] bg-brand px-[10px] py-[15px] text-[20px] font-medium leading-[1.2] text-white transition-colors hover:bg-brand-dark disabled:cursor-not-allowed disabled:opacity-60"
       >
         {submitting ? "Processing…" : "Confirm and Pay"}

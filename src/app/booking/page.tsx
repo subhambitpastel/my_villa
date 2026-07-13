@@ -9,10 +9,12 @@ import { getCurrentUser } from "@/lib/session";
 import {
   getBookingForManage,
   getBookedRanges,
+  getRoomBookings,
   getVillaDetail,
   getVillaReviews,
   getVillaReviewDistribution,
 } from "@/lib/queries";
+import { isRoomBased } from "@/lib/rooms";
 import { dayFromNow } from "@/lib/dates";
 import { loginHref } from "@/lib/returnTo";
 
@@ -53,8 +55,15 @@ export default async function ManageBookingPage({
   const reviews = await getVillaReviews(villa.id);
   const distribution = await getVillaReviewDistribution(villa.id);
   // Other guests' stays block dates; this booking is excluded so its own dates
-  // stay selectable while the guest adjusts them.
-  const bookedRanges = await getBookedRanges(booking.villaId, booking.id);
+  // stay selectable while the guest adjusts them. Hotels/resorts block only
+  // sold-out days (room inventory); other kinds block any overlapping stay.
+  const roomBased = isRoomBased(villa.kind);
+  const roomBookings = roomBased
+    ? await getRoomBookings(booking.villaId, booking.id)
+    : [];
+  const bookedRanges = roomBased
+    ? []
+    : await getBookedRanges(booking.villaId, booking.id);
 
   return (
     <>
@@ -88,6 +97,12 @@ export default async function ManageBookingPage({
               maxGuests={villa.max_guests}
               today={today}
               bookedRanges={bookedRanges}
+              roomBased={roomBased}
+              totalRooms={villa.rooms}
+              peoplePerRoom={villa.people_per_room}
+              rooms={booking.bookingRooms}
+              roomBookings={roomBookings}
+              discount={villa.discount}
             />
           }
         />

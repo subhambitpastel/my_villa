@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 const TABS = [
   { label: "Profile Settings", href: "/profile" },
   { label: "My Property", href: "/profile/properties", hostOnly: true },
+  { label: "My Packages", href: "/profile/packages", hostOnly: true },
   { label: "My Bookings", href: "/profile/bookings" },
   { label: "My Favorites", href: "/profile/favorites" },
   { label: "Rent Requests", href: "/profile/requests", hostOnly: true },

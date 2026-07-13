@@ -4,7 +4,7 @@ import { useState } from "react";
 import Hero from "./Hero";
 import { PromoGrid, SectionHeading, VillaRow } from "./sections";
 import type { Villa } from "./VillaCard";
-import type { PropertyType } from "@/lib/queries";
+import type { MaxGuestsByType, PropertyType } from "@/lib/queries";
 
 export type ShowcaseVilla = Villa & { kind: string };
 
@@ -24,22 +24,32 @@ function matchesTab(kind: string, tab: PropertyType) {
 
 export default function HomeShowcase({
   villas,
+  featured,
   cities,
+  maxGuestsByType,
   authed,
 }: {
   villas: ShowcaseVilla[];
+  /** Owner-promoted "featured" listings — a fixed curated set, not tab-filtered. */
+  featured: ShowcaseVilla[];
   cities: string[];
+  /** Largest capacity per hero tab — caps the hero's guest picker per tab. */
+  maxGuestsByType: MaxGuestsByType;
   authed: boolean;
 }) {
   const [tab, setTab] = useState<PropertyType>("rent");
   const filtered = villas.filter((v) => matchesTab(v.kind, tab));
   const topPicks = filtered.slice(0, 4);
-  const featured = filtered.slice(4, 8);
   const searchHref = `/search?type=${tab}`;
 
   return (
     <>
-      <Hero cities={cities} tab={tab} onTabChange={setTab} />
+      <Hero
+        cities={cities}
+        tab={tab}
+        onTabChange={setTab}
+        maxGuests={Math.min(30, maxGuestsByType[tab])}
+      />
 
       <div className="mx-auto w-full px-6 md:px-10 lg:px-[max(6%,calc((100%-1312px)/2))] xl:px-[max(8.33%,calc((100%-1312px)/2))]">
         <section className="pt-[60px]">
@@ -59,7 +69,7 @@ export default function HomeShowcase({
 
         {featured.length > 0 && (
           <section className="mt-[100px]">
-            <SectionHeading href={searchHref}>Featured villas</SectionHeading>
+            <SectionHeading href="/search">Featured villas</SectionHeading>
             <VillaRow villas={featured} authed={authed} />
           </section>
         )}

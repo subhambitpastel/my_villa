@@ -8,6 +8,7 @@ import FavoriteButton from "@/components/site/FavoriteButton";
 import { getCurrentUser } from "@/lib/session";
 import {
   getFavoriteVillaIds,
+  getMaxVillaGuests,
   isVillaAvailable,
   parsePropertyType,
   searchVillas,
@@ -31,6 +32,27 @@ export const metadata: Metadata = {
 
 type Result = CatalogVilla;
 
+// Describe the availability count by the real property mix rather than always
+// saying "villas" — e.g. "1 hotel and 3 villas" when a hotel is in the results.
+// Matches how searchVillas groups kinds: Resort, Hotel, everything else = villa.
+function availabilityLabel(results: Result[]): string {
+  const counts = { villa: 0, resort: 0, hotel: 0 };
+  for (const r of results) {
+    if (r.kind === "Resort") counts.resort++;
+    else if (r.kind === "Hotel") counts.hotel++;
+    else counts.villa++;
+  }
+  const parts: string[] = [];
+  const add = (n: number, noun: string) => {
+    if (n > 0) parts.push(`${n} ${noun}${n === 1 ? "" : "s"}`);
+  };
+  add(counts.villa, "villa");
+  add(counts.resort, "resort");
+  add(counts.hotel, "hotel");
+  if (parts.length <= 1) return parts[0] ?? "0 villas";
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
 function AmenityChip({ children }: { children: React.ReactNode }) {
   return (
     <span className="flex items-center gap-1 rounded-full bg-[#e9e8fd] px-2.5 py-1 text-[10px] text-brand">
@@ -51,6 +73,8 @@ function ResultCard({
   datesQuery: string;
 }) {
   const placeHref = `/place?id=${result.id}${datesQuery}`;
+  const discount = result.discount ?? 0;
+  const discounted = Math.round(result.price * (1 - discount / 100));
   return (
     <article className="relative flex overflow-hidden rounded-[10px] bg-white shadow-[0px_4px_14px_0px_rgba(0,0,0,0.09)]">
       <div className="relative h-auto w-[150px] shrink-0 sm:w-[190px]">
@@ -61,6 +85,11 @@ function ResultCard({
           sizes="190px"
           className="object-cover"
         />
+        {discount > 0 && (
+          <span className="absolute left-2 top-2 z-10 rounded-full bg-[#eb5757] px-2 py-0.5 text-[10px] font-semibold text-white">
+            {discount}% OFF
+          </span>
+        )}
       </div>
       <div className="flex min-w-0 flex-1 flex-col px-5 py-4">
         <h3 className="truncate text-[18px] font-semibold leading-[1.3] text-[#121212]">
@@ -69,33 +98,39 @@ function ResultCard({
             {result.name}, <span className="text-purple">{result.city}</span>
           </Link>
         </h3>
-        <p className="mt-1 text-[12px] text-gray">110 Kilometers away</p>
+        <p className="mt-1 text-[12px] text-gray">{result.kind}</p>
         <p className="mt-2 flex items-center gap-1 text-[11px] text-purple">
           <img src="/icons/star-filled.svg" alt="" width={14} height={14} className="h-3.5 w-3.5" />
           {result.reviews > 0 ? `${result.rating} (${result.reviews})` : "New listing"}
         </p>
-        <div className="mt-auto flex gap-2 pt-4">
-          <AmenityChip>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-              <path d="M2.5 9a14 14 0 0119 0M5.5 12.5a9.6 9.6 0 0113 0M8.5 16a5.3 5.3 0 017 0" />
-              <circle cx="12" cy="19" r="1.2" fill="currentColor" stroke="none" />
-            </svg>
-            Wifi
-          </AmenityChip>
-          <AmenityChip>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-              <path d="M4 13l1.5-4.5A2 2 0 017.4 7h9.2a2 2 0 011.9 1.5L20 13" />
-              <rect x="3.5" y="12.5" width="17" height="5" rx="1.4" />
-            </svg>
-            Free Parking
-          </AmenityChip>
-        </div>
+        {result.freeServices.length > 0 && (
+          <div className="mt-auto flex flex-wrap gap-2 pt-4">
+            {result.freeServices.slice(0, 3).map((name) => (
+              <AmenityChip key={name}>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M20 6L9 17l-5-5" />
+                </svg>
+                {name}
+              </AmenityChip>
+            ))}
+          </div>
+        )}
       </div>
       <div className="flex shrink-0 flex-col items-end px-5 py-4">
         <div className="flex items-center gap-2">
-          <p className="text-[14px] font-semibold text-[#121212]">
-            ${result.price}/night
-          </p>
+          {discount > 0 ? (
+            <p className="text-[14px] font-semibold text-[#121212]">
+              ${discounted}
+              <span className="ml-1 text-[11px] font-normal text-gray line-through">
+                ${result.price}
+              </span>
+              <span className="font-normal">/night</span>
+            </p>
+          ) : (
+            <p className="text-[14px] font-semibold text-[#121212]">
+              ${result.price}/night
+            </p>
+          )}
           {/* Above the stretched link so the heart stays clickable on its own */}
           <span className="relative z-10">
             <FavoriteButton
@@ -106,7 +141,6 @@ function ResultCard({
             />
           </span>
         </div>
-        <p className="mt-1 text-[12px] text-gray">Feb 18 - 29</p>
       </div>
     </article>
   );
@@ -127,12 +161,20 @@ export default async function SearchPage({
 
   const user = await getCurrentUser();
   const sortParam = one(params.sort);
+  // Guest count: filters results to places that sleep at least this many, and
+  // carries through to the villa's booking card.
+  const guestsRaw = Number(one(params.guests));
+  const guests =
+    Number.isInteger(guestsRaw) && guestsRaw >= 1 && guestsRaw <= 30
+      ? guestsRaw
+      : undefined;
   const filters: SearchFilterInput = {
     q: one(params.q)?.trim() || undefined,
     min: num(params.min),
     max: num(params.max),
     rating: num(params.rating),
     amenities: (one(params.amenities) ?? "").split(",").filter(Boolean),
+    guests,
     sort:
       sortParam === "price_asc" ||
       sortParam === "price_desc" ||
@@ -163,13 +205,6 @@ export default async function SearchPage({
     );
     results = results.filter((_, i) => avail[i]);
   }
-
-  // Guest count from the hero flows through to the villa's booking card.
-  const guestsRaw = Number(one(params.guests));
-  const guests =
-    Number.isInteger(guestsRaw) && guestsRaw >= 1 && guestsRaw <= 16
-      ? guestsRaw
-      : undefined;
 
   // Villa links keep the chosen dates + guests so the booking card prefills.
   const datesQuery =
@@ -218,7 +253,7 @@ export default async function SearchPage({
           <div className="mt-[30px] flex flex-col gap-10 lg:flex-row lg:gap-[90px]">
             {/* Left rail */}
             <div className="w-full shrink-0 lg:w-[440px]">
-              <SearchFilters />
+              <SearchFilters maxGuests={await getMaxVillaGuests()} />
 
               <div className="mt-[55px] space-y-[15px]">
                 <Link href="#" className="group relative block h-[150px] overflow-hidden rounded-[10px]">
@@ -269,7 +304,7 @@ export default async function SearchPage({
                     </span>{" "}
                     ({nightsBetween(checkIn, checkOut)} night
                     {nightsBetween(checkIn, checkOut) === 1 ? "" : "s"}) ·{" "}
-                    {results.length} villa{results.length === 1 ? "" : "s"} free
+                    {availabilityLabel(results)} free
                   </p>
                   <Link
                     href={clearDatesHref}

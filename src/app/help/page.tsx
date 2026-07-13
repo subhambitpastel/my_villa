@@ -17,7 +17,6 @@ const SECTIONS: { title: string; faqs: { q: string; a: React.ReactNode }[] }[] =
         a: (
           <>
             Find a place via{" "}
-            <Link href="/villas" className="text-brand underline">Villas</Link> or{" "}
             <Link href="/search" className="text-brand underline">Search</Link>,
             open it, pick your check-in and check-out dates and number of
             guests, then press Reserve and complete checkout. Paying confirms

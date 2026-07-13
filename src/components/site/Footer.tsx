@@ -12,7 +12,6 @@ const COLUMNS: {
     links: [
       { label: "About MyVilla", href: "/about" },
       { label: "How it works", href: "/help" },
-      { label: "All villas", href: "/villas" },
       { label: "Packages", href: "/packages" },
       { label: "Blog", href: "/blog" },
       { label: "Host your villa", href: "/host" },

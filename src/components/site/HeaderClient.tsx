@@ -1,22 +1,174 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import Logo from "./Logo";
 import { logoutAction } from "@/lib/actions";
 
+/* eslint-disable @next/next/no-img-element */
+
 const NAV_LINKS = [
   { label: "Home", href: "/" },
   { label: "Search", href: "/search" },
-  { label: "Villas", href: "/villas" },
   { label: "Packages", href: "/packages" },
   { label: "Promotions", href: "/promotions" },
   { label: "Help", href: "/help" },
   { label: "Blog", href: "/blog" },
 ];
 
-export default function HeaderClient({ authed }: { authed: boolean }) {
+// Account links shown in the signed-in avatar dropdown.
+const ACCOUNT_LINKS = [
+  { label: "My Account", href: "/account" },
+  { label: "My Bookings", href: "/profile/bookings" },
+  { label: "My Property", href: "/profile/properties" },
+  { label: "My Favorites", href: "/profile/favorites" },
+  { label: "Settings", href: "/profile/settings" },
+];
+
+const DEFAULT_AVATAR = "/images/host/avatar.png";
+
+/** Round avatar that reveals an account menu on hover (and click/keyboard). */
+function UserMenu({
+  avatar,
+  name,
+  email,
+  onSignOut,
+}: {
+  avatar: string;
+  name: string;
+  email: string;
+  onSignOut: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  // Keep the menu open briefly after the cursor leaves so there's time to move
+  // from the avatar down onto the menu without it snapping shut.
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const CLOSE_DELAY = 350;
+
+  const cancelClose = () => {
+    if (closeTimer.current) {
+      clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  };
+  const openNow = () => {
+    cancelClose();
+    setOpen(true);
+  };
+  const scheduleClose = () => {
+    cancelClose();
+    closeTimer.current = setTimeout(() => setOpen(false), CLOSE_DELAY);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: MouseEvent) {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    }
+    function onEsc(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onEsc);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onEsc);
+    };
+  }, [open]);
+
+  // Clear any pending close timer if the menu unmounts.
+  useEffect(() => cancelClose, []);
+
+  return (
+    <div
+      ref={ref}
+      className="relative"
+      onMouseEnter={openNow}
+      onMouseLeave={scheduleClose}
+    >
+      <button
+        type="button"
+        onClick={() => {
+          cancelClose();
+          setOpen((v) => !v);
+        }}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="Account menu"
+        className="block h-10 w-10 overflow-hidden rounded-full ring-2 ring-transparent transition hover:ring-brand/40 focus:outline-none focus-visible:ring-brand"
+      >
+        <img
+          src={avatar || DEFAULT_AVATAR}
+          alt=""
+          className="h-full w-full object-cover"
+        />
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-[calc(100%+8px)] w-60 overflow-hidden rounded-[12px] border border-line/50 bg-white p-1.5 text-[14px] shadow-[0px_12px_40px_0px_rgba(0,0,0,0.15)]"
+        >
+          <div className="flex items-center gap-3 px-3 py-2.5">
+            <img
+              src={avatar || DEFAULT_AVATAR}
+              alt=""
+              className="h-9 w-9 shrink-0 rounded-full object-cover"
+            />
+            <span className="min-w-0">
+              <span className="block truncate font-semibold text-ink">
+                {name || "Your account"}
+              </span>
+              {email && (
+                <span className="block truncate text-[12px] text-muted">
+                  {email}
+                </span>
+              )}
+            </span>
+          </div>
+          <hr className="my-1 border-line/50" />
+          {ACCOUNT_LINKS.map((it) => (
+            <Link
+              key={it.href}
+              href={it.href}
+              role="menuitem"
+              onClick={() => setOpen(false)}
+              className="block rounded-[8px] px-3 py-2 text-ink transition-colors hover:bg-brand/5 hover:text-brand"
+            >
+              {it.label}
+            </Link>
+          ))}
+          <hr className="my-1 border-line/50" />
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              onSignOut();
+            }}
+            className="block w-full rounded-[8px] px-3 py-2 text-left font-medium text-[#eb5757] transition-colors hover:bg-[#eb5757]/10"
+          >
+            Sign out
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function HeaderClient({
+  authed,
+  avatar = "",
+  name = "",
+  email = "",
+}: {
+  authed: boolean;
+  avatar?: string;
+  name?: string;
+  email?: string;
+}) {
   const [open, setOpen] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
@@ -56,26 +208,7 @@ export default function HeaderClient({ authed }: { authed: boolean }) {
                 {link.label}
               </Link>
             ))}
-            {authed ? (
-              <>
-                <Link
-                  href="/profile/settings"
-                  aria-current={isActive("/profile/settings") ? "page" : undefined}
-                  className={`transition-opacity hover:opacity-100 ${
-                    isActive("/profile/settings") ? "" : "opacity-50"
-                  }`}
-                >
-                  Settings
-                </Link>
-                <button
-                  type="button"
-                  onClick={signOut}
-                  className="opacity-50 transition-opacity hover:opacity-100"
-                >
-                  Sign out
-                </button>
-              </>
-            ) : (
+            {!authed && (
               <Link
                 href="/login"
                 className="opacity-50 transition-opacity hover:opacity-100"
@@ -85,12 +218,12 @@ export default function HeaderClient({ authed }: { authed: boolean }) {
             )}
           </nav>
           {authed ? (
-            <Link
-              href="/account"
-              className="rounded-[5px] bg-brand px-[10px] py-[5px] text-[16px] font-semibold tracking-[-0.32px] text-white transition-colors hover:bg-brand-dark"
-            >
-              My Account
-            </Link>
+            <UserMenu
+              avatar={avatar}
+              name={name}
+              email={email}
+              onSignOut={signOut}
+            />
           ) : (
             <Link
               href="/register"
@@ -140,24 +273,33 @@ export default function HeaderClient({ authed }: { authed: boolean }) {
             ))}
             {authed ? (
               <>
-                <li>
-                  <Link href="/profile/settings" className="block text-base text-ink">
-                    Settings
-                  </Link>
+                <li className="flex items-center gap-3 border-t border-line/40 pt-3">
+                  <img
+                    src={avatar || DEFAULT_AVATAR}
+                    alt=""
+                    className="h-9 w-9 shrink-0 rounded-full object-cover"
+                  />
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-semibold text-ink">
+                      {name || "Your account"}
+                    </span>
+                    {email && (
+                      <span className="block truncate text-xs text-muted">{email}</span>
+                    )}
+                  </span>
                 </li>
-                <li>
-                  <Link
-                    href="/profile"
-                    className="inline-block rounded-[5px] bg-brand px-[10px] py-[5px] text-sm font-semibold text-white"
-                  >
-                    My Account
-                  </Link>
-                </li>
+                {ACCOUNT_LINKS.map((it) => (
+                  <li key={it.href}>
+                    <Link href={it.href} className="block text-base text-ink">
+                      {it.label}
+                    </Link>
+                  </li>
+                ))}
                 <li>
                   <button
                     type="button"
                     onClick={signOut}
-                    className="block text-base text-ink"
+                    className="block text-base font-medium text-[#eb5757]"
                   >
                     Sign out
                   </button>

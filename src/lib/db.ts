@@ -7,6 +7,7 @@ import pg from "pg";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { hashPasswordSync } from "./password";
 import { dayFromNow, formatRange } from "./dates";
+import { quote } from "./pricing";
 
 const { Pool } = pg;
 
@@ -32,6 +33,9 @@ export type UserRow = {
   phone_number: string;
   country: string;
   avatar: string;
+  pay_methods: string; // JSON string[] — ways guests can pay this host
+  pay_account_type: string; // "Credit Card or Debit Card" | "Bank Account" | …
+  card_number: string; // host payout card/account, stored as entered (demo only)
   hosting_enabled: number; // 1 = host tools unlocked (auto-set on first listing)
   created_at: string;
 };
@@ -48,13 +52,31 @@ export type VillaRow = {
   rooms: number;
   bathrooms: number;
   max_guests: number; // max guests the owner allows this villa to sleep
+  people_per_room: number; // hotels/resorts: max occupancy of one room (0 = n/a)
+  featured: number; // 1 = paid promotion, shown in the home "Featured villas" row
   facilities: string; // JSON string[]
   services: string; // JSON string[]
   price: number;
+  discount: number; // host-set % off the nightly price (0 = none)
   rating: number;
   reviews: number;
   image: string;
   images: string; // JSON string[] — gallery, first entry doubles as cover
+  created_at: string;
+};
+
+export type PackageRow = {
+  id: number;
+  owner_id: number;
+  villa_id: number;
+  name: string;
+  description: string;
+  type: string; // "curated" | "weekend" | "weekly" | "monthly"
+  nights: number; // fixed stay length
+  max_guests: number; // occupancy cap ("for up to N guests")
+  discount: number; // advertised % off the nightly rate (0 = none)
+  price: number; // all-inclusive total for the N-night stay
+  inclusions: string; // JSON string[] — included experiences, all mandatory
   created_at: string;
 };
 
@@ -73,6 +95,10 @@ export type BookingRow = {
   check_in: string; // YYYY-MM-DD ('' on legacy rows)
   check_out: string; // YYYY-MM-DD ('' on legacy rows)
   guests: number;
+  rooms: number; // rooms this reservation holds (1 for whole-villa stays)
+  extras: string; // JSON {name, price}[] — paid add-ons chosen at checkout
+  package_id: number | null; // soft ref to the booked package (null = nightly stay)
+  package: string; // JSON snapshot {name, nights, guests, price, inclusions[]} or ''
   status: BookingStatus;
   created_at: string;
 };
@@ -94,6 +120,9 @@ CREATE TABLE IF NOT EXISTS users (
   phone_number  TEXT NOT NULL DEFAULT '',
   country       TEXT NOT NULL DEFAULT '',
   avatar        TEXT NOT NULL DEFAULT '/images/host/avatar.png',
+  pay_methods      TEXT NOT NULL DEFAULT '[]',
+  pay_account_type TEXT NOT NULL DEFAULT '',
+  card_number      TEXT NOT NULL DEFAULT '',
   hosting_enabled INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
@@ -110,9 +139,12 @@ CREATE TABLE IF NOT EXISTS villas (
   rooms       INTEGER NOT NULL DEFAULT 1,
   bathrooms   INTEGER NOT NULL DEFAULT 1,
   max_guests  INTEGER NOT NULL DEFAULT 8,
+  people_per_room INTEGER NOT NULL DEFAULT 0,
+  featured    INTEGER NOT NULL DEFAULT 0,
   facilities  TEXT NOT NULL DEFAULT '[]',
   services    TEXT NOT NULL DEFAULT '[]',
   price       REAL NOT NULL DEFAULT 0,
+  discount    INTEGER NOT NULL DEFAULT 0,
   rating      REAL NOT NULL DEFAULT 0,
   reviews     INTEGER NOT NULL DEFAULT 0,
   image       TEXT NOT NULL DEFAULT '/images/host/photo-1.jpg',
@@ -127,6 +159,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
+-- package_id is a soft reference (packages is created after this table, and a
+-- booked package is snapshotted into the package JSON so history survives the
+-- package being edited/deleted). package is '' for normal nightly stays.
 CREATE TABLE IF NOT EXISTS bookings (
   id         SERIAL PRIMARY KEY,
   villa_id   INTEGER NOT NULL REFERENCES villas(id) ON DELETE CASCADE,
@@ -135,6 +170,10 @@ CREATE TABLE IF NOT EXISTS bookings (
   check_in   TEXT NOT NULL DEFAULT '',
   check_out  TEXT NOT NULL DEFAULT '',
   guests     INTEGER NOT NULL DEFAULT 1,
+  rooms      INTEGER NOT NULL DEFAULT 1,
+  extras     TEXT NOT NULL DEFAULT '[]',
+  package_id INTEGER,
+  package    TEXT NOT NULL DEFAULT '',
   status     TEXT NOT NULL DEFAULT 'accepted'
              CHECK (status IN ('pending','accepted','declined','cancelled','completed')),
   created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
@@ -164,11 +203,67 @@ CREATE TABLE IF NOT EXISTS reviews (
   created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
+-- Owner-defined stay packages: a named, fixed bundle of included experiences
+-- (airport pickup, sightseeing, meals…) offered on one villa at a single price.
+-- Unlike optional extra services, a booked package's inclusions can't be
+-- unbundled by the guest — it's all-or-nothing.
+-- nights is the fixed stay length; max_guests the occupancy cap ("for up to
+-- N guests"); price the all-inclusive total for that N-night stay (covers the
+-- accommodation + inclusions — no nightly rate or service fee added on top).
+CREATE TABLE IF NOT EXISTS packages (
+  id          SERIAL PRIMARY KEY,
+  owner_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  villa_id    INTEGER NOT NULL REFERENCES villas(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  type        TEXT NOT NULL DEFAULT 'curated',
+  nights      INTEGER NOT NULL DEFAULT 1,
+  max_guests  INTEGER NOT NULL DEFAULT 1,
+  discount    INTEGER NOT NULL DEFAULT 0,
+  price       REAL NOT NULL DEFAULT 0,
+  inclusions  TEXT NOT NULL DEFAULT '[]',
+  created_at  TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
+);
+
+-- Additive migrations for databases created before a column existed. Postgres
+-- makes ADD COLUMN IF NOT EXISTS a no-op when the column is already present.
+ALTER TABLE villas ADD COLUMN IF NOT EXISTS people_per_room INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE villas ADD COLUMN IF NOT EXISTS featured INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE villas ADD COLUMN IF NOT EXISTS discount INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rooms INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS extras TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS package_id INTEGER;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS package TEXT NOT NULL DEFAULT '';
+ALTER TABLE packages ADD COLUMN IF NOT EXISTS nights INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE packages ADD COLUMN IF NOT EXISTS max_guests INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE packages ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'curated';
+ALTER TABLE packages ADD COLUMN IF NOT EXISTS discount INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS pay_methods      TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS pay_account_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS card_number      TEXT NOT NULL DEFAULT '';
+
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_villas_owner ON villas(owner_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_guest ON bookings(guest_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_villa ON bookings(villa_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_villa ON reviews(villa_id);
+CREATE INDEX IF NOT EXISTS idx_packages_owner ON packages(owner_id);
+CREATE INDEX IF NOT EXISTS idx_packages_villa ON packages(villa_id);
+
+-- Keep each villa's denormalized rating/reviews true to the reviews table.
+-- rateStayAction maintains these on new reviews; this corrects any villa that
+-- drifted out of sync (e.g. older seed rows that carried placeholder values),
+-- touching only rows that are actually wrong so it's a cheap no-op once synced.
+UPDATE villas SET reviews = agg.cnt, rating = agg.avg
+FROM (
+  SELECT v.id,
+         COUNT(r.id) AS cnt,
+         COALESCE(ROUND(AVG(r.stars)::numeric, 2), 0) AS avg
+  FROM villas v LEFT JOIN reviews r ON r.villa_id = v.id
+  GROUP BY v.id
+) agg
+WHERE villas.id = agg.id
+  AND (villas.reviews <> agg.cnt OR villas.rating <> agg.avg);
 `;
 
 /** Timestamp text (UTC "YYYY-MM-DD HH:MM:SS") offset by a Postgres interval. */
@@ -207,6 +302,25 @@ async function seed(pool: pg.Pool) {
     "/images/host/avatar.png",
   );
 
+  // Tatiana is the demo host — fill the fields the wizard collects but the basic
+  // insert leaves blank: contact/emergency details, the host-tools unlock, and
+  // the payout card guests' payments land in.
+  await pool.query(
+    `UPDATE users SET
+       emergency = $2, phone_code = $3, phone_number = $4, hosting_enabled = 1,
+       pay_methods = $5, pay_account_type = $6, card_number = $7
+     WHERE id = $1`,
+    [
+      tatiana,
+      "+86 138 0013 8000",
+      "+86",
+      "138 0013 8000",
+      JSON.stringify(["Mastercard", "VISA", "PayPal"]),
+      "Credit Card or Debit Card",
+      "4242 4242 4242 4242",
+    ],
+  );
+
   const tenants: number[] = [];
   for (const [email, name, avatar] of [
     ["alena@myvilla.com", "Alena James", "/images/profile/tenant-1.jpg"],
@@ -218,6 +332,42 @@ async function seed(pool: pg.Pool) {
   }
 
   const FACILITIES = JSON.stringify(["Wifi", "Free Parking"]);
+  // Priced extras every listing offers, stored as the `{name, price}[]` shape the
+  // villa detail page reads (see parseServiceList in queries.ts).
+  const SERVICE_MENU = [
+    { name: "Airport Pickup", price: 25 },
+    { name: "Daily Housekeeping", price: 15 },
+    { name: "Private Chef", price: 60 },
+  ];
+  // Realistic size/capacity per villa kind so listings don't all read as a
+  // default 1-bed / 1-bath / 8-guest place with a blank description.
+  // perRoom = max occupancy of one room; only hotels/resorts sell by the room,
+  // so other kinds keep 0 (they book as one whole unit).
+  const DIMS: Record<
+    string,
+    { area: string; rooms: number; bathrooms: number; maxGuests: number; perRoom: number }
+  > = {
+    Resort: { area: "1450", rooms: 6, bathrooms: 5, maxGuests: 14, perRoom: 3 },
+    Hotel: { area: "820", rooms: 4, bathrooms: 4, maxGuests: 8, perRoom: 2 },
+    Bungalow: { area: "560", rooms: 2, bathrooms: 2, maxGuests: 4, perRoom: 0 },
+    "Villa Living": { area: "980", rooms: 4, bathrooms: 3, maxGuests: 8, perRoom: 0 },
+  };
+  const KIND_NOUN: Record<string, string> = {
+    "Villa Living": "villa",
+    Resort: "resort",
+    Hotel: "hotel",
+    Bungalow: "bungalow",
+  };
+  const dimsFor = (name: string, kind: string, city: string) => {
+    const d = DIMS[kind] ?? DIMS["Villa Living"];
+    const noun = KIND_NOUN[kind] ?? "villa";
+    return {
+      ...d,
+      description: `${name} is a ${d.rooms}-bedroom ${noun} in ${city}, sleeping up to ${d.maxGuests} guests across ${d.area} sq yd of living space. Sunlit rooms, a full kitchen and an easy walk to the best of ${city} make it a simple place to settle in.`,
+      services: SERVICE_MENU,
+    };
+  };
+
   const insVilla = (
     owner: number,
     name: string,
@@ -229,18 +379,26 @@ async function seed(pool: pg.Pool) {
     reviews: number,
     image: string,
     createdOffset: string,
-  ) =>
-    pool
+  ) => {
+    const d = dimsFor(name, kind, city);
+    return pool
       .query(
-        `INSERT INTO villas (owner_id, name, kind, city, address, price, rating, reviews, image, facilities, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, ${TS("$11")}) RETURNING id`,
-        [owner, name, kind, city, address, price, rating, reviews, image, FACILITIES, createdOffset],
+        `INSERT INTO villas
+           (owner_id, name, kind, description, area, city, address, rooms, bathrooms,
+            max_guests, people_per_room, facilities, services, price, rating, reviews, image, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, ${TS("$18")}) RETURNING id`,
+        [
+          owner, name, kind, d.description, d.area, city, address, d.rooms, d.bathrooms,
+          d.maxGuests, d.perRoom, FACILITIES, JSON.stringify(d.services), price, rating,
+          reviews, image, createdOffset,
+        ],
       )
       .then((r) => (r.rows[0] as { id: number }).id);
+  };
 
-  const bund = await insVilla(tatiana, "The Bund", "Villa Living", "Shanghai", "The Bund, Shanghai", 137, 4.69, 32, "/images/profile/prop-1.jpg", "-21 days");
-  await insVilla(tatiana, "The Bund", "Villa Living", "Shanghai", "The Bund, Shanghai", 137, 4.69, 32, "/images/profile/prop-2.jpg", "-2 months");
-  const hunza = await insVilla(tatiana, "Hunza Luxus", "Resort", "Pakistan", "Hunza Valley, Pakistan", 105, 4.69, 32, "/images/profile/prop-3.jpg", "-4 months");
+  const bund = await insVilla(tatiana, "The Bund", "Villa Living", "Shanghai", "The Bund, Shanghai", 137, 0, 0, "/images/profile/prop-1.jpg", "-21 days");
+  await insVilla(tatiana, "The Bund", "Villa Living", "Shanghai", "The Bund, Shanghai", 137, 0, 0, "/images/profile/prop-2.jpg", "-2 months");
+  const hunza = await insVilla(tatiana, "Hunza Luxus", "Resort", "Pakistan", "Hunza Valley, Pakistan", 105, 0, 0, "/images/profile/prop-3.jpg", "-4 months");
 
   const catalog: Array<[string, string, string, number, string]> = [
     ["The Bund", "Resort", "Shanghai", 137, "/images/card-bund-1.png"],
@@ -254,9 +412,15 @@ async function seed(pool: pg.Pool) {
   ];
   let shan = 0;
   for (const [name, kind, city, price, image] of catalog) {
-    const id = await insVilla(tatiana, name, kind, city, `${name}, ${city}`, price, 4.69, 32, image, "-5 months");
+    const id = await insVilla(tatiana, name, kind, city, `${name}, ${city}`, price, 0, 0, image, "-5 months");
     if (name === "The Shan Luxus") shan = id;
   }
+
+  // A few featured (paid-promotion) listings so the home "Featured villas" row
+  // isn't empty in the demo — a resort, a villa and a hotel.
+  await pool.query("UPDATE villas SET featured = 1 WHERE id = ANY($1)", [
+    [hunza, bund, shan],
+  ]);
 
   const insBooking = (
     villaId: number,
@@ -329,6 +493,43 @@ async function seed(pool: pg.Pool) {
        rating  = COALESCE((SELECT ROUND(AVG(stars)::numeric, 2) FROM reviews WHERE villa_id = villas.id), 0)
      WHERE id IN (SELECT DISTINCT villa_id FROM reviews)`,
   );
+
+  // Demo stay packages — fixed nights + occupancy, one all-inclusive price.
+  // At least one of every type (Curated + the Weekend/Weekly/Monthly presets)
+  // across all three villa kinds: Bund = whole villa, Hunza = resort and Shan =
+  // hotel (both room-based).
+  const insPackage = (
+    villaId: number,
+    name: string,
+    description: string,
+    type: string,
+    nights: number,
+    maxGuests: number,
+    discount: number,
+    price: number,
+    inclusions: string[],
+  ) =>
+    pool.query(
+      `INSERT INTO packages (owner_id, villa_id, name, description, type, nights, max_guests, discount, price, inclusions)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [tatiana, villaId, name, description, type, nights, maxGuests, discount, price, JSON.stringify(inclusions)],
+    );
+  // Price a preset like a real booking of that length (long-stay discount baked
+  // in by quote), sold all-inclusive; `rooms` is what the occupancy reserves on
+  // a room-based villa (1 for a whole-villa stay).
+  const presetPrice = (nightly: number, rooms: number, nights: number) =>
+    Math.round(quote(nightly * rooms, nights).total * 100) / 100;
+
+  // Curated — custom nights/price, no advertised discount. One per villa kind.
+  await insPackage(bund, "Shanghai City Break", "Three nights on the Bund with the sights sorted for you.", "curated", 3, 6, 0, 780, ["Airport pickup & drop", "Guided city tour", "Welcome dinner"]);
+  await insPackage(hunza, "Hunza Valley Explorer", "Five mountain nights with transfers and daily sightseeing.", "curated", 5, 6, 0, 1200, ["Airport transfers", "Valley sightseeing tour", "Campfire dinner", "Daily breakfast"]);
+  if (shan) await insPackage(shan, "Shan Luxus Weekend", "A quick two-night city escape with a spa session included.", "curated", 2, 4, 0, 520, ["Airport pickup", "Spa session for two", "Daily breakfast"]);
+
+  // Presets — Weekend (3n), Weekly (7n, 15% off), Monthly (28n, 30% off). Shan
+  // for 4 guests and Hunza for 6 guests each reserve 2 rooms; the Bund is whole.
+  if (shan) await insPackage(shan, "Shan Weekend Getaway", "A three-night hotel escape with the essentials handled.", "weekend", 3, 4, 0, presetPrice(126, 2, 3), ["Airport pickup", "Daily breakfast", "Late checkout"]);
+  await insPackage(hunza, "Hunza Weekly Escape", "A full week in the valley at a long-stay rate.", "weekly", 7, 6, 15, presetPrice(105, 2, 7), ["Airport transfers", "Guided day hikes", "Daily breakfast", "Campfire dinner"]);
+  await insPackage(bund, "Bund Monthly Retreat", "Live on the Bund for a month — the long-stay rate, all-inclusive.", "monthly", 28, 6, 30, presetPrice(137, 1, 28), ["Airport pickup & drop", "Weekly housekeeping", "City transit pass", "Welcome dinner"]);
 }
 
 /**

@@ -24,8 +24,11 @@ const SORTS = [
   { value: "rating", label: "Top rated" },
 ];
 
-// Mirrors the hero's Resort / Hotels / Rent tabs on the home page.
+// Mirrors the hero's Resort / Hotels / Rent tabs on the home page, plus an
+// "All types" option (empty value = no `type` filter) so a guest can see every
+// property regardless of whether it's a villa rental, resort or hotel.
 const PROPERTY_TYPES = [
+  { value: "", label: "All types" },
   { value: "resort", label: "Resorts" },
   { value: "hotel", label: "Hotels" },
   { value: "rent", label: "Rent" },
@@ -41,7 +44,7 @@ function digitsToNumber(v: string): number | null {
   return digits === "" ? null : Number(digits);
 }
 
-export default function SearchFilters() {
+export default function SearchFilters({ maxGuests }: { maxGuests: number }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -55,6 +58,10 @@ export default function SearchFilters() {
   const rating = Number(searchParams.get("rating")) || null;
   const sort = searchParams.get("sort") ?? "newest";
   const type = searchParams.get("type");
+  const guests = Number(searchParams.get("guests")) || 0;
+  // Options scale to the biggest place listed (floor 8, cap 30) — same as the
+  // home hero's guest picker.
+  const guestCap = Math.min(30, Math.max(8, maxGuests));
   const [dateIn, setDateIn] = useState(searchParams.get("checkin") ?? "");
   const [dateOut, setDateOut] = useState(searchParams.get("checkout") ?? "");
 
@@ -119,6 +126,20 @@ export default function SearchFilters() {
     changeDates(null, null);
   }
 
+  // Any filter, sort, date or query in the URL means there's something to clear.
+  const hasActiveFilters = searchParams.toString().length > 0;
+
+  function clearAll() {
+    setQuery("");
+    setMin("");
+    setMax("");
+    setDateIn("");
+    setDateOut("");
+    // Drop every query param — the derived values (amenities, rating, sort,
+    // type, guests) all read from searchParams, so they reset automatically.
+    router.replace(pathname, { scroll: false });
+  }
+
   function toggleAmenity(a: string) {
     const next = selected.includes(a)
       ? selected.filter((x) => x !== a)
@@ -166,7 +187,18 @@ export default function SearchFilters() {
 
       <div className="mt-[35px] rounded-[10px] bg-white p-6 shadow-[0px_4px_14px_0px_rgba(0,0,0,0.06)]">
         <div className="flex items-center justify-between gap-3">
-          <h2 className="text-[20px] font-semibold text-[#121212]">Filters</h2>
+          <div className="flex items-baseline gap-3">
+            <h2 className="text-[20px] font-semibold text-[#121212]">Filters</h2>
+            {hasActiveFilters && (
+              <button
+                type="button"
+                onClick={clearAll}
+                className="text-[12px] text-[#eb5757] underline hover:opacity-80"
+              >
+                Clear all
+              </button>
+            )}
+          </div>
           <label className="flex items-center gap-1 rounded-[4px] border border-[#c6c6c6] px-2 py-1.5 text-[11px] text-[#121212]">
             <span className="sr-only">Sort results</span>
             <select
@@ -288,23 +320,55 @@ export default function SearchFilters() {
           Pick both dates to show only villas free for that stay.
         </p>
 
+        <h3 className="mt-6 text-[16px] font-medium text-[#121212]">Guests</h3>
+        <div className="relative mt-3">
+          <select
+            value={guests || ""}
+            onChange={(e) => apply({ guests: e.target.value || null })}
+            aria-label="Minimum number of guests"
+            className="w-full cursor-pointer appearance-none rounded-[6px] border border-[#c9c9d4] bg-white px-3 py-2 pr-8 text-[13px] text-[#121212] focus:border-brand focus:outline-none"
+          >
+            <option value="">Any number of guests</option>
+            {Array.from({ length: guestCap }, (_, i) => i + 1).map((n) => (
+              <option key={n} value={n}>
+                {n} guest{n === 1 ? "" : "s"} or more
+              </option>
+            ))}
+          </select>
+          <svg
+            width="9"
+            height="6"
+            viewBox="0 0 9 6"
+            fill="none"
+            aria-hidden="true"
+            className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2"
+          >
+            <path d="M1 1l3.5 3.5L8 1" stroke="#4a4a4a" strokeWidth="1.2" strokeLinecap="round" />
+          </svg>
+        </div>
+
         <h3 className="mt-6 text-[16px] font-medium text-[#121212]">Property type</h3>
         <div className="mt-3 flex flex-wrap gap-x-2.5 gap-y-3">
-          {PROPERTY_TYPES.map((t) => (
-            <button
-              key={t.value}
-              type="button"
-              onClick={() => apply({ type: type === t.value ? null : t.value })}
-              aria-pressed={type === t.value}
-              className={`rounded-full px-3.5 py-1.5 text-[13px] transition-colors ${
-                type === t.value
-                  ? "bg-brand text-white"
-                  : "bg-[#e9e8fd] text-brand hover:bg-brand/20"
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+          {PROPERTY_TYPES.map((t) => {
+            // "All types" (empty value) is active when no `type` is set and
+            // clears the filter; a specific type selects that kind.
+            const active = t.value ? type === t.value : !type;
+            return (
+              <button
+                key={t.value || "all"}
+                type="button"
+                onClick={() => apply({ type: t.value || null })}
+                aria-pressed={active}
+                className={`rounded-full px-3.5 py-1.5 text-[13px] transition-colors ${
+                  active
+                    ? "bg-brand text-white"
+                    : "bg-[#e9e8fd] text-brand hover:bg-brand/20"
+                }`}
+              >
+                {t.label}
+              </button>
+            );
+          })}
         </div>
 
         <h3 className="mt-6 text-[16px] font-medium text-[#121212]">Amenities</h3>

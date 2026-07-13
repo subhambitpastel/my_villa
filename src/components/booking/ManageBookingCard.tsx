@@ -7,6 +7,7 @@ import { quote } from "@/lib/pricing";
 import { updateBookingAction, cancelBookingAction } from "@/lib/actions";
 import DateRangeField from "@/components/home/DateRangeField";
 import type { BookedRange } from "@/lib/queries";
+import { fullyBookedRanges, type RoomBooking } from "@/lib/rooms";
 
 /* eslint-disable @next/next/no-img-element */
 
@@ -19,9 +20,17 @@ export default function ManageBookingCard({
   maxGuests,
   today,
   bookedRanges,
+  roomBased = false,
+  totalRooms = 1,
+  peoplePerRoom = 0,
+  rooms = 1,
+  roomBookings = [],
+  discount = 0,
 }: {
   bookingId: number;
   price: number;
+  /** Host-set % off the nightly price (applied in the quote). */
+  discount?: number;
   checkIn: string;
   checkOut: string;
   guests: number;
@@ -29,20 +38,36 @@ export default function ManageBookingCard({
   today: string;
   /** Confirmed stays that block dates — this booking is already excluded. */
   bookedRanges: BookedRange[];
+  /** Hotels/resorts: this reservation holds a fixed number of rooms; dates and
+   *  guests can change but the room count is set at booking time. */
+  roomBased?: boolean;
+  totalRooms?: number;
+  peoplePerRoom?: number;
+  rooms?: number;
+  roomBookings?: RoomBooking[];
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const guestOptions = Math.max(1, maxGuests);
+  // Guest cap: the rooms this booking holds × people-per-room (hotels/resorts),
+  // else the whole-villa capacity.
+  const guestCap = roomBased
+    ? Math.max(1, rooms * peoplePerRoom)
+    : Math.max(1, maxGuests);
 
   const [checkIn, setCheckIn] = useState(initialCheckIn);
   const [checkOut, setCheckOut] = useState(initialCheckOut);
   const [guests, setGuests] = useState(
-    Math.min(Math.max(1, initialGuests), guestOptions),
+    Math.min(Math.max(1, initialGuests), guestCap),
   );
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(
     null,
   );
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+
+  // Sold-out days (excluding this booking's own rooms) block the calendar.
+  const calendarBlocked = roomBased
+    ? fullyBookedRanges(roomBookings, totalRooms)
+    : bookedRanges;
 
   const nights = Math.max(0, nightsBetween(checkIn, checkOut));
   const datesReady = nights >= 1 && checkIn >= today;
@@ -50,7 +75,7 @@ export default function ManageBookingCard({
     checkIn !== initialCheckIn ||
     checkOut !== initialCheckOut ||
     guests !== initialGuests;
-  const q = quote(price, nights);
+  const q = quote(price * (roomBased ? rooms : 1), nights, discount);
 
   function saveChanges() {
     if (!datesReady || !changed || pending) return;
@@ -106,7 +131,7 @@ export default function ManageBookingCard({
           variant="booking"
           checkIn={checkIn || null}
           checkOut={checkOut || null}
-          bookedRanges={bookedRanges}
+          bookedRanges={calendarBlocked}
           onChange={(nextIn, nextOut) => {
             setCheckIn(nextIn ?? "");
             setCheckOut(nextOut ?? "");
@@ -114,7 +139,18 @@ export default function ManageBookingCard({
         />
       </div>
 
-      {/* Guest picker — 1..maxGuests, the villa's owner-set capacity. */}
+      {roomBased && (
+        <div className="mt-[22px] flex items-center justify-between rounded-[10px] border-[1.5px] border-[#ddd] bg-[#faf9ff] p-[15px]">
+          <span className="text-[18px] font-medium leading-[1.2] text-[#121212]">
+            Rooms
+          </span>
+          <span className="text-[16px] leading-[1.2] text-[#4a4a4a]">
+            {rooms} {rooms === 1 ? "room" : "rooms"} reserved
+          </span>
+        </div>
+      )}
+
+      {/* Guest picker — capped by the rooms this booking holds. */}
       <label
         htmlFor="manage-guests"
         className="relative mt-[22px] flex cursor-pointer items-center justify-between rounded-[10px] border-[1.5px] border-[#ddd] p-[15px]"
@@ -141,7 +177,7 @@ export default function ManageBookingCard({
           aria-label="Number of guests"
           className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
         >
-          {Array.from({ length: guestOptions }, (_, i) => i + 1).map((n) => (
+          {Array.from({ length: guestCap }, (_, i) => i + 1).map((n) => (
             <option key={n} value={n}>
               {n} {n === 1 ? "guest" : "guests"}
             </option>
@@ -212,7 +248,9 @@ export default function ManageBookingCard({
       <dl className="mt-[40px] space-y-[18px] text-[20px] leading-[1.2] text-black">
         <div className="flex items-center justify-between">
           <dt>
-            ${price} × {nights} night{nights === 1 ? "" : "s"}
+            ${price}
+            {roomBased ? ` × ${rooms} room${rooms === 1 ? "" : "s"}` : ""} ×{" "}
+            {nights} night{nights === 1 ? "" : "s"}
           </dt>
           <dd className="font-light">${q.subtotal.toFixed(2)}</dd>
         </div>

@@ -1,5 +1,6 @@
 import Image from "next/image";
 import type { VillaDetail } from "@/lib/queries";
+import GalleryLightbox from "@/components/place/GalleryLightbox";
 import {
   getVillaReviews,
   getVillaReviewDistribution,
@@ -56,6 +57,7 @@ export default function VillaDetailView({
   breadcrumb,
   topActions,
   rightColumn,
+  packagesSlot,
 }: {
   villa: VillaDetail;
   reviews: Awaited<ReturnType<typeof getVillaReviews>>;
@@ -64,6 +66,8 @@ export default function VillaDetailView({
   topActions?: React.ReactNode;
   /** The card shown in the right column (booking form, manage form, or owner tools). */
   rightColumn: React.ReactNode;
+  /** Guest-facing package cards (VillaPackages); omitted on the manage view. */
+  packagesSlot?: React.ReactNode;
 }) {
   const reviewRows = distribution.reduce((s, d) => s + d.count, 0);
   const gallery = villa.gallery;
@@ -100,7 +104,7 @@ export default function VillaDetailView({
       {/* Gallery — Figma: 950px hero + 2×2 of 300px tiles on a 1600px row.
           Widths are fr ratios so the whole gallery scales below 1648px. */}
       {sideImages.length > 0 ? (
-        <div className="mt-[14px] grid grid-cols-2 gap-x-[26px] gap-y-[22px] lg:grid-cols-[950fr_301fr_301fr] lg:gap-x-6">
+        <div className="relative mt-[14px] grid grid-cols-2 gap-x-[26px] gap-y-[22px] lg:grid-cols-[950fr_301fr_301fr] lg:gap-x-6">
           <div className="relative col-span-2 h-72 overflow-hidden rounded-[21px] shadow-[0px_15px_30px_0px_rgba(0,0,0,0.1)] lg:col-span-1 lg:row-span-2 lg:aspect-[950/622] lg:h-auto">
             <Image
               src={gallery[0]}
@@ -125,6 +129,9 @@ export default function VillaDetailView({
               />
             </div>
           ))}
+          {gallery.length > 5 && (
+            <GalleryLightbox images={gallery} name={villa.name} />
+          )}
         </div>
       ) : (
         <div className="relative mt-[14px] h-72 overflow-hidden rounded-[21px] shadow-[0px_15px_30px_0px_rgba(0,0,0,0.1)] lg:aspect-[950/622] lg:h-auto lg:w-[59.375%]">
@@ -188,6 +195,22 @@ export default function VillaDetailView({
                     </li>
                   ))}
                 </ul>
+              </section>
+            </>
+          )}
+
+          {packagesSlot && (
+            <>
+              <Divider className="mt-[30px]" />
+              <section id="packages" className="mt-[30px] scroll-mt-24">
+                <h2 className="text-[24px] font-semibold leading-[1.3] text-brand">
+                  Packages
+                </h2>
+                <p className="mt-[8px] text-[16px] leading-[1.35] text-[#4a4a4a]">
+                  All-inclusive getaways for a fixed number of nights — pick a
+                  start date and everything below is included.
+                </p>
+                {packagesSlot}
               </section>
             </>
           )}

@@ -5,16 +5,20 @@ import Footer from "@/components/site/Footer";
 import PlaceActions from "@/components/place/PlaceActions";
 import BookingCard from "@/components/place/BookingCard";
 import VillaDetailView from "@/components/place/VillaDetailView";
+import VillaPackages from "@/components/place/VillaPackages";
 import { getCurrentUser } from "@/lib/session";
 import {
   getBookedRanges,
   getCatalogVillas,
   getFavoriteVillaIds,
+  getPackagesForVilla,
+  getRoomBookings,
   getVillaDetail,
   getVillaReviewDistribution,
   getVillaReviews,
   type VillaDetail,
 } from "@/lib/queries";
+import { isRoomBased } from "@/lib/rooms";
 import { dayFromNow, nightsBetween, parseDay } from "@/lib/dates";
 
 type Search = {
@@ -58,7 +62,7 @@ export default async function PlacePage({ searchParams }: Search) {
   const defaultCheckOut = carriedDates ? outParam! : dayFromNow(10);
   const carriedGuests = Number(guestsParam);
   const defaultGuests =
-    Number.isInteger(carriedGuests) && carriedGuests >= 1 && carriedGuests <= 16
+    Number.isInteger(carriedGuests) && carriedGuests >= 1 && carriedGuests <= 30
       ? carriedGuests
       : 2;
 
@@ -81,6 +85,20 @@ export default async function PlacePage({ searchParams }: Search) {
 
   const reviews = await getVillaReviews(villa.id);
   const distribution = await getVillaReviewDistribution(villa.id);
+  // Hotels/resorts sell rooms individually; other kinds book as one whole unit.
+  const roomBased = isRoomBased(villa.kind);
+  const roomBookings = roomBased ? await getRoomBookings(villa.id) : [];
+  const bookedRanges = roomBased ? [] : await getBookedRanges(villa.id);
+
+  // Packages are shown to guests only (owners can't book their own villa).
+  const isOwnerViewing = !!user && villa.owner_id === user.id;
+  const packages = isOwnerViewing ? [] : await getPackagesForVilla(villa.id);
+  // The "stay 7+/28+ nights for a discount" note only makes sense when the villa
+  // actually offers the long-stay packages that embody those tiers (Weekly
+  // Escape / Monthly Retreat) — otherwise it's advertised on villas that don't.
+  const hasLongStayPackages = packages.some(
+    (p) => p.type === "weekly" || p.type === "monthly",
+  );
 
   return (
     <>
@@ -101,6 +119,14 @@ export default async function PlacePage({ searchParams }: Search) {
           }
           topActions={
             <PlaceActions villaId={villa.id} initialSaved={saved} authed={user !== null} />
+          }
+          packagesSlot={
+            packages.length > 0 ? (
+              <VillaPackages
+                packages={packages}
+                peoplePerRoom={villa.people_per_room}
+              />
+            ) : null
           }
           rightColumn={
             user && villa.owner_id === user.id ? (
@@ -137,9 +163,15 @@ export default async function PlacePage({ searchParams }: Search) {
                 defaultGuests={defaultGuests}
                 maxGuests={villa.max_guests}
                 today={dayFromNow(0)}
-                bookedRanges={await getBookedRanges(villa.id)}
+                bookedRanges={bookedRanges}
                 authed={user !== null}
                 services={villa.serviceList}
+                roomBased={roomBased}
+                totalRooms={villa.rooms}
+                peoplePerRoom={villa.people_per_room}
+                roomBookings={roomBookings}
+                discount={villa.discount}
+                hasLongStayPackages={hasLongStayPackages}
               />
             )
           }

@@ -57,9 +57,6 @@ export default async function PromotionsPage() {
   const excludeOwnerId = user?.id;
   const under110 = (await searchVillas({ max: 110, excludeOwnerId })).length;
   const topRated = (await searchVillas({ rating: 4.5, excludeOwnerId })).length;
-  const newListings = (await searchVillas({ excludeOwnerId })).filter(
-    (v) => v.reviews === 0,
-  ).length;
   const cities = await getVillaCities();
 
   return (
@@ -130,26 +127,6 @@ export default async function PromotionsPage() {
               </Link>
             ))}
           </div>
-
-          {newListings > 0 && (
-            <div className="mt-14 flex flex-col items-start gap-4 rounded-[10px] bg-white p-8 shadow-[0px_4px_14px_0px_rgba(0,0,0,0.06)] sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <h2 className="font-nunito text-[24px] font-bold text-heading">
-                  Be the first to stay
-                </h2>
-                <p className="mt-1 text-[14px] text-body">
-                  {newListings} brand-new {newListings === 1 ? "listing" : "listings"}{" "}
-                  with no reviews yet — try something nobody else has.
-                </p>
-              </div>
-              <Link
-                href="/villas"
-                className="rounded-[8px] bg-brand px-6 py-2.5 text-[14px] font-semibold text-white transition-colors hover:bg-brand-dark"
-              >
-                Browse new listings
-              </Link>
-            </div>
-          )}
         </div>
       </main>
       <Footer />

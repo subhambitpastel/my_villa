@@ -24,6 +24,11 @@ export const FACILITY_CHIPS = [
   "Swimming Pool", "Jaccuzzi", "BBQ Corner", "TV",
 ];
 
+// A listing must show between MIN and MAX photos. Enforced in the wizard and
+// again server-side on save (shared so the two can't drift apart).
+export const MIN_VILLA_IMAGES = 5;
+export const MAX_VILLA_IMAGES = 8;
+
 export type Draft = {
   step: number;
   personal: {
@@ -44,6 +49,8 @@ export type Draft = {
     rooms: string;
     bathrooms: string;
     maxGuests: string;
+    /** Hotels/resorts: max occupancy of one room (empty for whole-villa kinds). */
+    peoplePerRoom: string;
     facilities: string[];
   };
   images: string[];
@@ -57,6 +64,8 @@ export type Draft = {
     custom?: string;
   };
   price: number;
+  /** Host-set % off the nightly price (0 = none). */
+  discount: number;
   payment: { methods: string[]; accountType: string; cardNumber: string };
 };
 
@@ -82,10 +91,12 @@ export const DEFAULT_DRAFT: Draft = {
     rooms: "",
     bathrooms: "",
     maxGuests: "",
+    peoplePerRoom: "",
     facilities: [],
   },
   images: DEFAULT_IMAGES,
   services: { selected: [], prices: {}, customs: [] },
   price: 135,
+  discount: 0,
   payment: { methods: ["Mastercard", "G Pay", "PayPal", "VISA"], accountType: "", cardNumber: "" },
 };

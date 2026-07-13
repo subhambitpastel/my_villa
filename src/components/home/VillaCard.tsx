@@ -7,8 +7,10 @@ export type Villa = {
   name: string;
   city: string;
   price: number;
-  distance: string;
-  dates: string;
+  /** Host-set % off the nightly price (0 = none). */
+  discount?: number;
+  /** The villa's free amenities/services — shown as chips (like the search page). */
+  freeServices: string[];
   image: string;
   liked?: boolean;
 };
@@ -23,6 +25,8 @@ export default function VillaCard({
   refreshOnFavorite?: boolean;
 }) {
   const placeHref = `/place?id=${villa.id}`;
+  const discount = villa.discount ?? 0;
+  const discounted = Math.round(villa.price * (1 - discount / 100));
 
   return (
     <article className="overflow-hidden rounded-[12px] bg-white shadow-[0px_2px_4px_0px_rgba(28,5,77,0.1),0px_12px_32px_0px_rgba(0,0,0,0.05)]">
@@ -38,6 +42,11 @@ export default function VillaCard({
             />
           </div>
         </Link>
+        {discount > 0 && (
+          <span className="absolute left-[9px] top-[9px] rounded-full bg-[#eb5757] px-2.5 py-1 text-[11px] font-semibold text-white shadow-sm">
+            {discount}% OFF
+          </span>
+        )}
         <div className="absolute right-[9px] top-[9px]">
           <FavoriteButton
             villaId={villa.id}
@@ -57,14 +66,45 @@ export default function VillaCard({
                 <span className="text-purple">{villa.city}</span>
               </Link>
             </h3>
-            <p className="shrink-0 text-right text-[13px] font-semibold">
-              ${villa.price}/night
-            </p>
+            {discount > 0 ? (
+              <p className="shrink-0 text-right text-[13px] font-semibold">
+                ${discounted}
+                <span className="ml-1 text-[11px] font-normal text-[#9d9da6] line-through">
+                  ${villa.price}
+                </span>
+                <span className="font-normal">/night</span>
+              </p>
+            ) : (
+              <p className="shrink-0 text-right text-[13px] font-semibold">
+                ${villa.price}/night
+              </p>
+            )}
           </div>
-          <div className="flex items-center justify-between gap-2 text-gray">
-            <p className="text-[15px]">{villa.distance}</p>
-            <p className="text-[13px]">{villa.dates}</p>
-          </div>
+          {villa.freeServices.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-2">
+              {villa.freeServices.slice(0, 3).map((name) => (
+                <span
+                  key={name}
+                  className="flex items-center gap-1 rounded-full bg-[#e9e8fd] px-2.5 py-1 text-[10px] text-brand"
+                >
+                  <svg
+                    width="11"
+                    height="11"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M20 6L9 17l-5-5" />
+                  </svg>
+                  {name}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </article>

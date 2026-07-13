@@ -5,15 +5,30 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { revalidatePath } from "next/cache";
 import { getDb, tx, type UserRow } from "./db";
-import { formatRange, nightsBetween, parseDay } from "./dates";
+import { addDays, formatRange, isAtLeastAge, nightsBetween, parseDay } from "./dates";
 import { bookingReference } from "./pricing";
-import { isVillaAvailable } from "./queries";
+import { parsePackageType, presetNights, presetDiscount } from "./packageTypes";
+import { getPackageById, isVillaAvailable, parseServiceList } from "./queries";
+import { isRoomBased, roomCapacity, roomsForGuests } from "./rooms";
 import { hashPasswordSync, verifyPassword } from "./password";
 import { createSession, destroySession, getCurrentUser } from "./session";
 import { appBaseUrl, sendEmail } from "./email";
 import { clientIp, rateLimit } from "./rateLimit";
+import { MAX_VILLA_IMAGES, MIN_VILLA_IMAGES } from "@/components/host/draft";
+import { isValidPhoneNumber, splitDialNumber } from "./countries";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
+
+/** Validate an optional stored emergency contact ("+CC number"). Returns an
+ *  error message, or null when it's empty (allowed) or well-formed. */
+function emergencyError(emergency: string): string | null {
+  const value = (emergency ?? "").trim();
+  if (!value) return null;
+  const { code, number } = splitDialNumber(value);
+  return !code || !isValidPhoneNumber(number)
+    ? "Enter a valid emergency contact number with its country code."
+    : null;
+}
 
 const TOO_MANY = "Too many attempts. Please wait a minute and try again.";
 
@@ -174,6 +189,12 @@ export async function updateProfileAction(profile: {
   const email = profile.email.trim().toLowerCase();
   if (!EMAIL_RE.test(email)) return fail("Enter a valid email address.");
 
+  if (profile.dob.trim() && !isAtLeastAge(profile.dob))
+    return fail("You must be at least 18 years old.");
+
+  const emgErr = emergencyError(profile.emergency);
+  if (emgErr) return fail(emgErr);
+
   const db = getDb();
   const clash = await db
     .prepare("SELECT id FROM users WHERE email = ? AND id != ?")
@@ -239,6 +260,8 @@ export async function completeGuestProfileAction(input: {
   if (age < 18) return fail("You must be at least 18 years old to book stays.");
   if (age > 120) return fail("Please enter a valid date of birth.");
   if (!input.address.trim()) return fail("Home address is required.");
+  const emgErr = emergencyError(input.emergency);
+  if (emgErr) return fail(emgErr);
 
   await getDb()
     .prepare(
@@ -269,12 +292,47 @@ type VillaInput = {
   rooms: number;
   bathrooms: number;
   maxGuests: number;
+  /** Hotels/resorts: max occupancy of one room (0 for whole-villa kinds). */
+  peoplePerRoom?: number;
   facilities: string[];
   /** Extra services with the per-stay price the owner charges (0 = free). */
   services: { name: string; price: number }[];
   price: number;
+  /** Host-set % off the nightly price (0–90). */
+  discount?: number;
   images?: string[];
 };
+
+/** The host's payout details as collected on the wizard's Payment step. */
+type PaymentInput = {
+  methods: string[];
+  accountType: string;
+  cardNumber: string;
+};
+
+/** Group a card/account number into 4-digit blocks for storage/display. */
+const groupCard = (raw: string) =>
+  String(raw ?? "").replace(/\D/g, "").replace(/(\d{4})(?=\d)/g, "$1 ");
+
+/** Persist the host's payout details on their user row. No-op when no card was
+ *  entered, so saving an unrelated section never wipes a stored card. */
+async function saveHostPayment(
+  db: ReturnType<typeof getDb>,
+  userId: number,
+  payment: PaymentInput | undefined,
+): Promise<void> {
+  if (!payment || !groupCard(payment.cardNumber)) return;
+  await db
+    .prepare(
+      "UPDATE users SET pay_methods = ?, pay_account_type = ?, card_number = ? WHERE id = ?",
+    )
+    .run(
+      JSON.stringify(payment.methods ?? []),
+      payment.accountType ?? "",
+      groupCard(payment.cardNumber),
+      userId,
+    );
+}
 
 /** Drop empty names, clamp prices to a sane non-negative amount (0 = free). */
 function normalizeServices(
@@ -297,6 +355,11 @@ function validateVillaInput(input: VillaInput): string | null {
   if (!(input.price > 0)) return "Price must be greater than zero.";
   if (!(Math.trunc(input.maxGuests) >= 1))
     return "Maximum number of guests must be at least 1.";
+  const imageCount = input.images?.length ?? 0;
+  if (imageCount < MIN_VILLA_IMAGES)
+    return `Please add at least ${MIN_VILLA_IMAGES} images of your villa.`;
+  if (imageCount > MAX_VILLA_IMAGES)
+    return `You can upload at most ${MAX_VILLA_IMAGES} images of your villa.`;
   return null;
 }
 
@@ -304,6 +367,23 @@ function validateVillaInput(input: VillaInput): string | null {
 // booking-guests validation stay bounded.
 function normalizeMaxGuests(value: number): number {
   return Math.min(30, Math.max(1, Math.trunc(value) || 1));
+}
+
+/** What to store for people_per_room + max_guests given the villa kind.
+ *  Hotels/resorts sell by the room, so capacity = rooms × people-per-room and
+ *  people_per_room is kept; other kinds keep 0 and the owner's guest cap. */
+function roomFields(input: VillaInput): { peoplePerRoom: number; maxGuests: number } {
+  if (isRoomBased(input.kind)) {
+    const rooms = Math.max(1, Math.trunc(input.rooms) || 1);
+    const perRoom = Math.max(1, Math.trunc(input.peoplePerRoom ?? 0) || 1);
+    return { peoplePerRoom: perRoom, maxGuests: Math.max(1, rooms * perRoom) };
+  }
+  return { peoplePerRoom: 0, maxGuests: normalizeMaxGuests(input.maxGuests) };
+}
+
+/** Host discount as a whole percent, clamped to a sane 0–90 range. */
+function clampDiscount(value: number | undefined): number {
+  return Math.min(90, Math.max(0, Math.trunc(value ?? 0) || 0));
 }
 
 export async function createVillaAction(
@@ -315,12 +395,17 @@ export async function createVillaAction(
       address: string;
       emergency: string;
     };
+    payment?: PaymentInput;
   },
 ): Promise<ActionResult> {
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in to host a villa.");
   const invalid = validateVillaInput(input);
   if (invalid) return fail(invalid);
+  if (input.hostProfile) {
+    const emgErr = emergencyError(input.hostProfile.emergency);
+    if (emgErr) return fail(emgErr);
+  }
 
   const images =
     input.images && input.images.length > 0
@@ -331,11 +416,12 @@ export async function createVillaAction(
   // Villa insert + host-unlock + optional profile save commit together.
   try {
     await tx(async () => {
+      const caps = roomFields(input);
       await db.prepare(
         `INSERT INTO villas
            (owner_id, name, kind, description, area, address, city, rooms, bathrooms,
-            max_guests, facilities, services, price, image, images)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            max_guests, people_per_room, facilities, services, price, discount, image, images)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         user.id,
         input.name.trim(),
@@ -346,10 +432,12 @@ export async function createVillaAction(
         input.city.trim(),
         Math.max(1, Math.trunc(input.rooms) || 1),
         Math.max(1, Math.trunc(input.bathrooms) || 1),
-        normalizeMaxGuests(input.maxGuests),
+        caps.maxGuests,
+        caps.peoplePerRoom,
         JSON.stringify(input.facilities ?? []),
         JSON.stringify(normalizeServices(input.services)),
         input.price,
+        clampDiscount(input.discount),
         images[0],
         JSON.stringify(images),
       );
@@ -371,6 +459,9 @@ export async function createVillaAction(
           user.id,
         );
       }
+
+      // The payout card the host entered on the Payment step.
+      await saveHostPayment(db, user.id, input.payment);
     });
   } catch {
     return fail("Something went wrong saving your villa. Please try again.");
@@ -383,6 +474,7 @@ export async function createVillaAction(
 export async function updateVillaAction(
   villaId: number,
   input: VillaInput,
+  payment?: PaymentInput,
 ): Promise<ActionResult> {
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in.");
@@ -394,12 +486,13 @@ export async function updateVillaAction(
       ? input.images
       : ["/images/host/photo-1.jpg"];
 
+  const caps = roomFields(input);
   const res = await getDb()
     .prepare(
       `UPDATE villas
        SET name = ?, kind = ?, description = ?, area = ?, address = ?, city = ?,
-           rooms = ?, bathrooms = ?, max_guests = ?, facilities = ?, services = ?, price = ?,
-           image = ?, images = ?
+           rooms = ?, bathrooms = ?, max_guests = ?, people_per_room = ?,
+           facilities = ?, services = ?, price = ?, discount = ?, image = ?, images = ?
        WHERE id = ? AND owner_id = ?`,
     )
     .run(
@@ -411,10 +504,12 @@ export async function updateVillaAction(
       input.city.trim(),
       Math.max(1, Math.trunc(input.rooms) || 1),
       Math.max(1, Math.trunc(input.bathrooms) || 1),
-      normalizeMaxGuests(input.maxGuests),
+      caps.maxGuests,
+      caps.peoplePerRoom,
       JSON.stringify(input.facilities ?? []),
       JSON.stringify(normalizeServices(input.services)),
       input.price,
+      clampDiscount(input.discount),
       images[0],
       JSON.stringify(images),
       villaId,
@@ -422,7 +517,31 @@ export async function updateVillaAction(
     );
   if (res.changes === 0) return fail("Property not found.");
 
+  // Persist any payout-card change made on the Payment step. Guarded so saving
+  // another section (which sends an empty card) never clears a stored card.
+  await saveHostPayment(getDb(), user.id, payment);
+
   revalidateVillaViews();
+  return { ok: true };
+}
+
+/** Toggle a villa's "featured" (paid promotion) flag. Owner-only. The paid
+ *  warning is confirmed on the client before this is called. */
+export async function setVillaFeaturedAction(
+  villaId: number,
+  featured: boolean,
+): Promise<ActionResult> {
+  const user = await getCurrentUser();
+  if (!user) return fail("You must be signed in.");
+
+  const res = await getDb()
+    .prepare("UPDATE villas SET featured = ? WHERE id = ? AND owner_id = ?")
+    .run(featured ? 1 : 0, villaId, user.id);
+  if (res.changes === 0) return fail("Property not found.");
+
+  // The home page's Featured row and the owner's property list both change.
+  revalidatePath("/");
+  revalidatePath("/profile/properties");
   return { ok: true };
 }
 
@@ -436,22 +555,194 @@ export async function deleteVillaAction(villaId: number): Promise<ActionResult> 
     .get(villaId, user.id);
   if (!villa) return fail("Property not found.");
 
-  // Deleting a villa cascades to its bookings — refuse while guests have
-  // upcoming confirmed stays so their reservations aren't silently erased.
+  // Deleting a villa cascades to its bookings — refuse while it still has any
+  // active reservation (a confirmed upcoming stay or a pending request) so a
+  // guest's booking is never silently erased. The owner must cancel/decline
+  // them first (from Rent Requests), then the villa can be removed.
   const today = new Date().toISOString().slice(0, 10);
-  const upcoming = (await db
+  const active = (await db
     .prepare(
       `SELECT COUNT(*) AS n FROM bookings
-       WHERE villa_id = ? AND status = 'accepted' AND check_out >= ?`,
+       WHERE villa_id = ? AND check_out >= ?
+         AND status IN ('pending', 'accepted')`,
     )
     .get(villaId, today)) as { n: number };
-  if (upcoming.n > 0)
+  if (active.n > 0)
     return fail(
-      "This villa has upcoming guest bookings. You can remove it once those stays are completed or cancelled.",
+      "This villa still has active bookings. Cancel all of them in Rent Requests before removing the villa.",
     );
 
   await db.prepare("DELETE FROM villas WHERE id = ?").run(villaId);
   revalidateVillaViews();
+  return { ok: true };
+}
+
+/* ---------------------------- packages ---------------------------- */
+
+type PackageInput = {
+  villaId: number;
+  name: string;
+  description: string;
+  type: string;
+  nights: number;
+  maxGuests: number;
+  discount: number;
+  price: number;
+  inclusions: string[];
+};
+
+/** A preset type (weekend/weekly/monthly) fixes the nights server-side, so a
+ *  tampered client can't claim a "Monthly Retreat" with 2 nights. */
+function resolvedNights(input: PackageInput): number {
+  return presetNights(parsePackageType(input.type)) ?? Math.max(1, Math.trunc(input.nights));
+}
+
+/** Presets fix the advertised discount too; curated is the owner's own 0–90%. */
+function resolvedDiscount(input: PackageInput): number {
+  const preset = presetDiscount(parsePackageType(input.type));
+  if (preset !== null) return preset;
+  return Math.min(90, Math.max(0, Math.trunc(Number(input.discount)) || 0));
+}
+
+/** Trim, drop blanks, cap the list so a package can't carry junk/huge input. */
+function normalizeInclusions(list: string[] | undefined): string[] {
+  return (list ?? [])
+    .map((s) => String(s ?? "").trim())
+    .filter((s) => s !== "")
+    .slice(0, 20);
+}
+
+type OwnedVilla = {
+  kind: string;
+  rooms: number;
+  people_per_room: number;
+  max_guests: number;
+};
+
+async function getOwnedVilla(
+  villaId: number,
+  userId: number,
+): Promise<OwnedVilla | null> {
+  const row = (await getDb()
+    .prepare(
+      "SELECT kind, rooms, people_per_room, max_guests FROM villas WHERE id = ? AND owner_id = ?",
+    )
+    .get(villaId, userId)) as OwnedVilla | undefined;
+  return row ?? null;
+}
+
+/** Most guests a package on this villa may declare — room-based villas cap at
+ *  rooms × per-room occupancy, whole-villa kinds at the villa's max_guests. */
+function villaGuestCapacity(v: OwnedVilla): number {
+  return isRoomBased(v.kind)
+    ? Math.max(1, v.rooms * v.people_per_room)
+    : Math.max(1, v.max_guests);
+}
+
+function validatePackageInput(
+  input: PackageInput,
+  villa: OwnedVilla,
+): string | null {
+  if (!input.name.trim()) return "Package name is required.";
+  if (!(resolvedNights(input) >= 1))
+    return "A package must run for at least 1 night.";
+  const guests = Math.trunc(input.maxGuests);
+  if (!(guests >= 1)) return "A package must be for at least 1 guest.";
+  const cap = villaGuestCapacity(villa);
+  if (guests > cap)
+    return `This villa fits up to ${cap} guest${cap === 1 ? "" : "s"}.`;
+  if (!(Number(input.price) >= 0)) return "Price can't be negative.";
+  if (normalizeInclusions(input.inclusions).length === 0)
+    return "Add at least one inclusion to the package.";
+  return null;
+}
+
+const cleanPrice = (v: number) => Math.round((Number(v) || 0) * 100) / 100;
+
+function revalidatePackageViews() {
+  revalidatePath("/profile/packages");
+  revalidatePath("/packages");
+  revalidatePath("/place");
+}
+
+export async function createPackageAction(
+  input: PackageInput,
+): Promise<ActionResult> {
+  const user = await getCurrentUser();
+  if (!user) return fail("You must be signed in.");
+  const villa = await getOwnedVilla(input.villaId, user.id);
+  if (!villa) return fail("You can only add packages to your own villa.");
+  const invalid = validatePackageInput(input, villa);
+  if (invalid) return fail(invalid);
+
+  await getDb()
+    .prepare(
+      `INSERT INTO packages
+         (owner_id, villa_id, name, description, type, nights, max_guests, discount, price, inclusions)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      user.id,
+      input.villaId,
+      input.name.trim(),
+      input.description.trim(),
+      parsePackageType(input.type),
+      resolvedNights(input),
+      Math.max(1, Math.trunc(input.maxGuests)),
+      resolvedDiscount(input),
+      cleanPrice(input.price),
+      JSON.stringify(normalizeInclusions(input.inclusions)),
+    );
+  revalidatePackageViews();
+  return { ok: true };
+}
+
+export async function updatePackageAction(
+  packageId: number,
+  input: PackageInput,
+): Promise<ActionResult> {
+  const user = await getCurrentUser();
+  if (!user) return fail("You must be signed in.");
+  const villa = await getOwnedVilla(input.villaId, user.id);
+  if (!villa) return fail("You can only add packages to your own villa.");
+  const invalid = validatePackageInput(input, villa);
+  if (invalid) return fail(invalid);
+
+  const res = await getDb()
+    .prepare(
+      `UPDATE packages
+       SET villa_id = ?, name = ?, description = ?, type = ?, nights = ?, max_guests = ?,
+           discount = ?, price = ?, inclusions = ?
+       WHERE id = ? AND owner_id = ?`,
+    )
+    .run(
+      input.villaId,
+      input.name.trim(),
+      input.description.trim(),
+      parsePackageType(input.type),
+      resolvedNights(input),
+      Math.max(1, Math.trunc(input.maxGuests)),
+      resolvedDiscount(input),
+      cleanPrice(input.price),
+      JSON.stringify(normalizeInclusions(input.inclusions)),
+      packageId,
+      user.id,
+    );
+  if (res.changes === 0) return fail("Package not found.");
+  revalidatePackageViews();
+  return { ok: true };
+}
+
+export async function deletePackageAction(
+  packageId: number,
+): Promise<ActionResult> {
+  const user = await getCurrentUser();
+  if (!user) return fail("You must be signed in.");
+  const res = await getDb()
+    .prepare("DELETE FROM packages WHERE id = ? AND owner_id = ?")
+    .run(packageId, user.id);
+  if (res.changes === 0) return fail("Package not found.");
+  revalidatePackageViews();
   return { ok: true };
 }
 
@@ -466,33 +757,112 @@ export async function createBookingAction(input: {
   checkIn: string;
   checkOut: string;
   guests: number;
+  /** Rooms to reserve — hotels/resorts only; ignored (forced to 1) elsewhere. */
+  rooms?: number;
+  /** Chosen paid add-ons, as indices into the villa's service list. */
+  services?: number[];
+  /** Booking a fixed package instead of a nightly stay. */
+  packageId?: number;
 }): Promise<BookingResult> {
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in to book.");
 
-  if (!parseDay(input.checkIn) || !parseDay(input.checkOut))
+  const db = getDb();
+
+  // A package is server-trusted: it fixes the duration, occupancy and price, so
+  // load it first and derive the stay from it — never from the client's values.
+  let pkg: Awaited<ReturnType<typeof getPackageById>> = null;
+  if (input.packageId != null) {
+    pkg = await getPackageById(input.packageId);
+    if (!pkg) return fail("This package is no longer available.");
+    if (pkg.villaId !== input.villaId)
+      return fail("This package doesn't belong to that villa.");
+  }
+
+  const checkIn = input.checkIn;
+  const checkOut = pkg ? addDays(checkIn, pkg.nights) : input.checkOut;
+
+  if (!parseDay(checkIn) || !parseDay(checkOut))
     return fail("Please pick valid check-in and check-out dates.");
-  if (nightsBetween(input.checkIn, input.checkOut) < 1)
+  if (nightsBetween(checkIn, checkOut) < 1)
     return fail("Check-out must be after check-in.");
-  if (input.checkIn < new Date().toISOString().slice(0, 10))
+  if (checkIn < new Date().toISOString().slice(0, 10))
     return fail("Check-in cannot be in the past.");
 
-  const guests = Math.trunc(input.guests);
-  if (!(guests >= 1)) return fail("Guests must be at least 1.");
-
-  const db = getDb();
   const villa = (await db
-    .prepare("SELECT id, owner_id, max_guests FROM villas WHERE id = ?")
+    .prepare(
+      "SELECT id, owner_id, kind, rooms, max_guests, people_per_room, services FROM villas WHERE id = ?",
+    )
     .get(input.villaId)) as
-    | { id: number; owner_id: number; max_guests: number }
+    | {
+        id: number;
+        owner_id: number;
+        kind: string;
+        rooms: number;
+        max_guests: number;
+        people_per_room: number;
+        services: string;
+      }
     | undefined;
   if (!villa) return fail("This villa no longer exists.");
   if (villa.owner_id === user.id)
     return fail("You cannot book your own villa.");
-  if (guests > villa.max_guests)
-    return fail(
-      `This villa sleeps up to ${villa.max_guests} guest${villa.max_guests === 1 ? "" : "s"}.`,
-    );
+
+  // Package occupancy is fixed at the package's max_guests; otherwise the guest
+  // picked the headcount.
+  const guests = pkg ? pkg.maxGuests : Math.trunc(input.guests);
+  if (!(guests >= 1)) return fail("Guests must be at least 1.");
+
+  const roomBased = isRoomBased(villa.kind);
+  let roomsNeeded = 1;
+  let extras: { name: string; price: number }[] = [];
+
+  if (pkg) {
+    // Package books just the rooms it needs to seat its occupancy (1 for a
+    // whole-villa kind); no à-la-carte extras — the inclusions are the bundle.
+    roomsNeeded = roomsForGuests(villa.kind, guests, villa.people_per_room);
+  } else {
+    // Resolve the picked add-ons from the villa's own service list so prices
+    // come from the DB, never the client. Only paid ones are stored.
+    const villaServices = parseServiceList(villa.services);
+    extras = [
+      ...new Set(
+        (input.services ?? []).filter(
+          (i) => Number.isInteger(i) && i >= 0 && i < villaServices.length,
+        ),
+      ),
+    ]
+      .map((i) => villaServices[i])
+      .filter((s) => s.price > 0);
+
+    // Hotels/resorts reserve N rooms (each sleeping people_per_room); other
+    // kinds book the whole place (1 unit, guests capped at max_guests).
+    if (roomBased) {
+      const capacity = roomCapacity(villa.kind, villa.rooms);
+      const perRoom = Math.max(1, villa.people_per_room);
+      roomsNeeded = Math.min(capacity, Math.max(1, Math.trunc(input.rooms ?? 1) || 1));
+      const guestCap = roomsNeeded * perRoom;
+      if (guests > guestCap)
+        return fail(
+          `${roomsNeeded} room${roomsNeeded === 1 ? "" : "s"} sleep${roomsNeeded === 1 ? "s" : ""} up to ${guestCap} guest${guestCap === 1 ? "" : "s"}.`,
+        );
+    } else if (guests > villa.max_guests) {
+      return fail(
+        `This villa sleeps up to ${villa.max_guests} guest${villa.max_guests === 1 ? "" : "s"}.`,
+      );
+    }
+  }
+
+  // Snapshot the package onto the booking so history survives edits/deletes.
+  const packageSnapshot = pkg
+    ? JSON.stringify({
+        name: pkg.name,
+        nights: pkg.nights,
+        guests: pkg.maxGuests,
+        price: pkg.price,
+        inclusions: pkg.inclusions,
+      })
+    : "";
 
   // Availability check + insert must be atomic so two concurrent bookings
   // can't both pass the overlap check and double-book. IMMEDIATE takes the
@@ -500,20 +870,26 @@ export async function createBookingAction(input: {
   let bookingId: number | null = null;
   try {
     bookingId = await tx(async () => {
-      if (!(await isVillaAvailable(villa.id, input.checkIn, input.checkOut)))
+      if (
+        !(await isVillaAvailable(villa.id, checkIn, checkOut, roomsNeeded))
+      )
         return null;
       const inserted = await db
         .prepare(
-          `INSERT INTO bookings (villa_id, guest_id, dates, check_in, check_out, guests, status)
-           VALUES (?, ?, ?, ?, ?, ?, 'accepted') RETURNING id`,
+          `INSERT INTO bookings (villa_id, guest_id, dates, check_in, check_out, guests, rooms, extras, package_id, package, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted') RETURNING id`,
         )
         .run(
           villa.id,
           user.id,
-          formatRange(input.checkIn, input.checkOut),
-          input.checkIn,
-          input.checkOut,
+          formatRange(checkIn, checkOut),
+          checkIn,
+          checkOut,
           guests,
+          roomsNeeded,
+          JSON.stringify(extras),
+          pkg ? pkg.id : null,
+          packageSnapshot,
         );
       // The wishlist tracks places still to book — a booked villa leaves it.
       await db.prepare(
@@ -525,7 +901,11 @@ export async function createBookingAction(input: {
     return fail("Something went wrong creating your booking. Please try again.");
   }
   if (bookingId === null)
-    return fail("This villa is already booked for those dates. Try different dates.");
+    return fail(
+      roomBased
+        ? "No rooms left for those dates. Try fewer rooms or different dates."
+        : "This villa is already booked for those dates. Try different dates.",
+    );
 
   revalidatePath("/profile/bookings");
   revalidatePath("/profile/requests");
@@ -610,20 +990,39 @@ export async function updateBookingAction(
   const db = getDb();
   const booking = (await db
     .prepare(
-      `SELECT b.id, b.villa_id, b.status, v.max_guests
+      `SELECT b.id, b.villa_id, b.status, b.rooms, v.kind, v.max_guests, v.people_per_room
        FROM bookings b JOIN villas v ON v.id = b.villa_id
        WHERE b.id = ? AND b.guest_id = ?`,
     )
     .get(bookingId, user.id)) as
-    | { id: number; villa_id: number; status: string; max_guests: number }
+    | {
+        id: number;
+        villa_id: number;
+        status: string;
+        rooms: number;
+        kind: string;
+        max_guests: number;
+        people_per_room: number;
+      }
     | undefined;
   if (!booking) return fail("Booking not found.");
   if (booking.status !== "accepted")
     return fail("Only active bookings can be changed.");
-  if (guests > booking.max_guests)
+
+  // Dates and guests can change here; the room count stays as booked. Cap guests
+  // to what those rooms sleep (hotels/resorts) or the whole-villa capacity.
+  const roomsHeld = Math.max(1, booking.rooms);
+  if (isRoomBased(booking.kind)) {
+    const guestCap = roomsHeld * Math.max(1, booking.people_per_room);
+    if (guests > guestCap)
+      return fail(
+        `${roomsHeld} room${roomsHeld === 1 ? "" : "s"} sleep${roomsHeld === 1 ? "s" : ""} up to ${guestCap} guest${guestCap === 1 ? "" : "s"}.`,
+      );
+  } else if (guests > booking.max_guests) {
     return fail(
       `This villa sleeps up to ${booking.max_guests} guest${booking.max_guests === 1 ? "" : "s"}.`,
     );
+  }
 
   let ok = false;
   try {
@@ -634,6 +1033,7 @@ export async function updateBookingAction(
           booking.villa_id,
           input.checkIn,
           input.checkOut,
+          roomsHeld,
           booking.id,
         ))
       )
@@ -822,13 +1222,15 @@ export async function uploadImagesAction(
   const paths: string[] = [];
   for (const file of files) {
     const saved = await saveUpload(file, "villas");
-    if (saved) paths.push(saved);
-  }
-  if (paths.length === 0) {
-    return {
-      ok: false,
-      error: "Only JPG, PNG, WEBP, GIF or AVIF images up to 8 MB are allowed.",
-    };
+    // Any non-image (or oversized) file fails the whole batch — we never
+    // silently drop a file the host thought they uploaded.
+    if (!saved) {
+      return {
+        ok: false,
+        error: `"${file.name || "This file"}" isn't a valid image. Only JPG, PNG, WEBP, GIF or AVIF images up to 8 MB are allowed.`,
+      };
+    }
+    paths.push(saved);
   }
   return { ok: true, paths };
 }

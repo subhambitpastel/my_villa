@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -10,10 +10,21 @@ import {
   uploadImagesAction,
 } from "@/lib/actions";
 import { useMounted } from "@/lib/useMounted";
+import { isRoomBased } from "@/lib/rooms";
+import { isAtLeastAge, toDateInput } from "@/lib/dates";
+import {
+  isValidPhoneNumber,
+  joinDialNumber,
+  splitDialNumber,
+} from "@/lib/countries";
+import DateOfBirthField from "@/components/ui/DateOfBirthField";
+import PhoneNumberInput from "@/components/ui/PhoneNumberInput";
 import SignInGate from "@/components/account/SignInGate";
 import {
   DEFAULT_DRAFT,
   FACILITY_CHIPS,
+  MAX_VILLA_IMAGES,
+  MIN_VILLA_IMAGES,
   SERVICES,
   type Draft,
 } from "./draft";
@@ -31,6 +42,17 @@ const DRAFT_KEY = "myvilla.hostDraft";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Shown when the host tries to leave a section (or the page) with edits they
+// haven't saved. Each section saves on its own, so leaving loses only that
+// section's in-progress changes.
+const DISCARD_MSG =
+  "You have unsaved changes in this section. Leave without saving? Your changes here will be lost.";
+
+// Shown when the host abandons the add-villa wizard before finishing — the villa
+// is only created on the final step, so leaving submits nothing.
+const LEAVE_MSG =
+  "Leave without finishing? The villa details you've entered won't be saved.";
+
 const label = "mb-2 block text-[16px] text-brand";
 const input =
   "block w-full rounded-[8px] border border-[#d9d9d9] bg-white px-4 py-2.5 text-[15px] text-ink placeholder:text-[#9d9da6] focus:outline-none focus:border-brand focus:ring-2 focus:ring-brand/20";
@@ -43,6 +65,14 @@ function onlyDigits(e: React.FormEvent<HTMLInputElement>) {
   const cleaned = el.value.replace(/\D/g, "");
   if (cleaned !== el.value) el.value = cleaned;
 }
+
+/** "1111222233334444" → "1111 2222 3333 4444" (max 19 digits) — matches the
+ * guest payment page so the host's card number reads the same way. */
+const formatCardNumber = (value: string) =>
+  value
+    .replace(/\D/g, "")
+    .slice(0, 19)
+    .replace(/(\d{4})(?=\d)/g, "$1 ");
 
 function ErrorText({ children }: { children: React.ReactNode }) {
   return (
@@ -67,35 +97,78 @@ function SaveAndNext({ children = "Save and Next" }: { children?: React.ReactNod
 
 /* ---------------- Stepper ---------------- */
 
-function Stepper({ current }: { current: number }) {
+function Stepper({
+  current,
+  minStep = 0,
+  onSelect,
+}: {
+  current: number;
+  minStep?: number;
+  /** When provided (edit mode), sections become clickable. */
+  onSelect?: (i: number) => void;
+}) {
+  const interactive = !!onSelect;
+  // Drop any steps before minStep entirely and renumber from 1 — they aren't
+  // part of the flow (Personal Details is skipped both when editing a villa and
+  // when a returning host adds one whose profile is already complete).
+  const visible = STEPS.map((title, i) => ({ title, i })).filter(
+    ({ i }) => i >= minStep,
+  );
   return (
     <ol className="flex flex-row flex-wrap gap-x-6 gap-y-2 lg:flex-col lg:gap-0">
-      {STEPS.map((title, i) => (
-        <li key={title} className="flex items-start gap-[18px]">
+      {visible.map(({ title, i }, pos) => {
+        const active = i === current;
+        const done = i <= current;
+        const isLast = pos === visible.length - 1;
+        const marker = (
           <div className="flex flex-col items-center">
             <span
               className={`flex h-[29px] w-[29px] items-center justify-center rounded-full text-[15px] font-medium text-white ${
-                i <= current ? "bg-brand" : "bg-[#c4c4c4]"
+                done ? "bg-brand" : "bg-[#c4c4c4]"
               }`}
             >
-              {i + 1}
+              {pos + 1}
             </span>
-            {i < STEPS.length - 1 && (
+            {!isLast && (
               <span
                 aria-hidden="true"
                 className="hidden h-[10px] w-px bg-[#c4c4c4] lg:block"
               />
             )}
           </div>
+        );
+        const labelText = (
           <span
             className={`pt-0.5 text-[18px] ${
-              i <= current ? "font-medium text-brand" : "text-[#121212]"
-            }`}
+              done ? "font-medium text-brand" : "text-[#121212]"
+            } ${interactive && active ? "underline underline-offset-4" : ""}`}
           >
             {title}
           </span>
-        </li>
-      ))}
+        );
+        return (
+          <li key={title} className="lg:w-full">
+            {interactive ? (
+              <button
+                type="button"
+                onClick={() => onSelect!(i)}
+                aria-current={active ? "step" : undefined}
+                className={`flex w-full items-start gap-[18px] text-left ${
+                  active ? "" : "hover:opacity-60"
+                }`}
+              >
+                {marker}
+                {labelText}
+              </button>
+            ) : (
+              <div className="flex items-start gap-[18px]">
+                {marker}
+                {labelText}
+              </div>
+            )}
+          </li>
+        );
+      })}
     </ol>
   );
 }
@@ -115,6 +188,9 @@ function StepPersonal({
   const [avatar, setAvatar] = useState<string | null>(
     avatarUrl || "/images/host/avatar.png",
   );
+  const initEmergency = splitDialNumber(draft.personal.emergency);
+  const [emgCode, setEmgCode] = useState(initEmergency.code);
+  const [emgNumber, setEmgNumber] = useState(initEmergency.number);
   const fileRef = useRef<HTMLInputElement>(null);
 
   async function changeAvatar(file: File) {
@@ -128,20 +204,30 @@ function StepPersonal({
     e.preventDefault();
     const data = new FormData(e.currentTarget);
     const get = (k: string) => String(data.get(k) ?? "").trim();
+    const next: typeof errors = {};
+    // Emergency contact is optional, but if a number is entered it must have a
+    // country code and be a valid phone number.
+    let emergency = "";
+    if (emgNumber.trim()) {
+      if (!emgCode) next.emergency = "Select the country code.";
+      else if (!isValidPhoneNumber(emgNumber))
+        next.emergency = "Enter a valid emergency contact number.";
+      else emergency = joinDialNumber(emgCode, emgNumber);
+    }
     const personal = {
       fullName: get("fullName"),
       gender: get("gender"),
       email: get("email"),
       dob: get("dob"),
       address: get("address"),
-      emergency: get("emergency"),
+      emergency,
     };
-    const next: typeof errors = {};
     if (!personal.fullName) next.fullName = "Full name is required.";
     if (!personal.gender) next.gender = "Please select your gender.";
     if (!personal.email) next.email = "Email address is required.";
     else if (!EMAIL_RE.test(personal.email)) next.email = "Enter a valid email address.";
     if (!personal.dob) next.dob = "Date of birth is required.";
+    else if (!isAtLeastAge(personal.dob)) next.dob = "You must be at least 18 years old.";
     if (!personal.address) next.address = "Address is required.";
     setErrors(next);
     if (Object.keys(next).length > 0) return;
@@ -201,13 +287,13 @@ function StepPersonal({
           </div>
           <div>
             <label htmlFor="h-dob" className={label}>Date of Birth</label>
-            <input
+            <DateOfBirthField
               id="h-dob"
               name="dob"
-              type="date"
-              defaultValue={draft.personal.dob}
-              aria-invalid={!!errors.dob}
-              className={input}
+              defaultValue={toDateInput(draft.personal.dob)}
+              ariaInvalid={!!errors.dob}
+              triggerClassName={input}
+              placeholder="Add date of birth"
             />
             {errors.dob && <ErrorText>{errors.dob}</ErrorText>}
           </div>
@@ -226,14 +312,15 @@ function StepPersonal({
           </div>
           <div>
             <label htmlFor="h-emergency" className={label}>Emergency Contact</label>
-            <input
-              id="h-emergency"
-              name="emergency"
-              defaultValue={draft.personal.emergency}
-              placeholder="Not Provided"
-              autoComplete="tel"
-              className={input}
+            <PhoneNumberInput
+              label="Emergency Contact"
+              code={emgCode}
+              number={emgNumber}
+              onCode={setEmgCode}
+              onNumber={setEmgNumber}
+              invalid={!!errors.emergency}
             />
+            {errors.emergency && <ErrorText>{errors.emergency}</ErrorText>}
           </div>
         </div>
 
@@ -306,17 +393,24 @@ function VillaMapPreview() {
 function StepVilla({
   draft,
   onNext,
+  submitLabel = "Save and Next",
 }: {
   draft: Draft;
   onNext: (d: Partial<Draft>) => void;
+  submitLabel?: string;
 }) {
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
   const [kind, setKind] = useState(draft.villa.kind);
+  // Hotels/resorts book by the room, so they collect "people per room" instead
+  // of a single whole-property guest cap.
+  const roomBased = isRoomBased(kind);
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const data = new FormData(e.currentTarget);
     const get = (k: string) => String(data.get(k) ?? "").trim();
+    const rooms = get("rooms");
+    const peoplePerRoom = get("peoplePerRoom");
     const villa = {
       kind,
       name: get("name"),
@@ -324,9 +418,13 @@ function StepVilla({
       area: get("area"),
       address: get("address"),
       city: get("city"),
-      rooms: get("rooms"),
+      rooms,
       bathrooms: get("bathrooms"),
-      maxGuests: get("maxGuests"),
+      // For hotels/resorts total capacity is rooms × people-per-room.
+      maxGuests: roomBased
+        ? String((Number(rooms) || 0) * (Number(peoplePerRoom) || 0))
+        : get("maxGuests"),
+      peoplePerRoom: roomBased ? peoplePerRoom : "",
       // Facilities are picked on the Extra Services step.
       facilities: draft.villa.facilities,
     };
@@ -338,8 +436,12 @@ function StepVilla({
     if (!villa.city) next.city = "City is required.";
     if (!villa.rooms || !/^\d+$/.test(villa.rooms)) next.rooms = "Enter the number of rooms.";
     if (!villa.bathrooms || !/^\d+$/.test(villa.bathrooms)) next.bathrooms = "Enter the number of bathrooms.";
-    if (!villa.maxGuests || !/^\d+$/.test(villa.maxGuests) || Number(villa.maxGuests) < 1)
+    if (roomBased) {
+      if (!peoplePerRoom || !/^\d+$/.test(peoplePerRoom) || Number(peoplePerRoom) < 1)
+        next.peoplePerRoom = "Enter how many guests each room sleeps (at least 1).";
+    } else if (!villa.maxGuests || !/^\d+$/.test(villa.maxGuests) || Number(villa.maxGuests) < 1) {
       next.maxGuests = "Enter the maximum number of guests (at least 1).";
+    }
     setErrors(next);
     if (Object.keys(next).length > 0) return;
     onNext({ villa });
@@ -464,23 +566,52 @@ function StepVilla({
           />
           {errors.bathrooms && <ErrorText>{errors.bathrooms}</ErrorText>}
         </div>
-        <div>
-          <label htmlFor="v-maxGuests" className={label}>
-            Maximum Number of Guests
-          </label>
-          <input
-            id="v-maxGuests"
-            name="maxGuests"
-            defaultValue={draft.villa.maxGuests}
-            inputMode="numeric"
-            pattern="[0-9]*"
-            onChange={onlyDigits}
-            placeholder="How many guests can stay? e.g. 6"
-            aria-invalid={!!errors.maxGuests}
-            className={input}
-          />
-          {errors.maxGuests && <ErrorText>{errors.maxGuests}</ErrorText>}
-        </div>
+        {roomBased ? (
+          <div>
+            <label htmlFor="v-peoplePerRoom" className={label}>
+              Guests per Room
+            </label>
+            <input
+              id="v-peoplePerRoom"
+              name="peoplePerRoom"
+              key="peoplePerRoom"
+              defaultValue={draft.villa.peoplePerRoom}
+              inputMode="numeric"
+              pattern="[0-9]*"
+              onChange={onlyDigits}
+              placeholder="How many guests fit in one room? e.g. 2"
+              aria-invalid={!!errors.peoplePerRoom}
+              className={input}
+            />
+            {errors.peoplePerRoom ? (
+              <ErrorText>{errors.peoplePerRoom}</ErrorText>
+            ) : (
+              <p className="mt-1 text-xs text-body">
+                Guests book individual rooms — total capacity is rooms × guests
+                per room.
+              </p>
+            )}
+          </div>
+        ) : (
+          <div>
+            <label htmlFor="v-maxGuests" className={label}>
+              Maximum Number of Guests
+            </label>
+            <input
+              id="v-maxGuests"
+              name="maxGuests"
+              key="maxGuests"
+              defaultValue={draft.villa.maxGuests}
+              inputMode="numeric"
+              pattern="[0-9]*"
+              onChange={onlyDigits}
+              placeholder="How many guests can stay? e.g. 6"
+              aria-invalid={!!errors.maxGuests}
+              className={input}
+            />
+            {errors.maxGuests && <ErrorText>{errors.maxGuests}</ErrorText>}
+          </div>
+        )}
       </div>
 
       <h3 className="mt-7 mb-3 text-[15px] font-semibold text-brand">
@@ -488,7 +619,7 @@ function StepVilla({
       </h3>
       <VillaMapPreview />
 
-      <SaveAndNext />
+      <SaveAndNext>{submitLabel}</SaveAndNext>
     </form>
   );
 }
@@ -498,9 +629,11 @@ function StepVilla({
 function StepImages({
   draft,
   onNext,
+  submitLabel = "Save and Next",
 }: {
   draft: Draft;
   onNext: (d: Partial<Draft>) => void;
+  submitLabel?: string;
 }) {
   const [images, setImages] = useState<string[]>(draft.images);
   const [error, setError] = useState("");
@@ -508,6 +641,23 @@ function StepImages({
   const fileRef = useRef<HTMLInputElement>(null);
 
   async function addFiles(files: File[]) {
+    // Every file must be an image — reject the whole batch if any isn't, so a
+    // stray PDF/video can't slip through (checked again server-side on save).
+    const notImage = files.find((f) => !f.type.startsWith("image/"));
+    if (notImage) {
+      setError(
+        `"${notImage.name}" isn't an image. Only image files (JPG, PNG, WEBP, GIF or AVIF) are allowed.`,
+      );
+      return;
+    }
+    if (images.length + files.length > MAX_VILLA_IMAGES) {
+      const room = MAX_VILLA_IMAGES - images.length;
+      setError(
+        `You can upload at most ${MAX_VILLA_IMAGES} images. You have ${images.length}` +
+          (room > 0 ? ` — add up to ${room} more.` : ` — remove some first.`),
+      );
+      return;
+    }
     setUploading(true);
     setError("");
     const data = new FormData();
@@ -523,13 +673,24 @@ function StepImages({
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (images.length === 0) {
-      setError("Please add at least one image of your villa.");
+    if (images.length < MIN_VILLA_IMAGES) {
+      const short = MIN_VILLA_IMAGES - images.length;
+      setError(
+        `Please add at least ${MIN_VILLA_IMAGES} images of your villa — you have ${images.length}, add ${short} more.`,
+      );
+      return;
+    }
+    if (images.length > MAX_VILLA_IMAGES) {
+      setError(
+        `You can upload at most ${MAX_VILLA_IMAGES} images — remove ${images.length - MAX_VILLA_IMAGES}.`,
+      );
       return;
     }
     setError("");
     onNext({ images });
   }
+
+  const atMax = images.length >= MAX_VILLA_IMAGES;
 
   return (
     <form onSubmit={handleSubmit} noValidate>
@@ -539,7 +700,7 @@ function StepImages({
       <p className="mt-1 text-sm text-body">
         Its better to show the images of facilities you&apos;re providing as well.
         <br />
-        (Minimum 7 Images)
+        (Add {MIN_VILLA_IMAGES}–{MAX_VILLA_IMAGES} images — you&apos;ve added {images.length})
       </p>
 
       <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
@@ -559,18 +720,20 @@ function StepImages({
             </button>
           </div>
         ))}
-        <button
-          type="button"
-          disabled={uploading}
-          onClick={() => fileRef.current?.click()}
-          className="flex h-32 flex-col items-center justify-center gap-2 rounded-[6px] border border-[#d9d9d9] text-brand hover:bg-brand/5 disabled:opacity-50"
-        >
-          <svg width="26" height="26" viewBox="0 0 26 26" fill="none" aria-hidden="true">
-            <circle cx="13" cy="13" r="11.5" stroke="currentColor" strokeWidth="1.6" />
-            <path d="M13 8.5v9M8.5 13h9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-          </svg>
-          <span className="text-xs">{uploading ? "Uploading…" : "Add photo"}</span>
-        </button>
+        {!atMax && (
+          <button
+            type="button"
+            disabled={uploading}
+            onClick={() => fileRef.current?.click()}
+            className="flex h-32 flex-col items-center justify-center gap-2 rounded-[6px] border border-[#d9d9d9] text-brand hover:bg-brand/5 disabled:opacity-50"
+          >
+            <svg width="26" height="26" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+              <circle cx="13" cy="13" r="11.5" stroke="currentColor" strokeWidth="1.6" />
+              <path d="M13 8.5v9M8.5 13h9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+            <span className="text-xs">{uploading ? "Uploading…" : "Add photo"}</span>
+          </button>
+        )}
       </div>
       <input
         ref={fileRef}
@@ -586,7 +749,7 @@ function StepImages({
       />
       {error && <ErrorText>{error}</ErrorText>}
 
-      <SaveAndNext />
+      <SaveAndNext>{submitLabel}</SaveAndNext>
     </form>
   );
 }
@@ -596,9 +759,11 @@ function StepImages({
 function StepServices({
   draft,
   onNext,
+  submitLabel = "Save and Next",
 }: {
   draft: Draft;
   onNext: (d: Partial<Draft>) => void;
+  submitLabel?: string;
 }) {
   // One uniform list — every row (service or facility) has a checkbox and a
   // price box. Selections split apart on save: facility-type picks stay
@@ -749,7 +914,7 @@ function StepServices({
         </div>
       </div>
 
-      <SaveAndNext />
+      <SaveAndNext>{submitLabel}</SaveAndNext>
     </form>
   );
 }
@@ -759,11 +924,14 @@ function StepServices({
 function StepPricing({
   draft,
   onNext,
+  submitLabel = "Save and Next",
 }: {
   draft: Draft;
   onNext: (d: Partial<Draft>) => void;
+  submitLabel?: string;
 }) {
   const [price, setPrice] = useState(draft.price);
+  const [discount, setDiscount] = useState(draft.discount);
   const [error, setError] = useState("");
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
@@ -773,7 +941,7 @@ function StepPricing({
       return;
     }
     setError("");
-    onNext({ price });
+    onNext({ price, discount: Math.min(90, Math.max(0, Math.trunc(discount) || 0)) });
   }
 
   return (
@@ -826,6 +994,46 @@ function StepPricing({
             </svg>
             Places like yours have an average price range from $130 to $200.
           </p>
+
+          <div className="mt-7 flex items-center gap-3">
+            <span className="text-sm text-body">Offer a discount of</span>
+            <button
+              type="button"
+              aria-label="Decrease discount"
+              onClick={() => setDiscount((d) => Math.max(0, d - 5))}
+              className="text-2xl font-bold text-brand"
+            >
+              −
+            </button>
+            <span className="rounded-md border border-brand px-1">
+              <input
+                type="text"
+                inputMode="numeric"
+                aria-label="Discount percentage"
+                value={`${discount}%`}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value.replace(/\D/g, ""), 10);
+                  setDiscount(Number.isNaN(n) ? 0 : Math.min(90, n));
+                }}
+                className="w-16 bg-transparent py-1.5 text-center text-[15px] font-semibold text-muted focus:outline-none"
+              />
+            </span>
+            <button
+              type="button"
+              aria-label="Increase discount"
+              onClick={() => setDiscount((d) => Math.min(90, d + 5))}
+              className="text-xl font-bold text-brand"
+            >
+              +
+            </button>
+            <span className="text-sm text-body">off the nightly price</span>
+          </div>
+          {discount > 0 && (
+            <p className="mt-2 text-xs text-brand">
+              Guests will see ${Math.round(price * (1 - discount / 100))}/night after
+              the {discount}% discount.
+            </p>
+          )}
         </div>
 
         <div className="relative max-w-56">
@@ -845,7 +1053,7 @@ function StepPricing({
         </div>
       </div>
 
-      <SaveAndNext />
+      <SaveAndNext>{submitLabel}</SaveAndNext>
     </form>
   );
 }
@@ -872,11 +1080,16 @@ function PayLogo({ method }: { method: string }) {
 function StepPayment({
   draft,
   onNext,
+  submitLabel = "Host your Villa",
 }: {
   draft: Draft;
   onNext: (d: Partial<Draft>) => void;
+  submitLabel?: string;
 }) {
   const [methods, setMethods] = useState<string[]>(draft.payment.methods);
+  const [cardNumber, setCardNumber] = useState(() =>
+    formatCardNumber(draft.payment.cardNumber),
+  );
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
@@ -954,9 +1167,12 @@ function StepPayment({
         <div>
           <input
             name="cardNumber"
-            defaultValue={draft.payment.cardNumber}
-            placeholder="Card Number"
+            value={cardNumber}
+            onChange={(e) => setCardNumber(formatCardNumber(e.target.value))}
+            placeholder="1111 1111 1111 1111"
             inputMode="numeric"
+            autoComplete="cc-number"
+            maxLength={23}
             aria-label="Card or account number"
             aria-invalid={!!errors.cardNumber}
             className={input}
@@ -978,7 +1194,7 @@ function StepPayment({
           type="submit"
           className="rounded-[8px] bg-brand px-7 py-2.5 text-[13px] font-semibold text-white transition-colors hover:bg-brand-dark"
         >
-          Host your Villa
+          {submitLabel}
         </button>
       </div>
     </form>
@@ -1097,40 +1313,53 @@ export default function HostWizard({
     return { ...base, step: minStep };
   });
   const [done, setDone] = useState(false);
+  // Edit mode only: confirmation shown after a section is saved in place.
+  const [savedMsg, setSavedMsg] = useState("");
+  // Edit mode only: the current section has edits that haven't been saved yet.
+  const [dirty, setDirty] = useState(false);
+  const markDirty = () => {
+    setDirty(true);
+    setSavedMsg("");
+  };
 
+  const buildVillaPayload = (m: Draft) => ({
+    name: m.villa.name || "My Villa",
+    kind: m.villa.kind,
+    description: m.villa.description,
+    area: m.villa.area,
+    address: m.villa.address,
+    city: m.villa.city,
+    rooms: parseInt(m.villa.rooms, 10) || 1,
+    bathrooms: parseInt(m.villa.bathrooms, 10) || 1,
+    maxGuests: parseInt(m.villa.maxGuests, 10) || 1,
+    peoplePerRoom: parseInt(m.villa.peoplePerRoom, 10) || 0,
+    facilities: m.villa.facilities,
+    services: m.services.selected.map((name) => ({
+      name,
+      price: parseFloat(m.services.prices?.[name] ?? "") || 0,
+    })),
+    price: m.price,
+    discount: m.discount,
+    images: m.images,
+  });
+
+  // Create flow: walk the steps, persisting the new villa on the final step.
   function advance(patch: Partial<Draft>) {
     const merged = { ...draft, ...patch };
 
     if (draft.step === STEPS.length - 1) {
-      // Final step submitted — persist the villa.
       if (submitting) return;
       startTransition(async () => {
-        const payload = {
-          name: merged.villa.name || "My Villa",
-          kind: merged.villa.kind,
-          description: merged.villa.description,
-          area: merged.villa.area,
-          address: merged.villa.address,
-          city: merged.villa.city,
-          rooms: parseInt(merged.villa.rooms, 10) || 1,
-          bathrooms: parseInt(merged.villa.bathrooms, 10) || 1,
-          maxGuests: parseInt(merged.villa.maxGuests, 10) || 1,
-          facilities: merged.villa.facilities,
-          services: merged.services.selected.map((name) => ({
-            name,
-            price: parseFloat(merged.services.prices?.[name] ?? "") || 0,
-          })),
-          price: merged.price,
-          images: merged.images,
-        };
-        const result = editId
-          ? await updateVillaAction(editId, payload)
-          : await createVillaAction({ ...payload, hostProfile: merged.personal });
+        const result = await createVillaAction({
+          ...buildVillaPayload(merged),
+          hostProfile: merged.personal,
+          payment: merged.payment,
+        });
         if (!result.ok) {
           setSubmitError(result.error);
           return;
         }
-        if (!editId) window.localStorage.removeItem(DRAFT_KEY);
+        window.localStorage.removeItem(DRAFT_KEY);
         setSubmitError("");
         setDraft(merged);
         setDone(true);
@@ -1141,23 +1370,94 @@ export default function HostWizard({
     }
 
     const next = { ...merged, step: Math.min(draft.step + 1, STEPS.length - 1) };
-    if (!editId) window.localStorage.setItem(DRAFT_KEY, JSON.stringify(next));
+    window.localStorage.setItem(DRAFT_KEY, JSON.stringify(next));
     setDraft(next);
     window.scrollTo({ top: 0 });
+  }
+
+  // Edit flow: save the current section immediately and stay put, so the host
+  // can jump to another section from the sidebar or leave.
+  function saveSection(patch: Partial<Draft>) {
+    if (!editId || submitting) return;
+    const merged = { ...draft, ...patch };
+    startTransition(async () => {
+      const result = await updateVillaAction(
+        editId,
+        buildVillaPayload(merged),
+        merged.payment,
+      );
+      if (!result.ok) {
+        setSavedMsg("");
+        setSubmitError(result.error);
+        return;
+      }
+      setSubmitError("");
+      setDirty(false);
+      setDraft(merged);
+      setSavedMsg(`${STEPS[draft.step]} saved.`);
+      router.refresh();
+      window.scrollTo({ top: 0 });
+    });
+  }
+
+  // Edit flow: jump straight to any section from the sidebar, warning first if
+  // the current section has unsaved edits.
+  function goToStep(i: number) {
+    if (i === draft.step) return;
+    if (dirty && !window.confirm(DISCARD_MSG)) return;
+    setDirty(false);
+    setSavedMsg("");
+    setSubmitError("");
+    setDraft((cur) => ({ ...cur, step: i }));
+    window.scrollTo({ top: 0 });
+  }
+
+  // Edit flow: leave the wizard entirely, warning first on unsaved edits.
+  function leaveEditor(href: string) {
+    if (dirty && !window.confirm(DISCARD_MSG)) return;
+    setDirty(false);
+    router.push(href);
+  }
+
+  // Create flow: leaving the add-villa wizard abandons it (nothing is submitted
+  // until the final step). Warn if the host has entered anything, then discard
+  // the saved draft so the warning holds true.
+  function leaveWizard(href: string) {
+    if (dirty) {
+      if (!window.confirm(LEAVE_MSG)) return;
+      window.localStorage.removeItem(DRAFT_KEY);
+    }
+    setDirty(false);
+    router.push(href);
   }
 
   function goBack() {
     setDraft((cur) => {
       const next = { ...cur, step: Math.max(minStep, cur.step - 1) };
-      if (!editId) window.localStorage.setItem(DRAFT_KEY, JSON.stringify(next));
+      window.localStorage.setItem(DRAFT_KEY, JSON.stringify(next));
       return next;
     });
     window.scrollTo({ top: 0 });
   }
 
+  // Edit mode: warn on tab close / refresh / hard navigation while a section
+  // has unsaved edits. (Create mode auto-saves the draft to localStorage.)
+  useEffect(() => {
+    if (!editId || !dirty) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [editId, dirty]);
+
   if (!mounted) return <div className="min-h-[50vh]" aria-hidden="true" />;
 
   const step = draft.step;
+  const editing = !!editId;
+  const saveLabel = editing ? "Save" : "Save and Next";
+  const onStep = editing ? saveSection : advance;
 
   return (
     <div>
@@ -1168,21 +1468,41 @@ export default function HostWizard({
           <nav aria-label="Breadcrumb" className="text-[20px] leading-[1.2] text-ink">
             <Link href="/" className="underline">Home</Link>
             <span className="font-light">{"  /  "}</span>
-            <Link href="#" className="underline">All Topics</Link>
-            <span className="font-light">{" / "}</span>
-            <Link href="#" className="underline">Legal Terms</Link>
-            <span className="font-light">{" / "}</span>
-            <span>Privacy Policy</span>
+            {editing ? (
+              <>
+                <Link href="/profile/properties" className="underline">My Properties</Link>
+                <span className="font-light">{" / "}</span>
+                <span>Edit Villa</span>
+              </>
+            ) : (
+              <span>Host your Villa</span>
+            )}
           </nav>
 
           <div className="mt-[30px] flex items-center justify-between">
             <h1 className="text-[28px] font-semibold leading-[1.3] text-black">
               {editId ? "Edit your Villa" : "Add your Villa"}
             </h1>
-            {!done && step > minStep ? (
+            {!editId && !done && step > minStep ? (
               <button
                 type="button"
                 onClick={goBack}
+                className="text-[30px] leading-[1.35] text-black underline"
+              >
+                Back
+              </button>
+            ) : editId && !done ? (
+              <button
+                type="button"
+                onClick={() => leaveEditor("/profile/properties")}
+                className="text-[30px] leading-[1.35] text-black underline"
+              >
+                Back
+              </button>
+            ) : !editId && !done ? (
+              <button
+                type="button"
+                onClick={() => leaveWizard("/")}
                 className="text-[30px] leading-[1.35] text-black underline"
               >
                 Back
@@ -1196,6 +1516,13 @@ export default function HostWizard({
               </Link>
             )}
           </div>
+          {editId && !done && (
+            <p className="mt-2 text-[15px] leading-relaxed text-body">
+              Pick any section on the left to edit it, then{" "}
+              <span className="font-semibold">Save</span>. Each section saves on
+              its own — your changes go live right away.
+            </p>
+          )}
         </>
       )}
 
@@ -1210,22 +1537,47 @@ export default function HostWizard({
         ) : (
           <div className="flex flex-col gap-8 lg:flex-row">
             <div className="shrink-0 lg:w-56">
-              <Stepper current={step} />
+              <Stepper
+                current={step}
+                minStep={minStep}
+                onSelect={editing ? goToStep : undefined}
+              />
             </div>
-            <div className="min-w-0 flex-1 rounded-[10px] bg-white p-6 shadow-[0px_15px_50px_0px_rgba(0,0,0,0.08)] sm:p-8">
+            <div
+              className="min-w-0 flex-1 rounded-[10px] bg-white p-6 shadow-[0px_15px_50px_0px_rgba(0,0,0,0.08)] sm:p-8"
+              // Any field edit (change bubbles) or control-button click inside a
+              // step marks the wizard dirty — drives the unsaved warning on exit
+              // (per-section in edit mode, whole-flow when adding a new villa).
+              onChange={markDirty}
+              onClick={(e) => {
+                if ((e.target as HTMLElement).closest('button[type="button"]'))
+                  markDirty();
+              }}
+            >
               {submitError && (
                 <p role="alert" className="mb-4 rounded-md bg-red-50 px-4 py-2.5 text-sm text-red-600">
                   {submitError}
                 </p>
               )}
+              {savedMsg && (
+                <p role="status" className="mb-4 rounded-md bg-brand/10 px-4 py-2.5 text-sm text-brand-dark">
+                  {savedMsg} Choose another section on the left to keep editing.
+                </p>
+              )}
               {step === 0 && (
                 <StepPersonal draft={draft} avatarUrl={avatarUrl} onNext={advance} />
               )}
-              {step === 1 && <StepVilla draft={draft} onNext={advance} />}
-              {step === 2 && <StepImages draft={draft} onNext={advance} />}
-              {step === 3 && <StepServices draft={draft} onNext={advance} />}
-              {step === 4 && <StepPricing draft={draft} onNext={advance} />}
-              {step === 5 && <StepPayment draft={draft} onNext={advance} />}
+              {step === 1 && <StepVilla draft={draft} onNext={onStep} submitLabel={saveLabel} />}
+              {step === 2 && <StepImages draft={draft} onNext={onStep} submitLabel={saveLabel} />}
+              {step === 3 && <StepServices draft={draft} onNext={onStep} submitLabel={saveLabel} />}
+              {step === 4 && <StepPricing draft={draft} onNext={onStep} submitLabel={saveLabel} />}
+              {step === 5 && (
+                <StepPayment
+                  draft={draft}
+                  onNext={onStep}
+                  submitLabel={editing ? "Save" : "Host your Villa"}
+                />
+              )}
             </div>
           </div>
         )}

@@ -65,3 +65,29 @@ export const DIAL_CODE_OPTIONS = DIAL_CODES.map(({ country, code }) => ({
 
 /** "+1|Canada" → "+1" (also passes through already-plain codes). */
 export const dialCodeFromValue = (value: string) => value.split("|")[0];
+
+/** Split a stored contact like "+91 9876543210" into its dial code and number.
+ *  Matches the longest known dial-code prefix; if none matches, code is "" and
+ *  the whole value is the number. */
+export function splitDialNumber(stored: string): { code: string; number: string } {
+  const s = (stored ?? "").trim();
+  let code = "";
+  for (const d of DIAL_CODES) {
+    if (s.startsWith(d.code) && d.code.length > code.length) code = d.code;
+  }
+  return code
+    ? { code, number: s.slice(code.length).trim() }
+    : { code: "", number: s };
+}
+
+/** A phone number is 6–15 digits once spaces and dashes are stripped. */
+export function isValidPhoneNumber(number: string): boolean {
+  return /^\d{6,15}$/.test((number ?? "").replace(/[\s-]/g, ""));
+}
+
+/** Canonical stored form: "+CC digits" (empty when there's no number). */
+export function joinDialNumber(code: string, number: string): string {
+  const digits = (number ?? "").replace(/[\s-]/g, "");
+  if (!digits) return "";
+  return `${code} ${digits}`.trim();
+}

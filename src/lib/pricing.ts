@@ -23,9 +23,21 @@ export type Quote = {
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-export function quote(pricePerNight: number, nights: number): Quote {
+/** `hostDiscountPct` is the villa's own standing discount (0–90). The guest gets
+ *  whichever is larger — the host's discount or the automatic length-of-stay
+ *  discount — so a booking is never charged more than either would give. */
+export function quote(
+  pricePerNight: number,
+  nights: number,
+  hostDiscountPct = 0,
+): Quote {
   const subtotal = round2(pricePerNight * nights);
-  const discount = stayDiscount(nights);
+  const stay = stayDiscount(nights);
+  const hostRate = Math.max(0, Math.min(90, hostDiscountPct)) / 100;
+  const discount: StayDiscount =
+    hostRate > stay.rate
+      ? { rate: hostRate, label: `Host discount (${Math.round(hostRate * 100)}%)` }
+      : stay;
   const discountAmount = round2(subtotal * discount.rate);
   const serviceFee = round2((subtotal - discountAmount) * SERVICE_FEE_RATE);
   const total = round2(subtotal - discountAmount + serviceFee);

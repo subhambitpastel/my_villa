@@ -18,8 +18,8 @@ export default async function MyFavoritesPage() {
     name: v.name,
     city: v.city,
     price: v.price,
-    distance: "110 Kilometers away",
-    dates: "Feb 18 - 29",
+    discount: v.discount,
+    freeServices: v.freeServices,
     image: v.image,
     liked: true,
   }));
@@ -34,7 +34,7 @@ export default async function MyFavoritesPage() {
           Saved {favorites.length === 1 ? "Villa" : "Villas"}
         </h2>
         <Link
-          href="/villas"
+          href="/search"
           className="rounded-[8px] bg-brand px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-brand-dark"
         >
           Browse Villas

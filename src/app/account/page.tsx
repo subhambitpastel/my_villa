@@ -42,8 +42,8 @@ export default async function AccountPage() {
     name: v.name,
     city: v.city,
     price: v.price,
-    distance: "110 Kilometers away",
-    dates: "Feb 18 - 29",
+    discount: v.discount,
+    freeServices: v.freeServices,
     image: v.image,
     liked: favorites.has(v.id),
   }));

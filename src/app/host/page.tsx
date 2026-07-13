@@ -53,6 +53,16 @@ export default async function HostPage({
     const villa = await getVillaDetail(Number(edit));
     if (villa && villa.owner_id === user.id) {
       editId = villa.id;
+      // Prefill the Payment step from the host's stored payout details, so
+      // editing it round-trips instead of overwriting the card with a blank.
+      let payMethods = DEFAULT_DRAFT.payment.methods;
+      try {
+        const parsed = JSON.parse(user.pay_methods || "[]");
+        if (Array.isArray(parsed) && parsed.length)
+          payMethods = parsed.filter((m): m is string => typeof m === "string");
+      } catch {
+        /* corrupt value — keep the default method set */
+      }
       editDraft = {
         ...DEFAULT_DRAFT,
         personal: personal!,
@@ -67,6 +77,7 @@ export default async function HostPage({
           rooms: String(villa.rooms),
           bathrooms: String(villa.bathrooms),
           maxGuests: String(villa.max_guests),
+          peoplePerRoom: villa.people_per_room ? String(villa.people_per_room) : "",
           facilities: villa.facilityList,
         },
         images: villa.gallery,
@@ -82,6 +93,12 @@ export default async function HostPage({
             .filter((n) => !SERVICES.includes(n) && !FACILITY_CHIPS.includes(n)),
         },
         price: villa.price,
+        discount: villa.discount,
+        payment: {
+          methods: payMethods,
+          accountType: user.pay_account_type || DEFAULT_DRAFT.payment.accountType,
+          cardNumber: user.card_number,
+        },
       };
     }
   }

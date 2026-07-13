@@ -112,18 +112,50 @@ function sortByCreated(list: BookingItem[], latestFirst: boolean): BookingItem[]
   );
 }
 
+/** Villa name with any package badge / paid add-ons listed beneath it. */
+function VillaCell({ b }: { b: BookingItem }) {
+  const extras = b.extras.map((e) => e.name).join(", ");
+  return (
+    <span className="min-w-0">
+      <span className="block truncate">{b.villa}</span>
+      {b.package && (
+        <span
+          className="mt-0.5 inline-block max-w-full truncate rounded-[3px] bg-[#e9e8fd] px-1.5 py-0.5 text-[10px] font-medium text-brand"
+          title={`Package: ${b.package.name} — ${b.package.inclusions.join(", ")}`}
+        >
+          Package · {b.package.name}
+        </span>
+      )}
+      {!b.package && b.extras.length > 0 && (
+        <span
+          className="mt-0.5 block truncate text-[11px] text-[#7a7a85]"
+          title={`Add-ons: ${extras}`}
+        >
+          + {extras}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [activeLatest, setActiveLatest] = useState(true);
   const [historyLatest, setHistoryLatest] = useState(true);
 
+  // Package stays are shown in their own section, apart from nightly stays.
+  const nightly = bookings.filter((b) => !b.package);
+  const packageStays = sortByCreated(
+    bookings.filter((b) => b.package),
+    true,
+  );
   const active = sortByCreated(
-    bookings.filter((b) => b.status === "accepted"),
+    nightly.filter((b) => b.status === "accepted"),
     activeLatest,
   );
   const history = sortByCreated(
-    bookings.filter((b) => b.status !== "accepted"),
+    nightly.filter((b) => b.status !== "accepted"),
     historyLatest,
   );
 
@@ -176,7 +208,7 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
             key={b.id}
             className={`${GRID} rounded-[6px] border border-[#dfdfdf] bg-white px-4 py-3 text-[13px] text-[#121212]`}
           >
-            <span className="truncate">{b.villa}</span>
+            <VillaCell b={b} />
             <span>{b.posted}</span>
             <span>{b.dates}</span>
             <span>{b.guests}</span>
@@ -218,7 +250,7 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
             key={b.id}
             className={`${GRID} rounded-[6px] border border-[#dfdfdf] bg-white px-4 py-3 text-[13px] text-[#121212]`}
           >
-            <span className="truncate">{b.villa}</span>
+            <VillaCell b={b} />
             <span>{b.posted}</span>
             <span>{b.dates}</span>
             <span>{b.guests}</span>
@@ -248,6 +280,69 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
           </li>
         )}
       </ul>
+
+      {packageStays.length > 0 && (
+        <>
+          <h2 className="mt-8 text-[16px] font-semibold text-[#121212]">
+            Package stays
+          </h2>
+          <ul className="mt-4 space-y-3">
+            {packageStays.map((b) => (
+              <li
+                key={b.id}
+                className="rounded-[6px] border border-[#dfdfdf] px-4 py-3"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[14px] font-semibold text-heading">
+                      {b.package!.name}
+                    </p>
+                    <p className="text-[12px] text-gray">{b.villa}</p>
+                    <p className="mt-0.5 text-[12px] text-[#a1a1a2]">
+                      {b.package!.nights} night{b.package!.nights === 1 ? "" : "s"}{" "}
+                      · {b.dates} · {b.guests}
+                    </p>
+                    {b.package!.inclusions.length > 0 && (
+                      <ul className="mt-1.5 flex flex-wrap gap-1.5">
+                        {b.package!.inclusions.map((inc) => (
+                          <li
+                            key={inc}
+                            className="rounded-full bg-[#f2f1fe] px-2 py-0.5 text-[11px] text-brand"
+                          >
+                            {inc}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 flex-col items-end gap-1.5 text-right">
+                    <span className="text-[14px] font-semibold text-brand">
+                      ${b.package!.price.toFixed(2)}
+                    </span>
+                    <span
+                      className={`text-[13px] font-semibold ${
+                        b.status === "cancelled" || b.status === "declined"
+                          ? "text-[#eb5757]"
+                          : "text-brand"
+                      }`}
+                    >
+                      {STATUS_LABEL[b.status] ?? b.status}
+                    </span>
+                    {b.status === "accepted" && (
+                      <Link
+                        href={`/booking?id=${b.id}`}
+                        className="text-[13px] text-[#eb5757] underline hover:opacity-80"
+                      >
+                        Cancel Booking
+                      </Link>
+                    )}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
 
       <p className="mt-5 text-[11px] leading-relaxed text-[#121212]">
         Note: Cancellation of a booking may result in cancellation charges.

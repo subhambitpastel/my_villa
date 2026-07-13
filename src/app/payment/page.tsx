@@ -7,13 +7,16 @@ import PaymentForm from "@/components/payment/PaymentForm";
 import { redirect } from "next/navigation";
 import {
   getVillaById,
+  getPackageById,
   isVillaAvailable,
   getOwnBookingForRange,
   parseServiceList,
+  type PackageForBooking,
 } from "@/lib/queries";
 import type { VillaService } from "@/components/host/draft";
 import { getCurrentUser } from "@/lib/session";
-import { dayFromNow, formatDay, nightsBetween, parseDay } from "@/lib/dates";
+import { isRoomBased, roomsForGuests } from "@/lib/rooms";
+import { addDays, dayFromNow, formatDay, nightsBetween, parseDay } from "@/lib/dates";
 import { quote } from "@/lib/pricing";
 import { loginHref } from "@/lib/returnTo";
 import type { VillaRow } from "@/lib/db";
@@ -29,13 +32,21 @@ function BookingSummary({
   villa,
   nights,
   extras,
+  rooms = 1,
+  roomBased = false,
+  pkg = null,
 }: {
   villa: VillaRow;
   nights: number;
   /** Extra services the guest picked in the Reserve dialog. */
   extras: VillaService[];
+  /** Rooms reserved (hotels/resorts) — price scales per room per night. */
+  rooms?: number;
+  roomBased?: boolean;
+  /** Set for a package booking — one all-inclusive price, no nightly breakdown. */
+  pkg?: PackageForBooking | null;
 }) {
-  const q = quote(villa.price, nights);
+  const q = quote(villa.price * (roomBased ? rooms : 1), nights, villa.discount);
   const extrasTotal = extras.reduce((sum, s) => sum + s.price, 0);
   return (
     <aside className="h-fit w-full min-w-0 max-w-[758px] rounded-[10px] bg-white pb-12 shadow-[0px_15px_50px_0px_rgba(0,0,0,0.18)]">
@@ -68,40 +79,66 @@ function BookingSummary({
       <hr className="mx-[25px] mt-[13px] border-t border-[#c6c6c6]" />
 
       <h3 className="mt-7 pl-[25px] text-[28px] font-medium leading-[1.3] text-black">
-        Price Details
+        {pkg ? "Package Details" : "Price Details"}
       </h3>
-      <dl className="mt-8 space-y-[31px] pl-[39px] pr-[70px] text-[26px] leading-[1.3] text-[#121212]">
-        <div className="flex items-center justify-between">
-          <dt>${villa.price.toFixed(2)} x {nights} night{nights === 1 ? "" : "s"}</dt>
-          <dd>${q.subtotal.toFixed(2)}</dd>
-        </div>
-        {q.discountAmount > 0 && (
-          <div className="flex items-center justify-between text-brand">
-            <dt>{q.discount.label}</dt>
-            <dd>−${q.discountAmount.toFixed(2)}</dd>
+      {pkg ? (
+        <div className="mt-6 pl-[39px] pr-[70px] text-[#121212]">
+          <p className="text-[24px] font-semibold leading-[1.3]">{pkg.name}</p>
+          <p className="mt-1 text-[18px] leading-[1.3] text-[#4a4a4a]">
+            {pkg.nights} night{pkg.nights === 1 ? "" : "s"} · up to {pkg.maxGuests}{" "}
+            guest{pkg.maxGuests === 1 ? "" : "s"} · all-inclusive
+          </p>
+          <ul className="mt-4 space-y-[10px] text-[18px] leading-[1.35]">
+            {pkg.inclusions.map((inc) => (
+              <li key={inc} className="flex items-center gap-[10px]">
+                <span className="h-[6px] w-[6px] shrink-0 rounded-full bg-brand" />
+                {inc}
+              </li>
+            ))}
+          </ul>
+          <div className="mt-8 flex items-center justify-between border-t border-[#c6c6c6] pt-6 text-[26px] font-semibold leading-[1.3]">
+            <span>Total (USD)</span>
+            <span>${pkg.price.toFixed(2)}</span>
           </div>
-        )}
-        <div className="flex items-center justify-between">
-          <dt>
-            <Link href="#" className="underline">
-              Service fee
-            </Link>
-          </dt>
-          <dd>${q.serviceFee.toFixed(2)}</dd>
         </div>
-        {extras.map((s) => (
-          <div key={s.name} className="flex items-center justify-between gap-6">
-            <dt className="min-w-0 truncate">{s.name}</dt>
-            <dd className="shrink-0">
-              {s.price > 0 ? `$${s.price.toFixed(2)}` : "Free"}
-            </dd>
+      ) : (
+        <dl className="mt-8 space-y-[31px] pl-[39px] pr-[70px] text-[26px] leading-[1.3] text-[#121212]">
+          <div className="flex items-center justify-between">
+            <dt>
+              ${villa.price.toFixed(2)}
+              {roomBased ? ` x ${rooms} room${rooms === 1 ? "" : "s"}` : ""} x{" "}
+              {nights} night{nights === 1 ? "" : "s"}
+            </dt>
+            <dd>${q.subtotal.toFixed(2)}</dd>
           </div>
-        ))}
-        <div className="flex items-center justify-between pt-8 font-semibold">
-          <dt>Total (USD)</dt>
-          <dd>${(q.total + extrasTotal).toFixed(2)}</dd>
-        </div>
-      </dl>
+          {q.discountAmount > 0 && (
+            <div className="flex items-center justify-between text-brand">
+              <dt>{q.discount.label}</dt>
+              <dd>−${q.discountAmount.toFixed(2)}</dd>
+            </div>
+          )}
+          <div className="flex items-center justify-between">
+            <dt>
+              <Link href="#" className="underline">
+                Service fee
+              </Link>
+            </dt>
+            <dd>${q.serviceFee.toFixed(2)}</dd>
+          </div>
+          {extras.map((s) => (
+            <div key={s.name} className="flex items-center justify-between gap-6">
+              <dt className="min-w-0 truncate">{s.name}</dt>
+              <dd className="shrink-0">
+                {s.price > 0 ? `$${s.price.toFixed(2)}` : "Free"}
+              </dd>
+            </div>
+          ))}
+          <div className="flex items-center justify-between pt-8 font-semibold">
+            <dt>Total (USD)</dt>
+            <dd>${(q.total + extrasTotal).toFixed(2)}</dd>
+          </div>
+        </dl>
+      )}
     </aside>
   );
 }
@@ -114,17 +151,19 @@ export default async function PaymentPage({
     in?: string;
     out?: string;
     guests?: string;
+    rooms?: string;
     svc?: string;
+    pkg?: string;
   }>;
 }) {
   const params = await searchParams;
 
   // Booking needs an account — send guests to sign in and bring them straight
-  // back to this checkout (villa, dates, guests and services preserved).
+  // back to this checkout (villa, dates, guests, rooms, services, package kept).
   const user = await getCurrentUser();
   if (!user) {
     const qs = new URLSearchParams();
-    for (const key of ["villa", "in", "out", "guests", "svc"] as const) {
+    for (const key of ["villa", "in", "out", "guests", "rooms", "svc", "pkg"] as const) {
       if (params[key]) qs.set(key, params[key]!);
     }
     redirect(loginHref(`/payment${qs.size ? "?" + qs.toString() : ""}`));
@@ -141,40 +180,78 @@ export default async function PaymentPage({
   // Owners can't book their own villa — send them to its manage view.
   if (villa.owner_id === user.id) redirect(`/place?id=${villa.id}`);
 
-  // Clamp guests to what the villa owner allows this place to sleep.
-  const cap = Math.max(1, villa.max_guests);
-  const guestsParam = Number(params.guests);
-  const guests = Math.min(
-    cap,
-    Number.isInteger(guestsParam) && guestsParam >= 1 ? guestsParam : 2,
-  );
+  const roomBased = isRoomBased(villa.kind);
 
-  // Dates must be real, in the future, and chosen by the guest. If they're
-  // missing or invalid, send them back to the villa to pick a range — never
-  // invent a default one, or the summary/availability would describe dates the
-  // guest never selected.
-  const datesValid =
-    !!parseDay(params.in) &&
-    !!parseDay(params.out) &&
-    nightsBetween(params.in!, params.out!) >= 1 &&
-    params.in! >= dayFromNow(0);
-  if (!datesValid) redirect(`/place?id=${villa.id}&guests=${guests}`);
-  const checkIn = params.in!;
-  const checkOut = params.out!;
+  // Package mode: a package fixes the duration, occupancy and price server-side
+  // (the guest only chose a start date). Load it and verify it's this villa's.
+  const pkgId = Number(params.pkg);
+  const pkg = Number.isInteger(pkgId) ? await getPackageById(pkgId) : null;
+  if (params.pkg && (!pkg || pkg.villaId !== villa.id))
+    redirect(`/place?id=${villa.id}`);
+
+  let checkIn: string;
+  let checkOut: string;
+  let guests: number;
+  let rooms: number;
+  let svcIndices: number[] = [];
+  let extras: VillaService[] = [];
+
+  if (pkg) {
+    // Only the start date is the guest's; it must be real and not in the past.
+    // Everything else is derived from the package.
+    if (!parseDay(params.in) || params.in! < dayFromNow(0))
+      redirect(`/place?id=${villa.id}`);
+    checkIn = params.in!;
+    checkOut = addDays(checkIn, pkg.nights);
+    guests = pkg.maxGuests;
+    rooms = roomsForGuests(villa.kind, guests, villa.people_per_room);
+  } else {
+    // Hotels/resorts reserve rooms (each sleeping people_per_room); other kinds
+    // book the whole place. Clamp rooms to inventory, then cap guests.
+    const roomsParam = Number(params.rooms);
+    rooms = roomBased
+      ? Math.min(
+          Math.max(1, villa.rooms),
+          Number.isInteger(roomsParam) && roomsParam >= 1 ? roomsParam : 1,
+        )
+      : 1;
+    const cap = roomBased
+      ? Math.max(1, rooms * villa.people_per_room)
+      : Math.max(1, villa.max_guests);
+    const guestsParam = Number(params.guests);
+    guests = Math.min(
+      cap,
+      Number.isInteger(guestsParam) && guestsParam >= 1 ? guestsParam : 2,
+    );
+
+    // Dates must be real, in the future, and chosen by the guest.
+    const datesValid =
+      !!parseDay(params.in) &&
+      !!parseDay(params.out) &&
+      nightsBetween(params.in!, params.out!) >= 1 &&
+      params.in! >= dayFromNow(0);
+    if (!datesValid) redirect(`/place?id=${villa.id}&guests=${guests}`);
+    checkIn = params.in!;
+    checkOut = params.out!;
+
+    // Extra services picked on the villa page, as indices into the villa's
+    // service list — prices always come from the DB, never the URL. Only paid
+    // add-ons count (free ones come with the stay).
+    const villaServices = parseServiceList(villa.services);
+    svcIndices = [
+      ...new Set(
+        // Guard the empty string: "".split(",") is [""], and Number("") is 0
+        // (not NaN), which would silently select service index 0.
+        (params.svc ? params.svc.split(",") : [])
+          .map((n) => Number(n))
+          .filter((n) => Number.isInteger(n) && n >= 0 && n < villaServices.length),
+      ),
+    ].filter((i) => villaServices[i].price > 0);
+    extras = svcIndices.map((i) => villaServices[i]);
+  }
+
   const nights = nightsBetween(checkIn, checkOut);
-  const available = await isVillaAvailable(villa.id, checkIn, checkOut);
-
-  // Extra services the guest picked on the villa page, passed as indices into
-  // the villa's service list — prices always come from the DB, never the URL.
-  const villaServices = parseServiceList(villa.services);
-  const extras = [
-    ...new Set(
-      (params.svc ?? "")
-        .split(",")
-        .map((n) => Number(n))
-        .filter((n) => Number.isInteger(n) && n >= 0 && n < villaServices.length),
-    ),
-  ].map((i) => villaServices[i]);
+  const available = await isVillaAvailable(villa.id, checkIn, checkOut, rooms);
   // If the dates are taken, is it the guest's OWN booking? (e.g. they just paid
   // and refreshed, or came back to checkout.) Then reassure them instead of
   // telling them the villa was snatched away.
@@ -190,11 +267,9 @@ export default async function PaymentPage({
           <nav aria-label="Breadcrumb" className="pt-10 text-[20px] leading-[1.2] text-ink">
             <Link href="/" className="underline">Home</Link>
             <span className="font-light">{"  /  "}</span>
-            <Link href="#" className="underline">All Topics</Link>
+            <Link href={`/place?id=${villa.id}`} className="underline">{villa.name}</Link>
             <span className="font-light">{" / "}</span>
-            <Link href="#" className="underline">Legal Terms</Link>
-            <span className="font-light">{" / "}</span>
-            <span>Privacy Policy</span>
+            <span>Confirm Payment</span>
           </nav>
 
           <div className="mt-[45px] flex items-center justify-between">
@@ -230,6 +305,9 @@ export default async function PaymentPage({
                     checkIn={checkIn}
                     checkOut={checkOut}
                     guests={guests}
+                    rooms={rooms}
+                    services={svcIndices}
+                    packageId={pkg ? pkg.id : undefined}
                   />
                 </>
               ) : ownBooking ? (
@@ -299,7 +377,14 @@ export default async function PaymentPage({
                 </div>
               )}
             </div>
-            <BookingSummary villa={villa} nights={nights} extras={extras} />
+            <BookingSummary
+              villa={villa}
+              nights={nights}
+              extras={extras}
+              rooms={rooms}
+              roomBased={roomBased}
+              pkg={pkg}
+            />
           </div>
         </div>
       </main>

@@ -38,6 +38,14 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   // Container-friendly build output (safe for `next start` too).
   output: "standalone",
+  experimental: {
+    // Villa image uploads accept up to 8 files × 8 MB (see uploadImagesAction).
+    // Server Actions cap the request body at 1 MB by default, which rejected
+    // multi-image uploads before the action ever ran — raise it to fit them.
+    serverActions: {
+      bodySizeLimit: "70mb",
+    },
+  },
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },

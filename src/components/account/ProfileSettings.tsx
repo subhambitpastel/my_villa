@@ -4,6 +4,14 @@ import { useRef, useState, useTransition } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { updateAvatarAction, updateProfileAction } from "@/lib/actions";
+import { formatBirthday, isAtLeastAge, toDateInput } from "@/lib/dates";
+import {
+  isValidPhoneNumber,
+  joinDialNumber,
+  splitDialNumber,
+} from "@/lib/countries";
+import DateOfBirthField from "@/components/ui/DateOfBirthField";
+import PhoneNumberInput from "@/components/ui/PhoneNumberInput";
 
 type Profile = {
   fullName: string;
@@ -38,6 +46,9 @@ export default function ProfileSettings({
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
   const [avatar, setAvatar] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  const initEmergency = splitDialNumber(initialProfile.emergency);
+  const [emgCode, setEmgCode] = useState(initEmergency.code);
+  const [emgNumber, setEmgNumber] = useState(initEmergency.number);
   const fileRef = useRef<HTMLInputElement>(null);
 
   function update(key: keyof Profile, value: string) {
@@ -45,16 +56,46 @@ export default function ProfileSettings({
     setStatus(null);
   }
 
+  // Emergency contact edits flow through here so its two inputs (code + number)
+  // stay in sync with the single stored "+CC number" string.
+  function setEmergency(code: string, number: string) {
+    setEmgCode(code);
+    setEmgNumber(number);
+    update("emergency", joinDialNumber(code, number));
+  }
+
   function applyChanges() {
     setEditing(null);
+    // Date of birth is stored as YYYY-MM-DD; hosts/guests must be 18+.
+    const dob = toDateInput(profile.dob);
+    if (dob && !isAtLeastAge(dob)) {
+      setStatus({ ok: false, text: "You must be at least 18 years old." });
+      return;
+    }
+    // Emergency contact is optional, but a provided number must be valid and
+    // carry a country code.
+    if (profile.emergency) {
+      const emg = splitDialNumber(profile.emergency);
+      if (!emg.code || !isValidPhoneNumber(emg.number)) {
+        setStatus({
+          ok: false,
+          text: "Enter a valid emergency contact number with its country code.",
+        });
+        return;
+      }
+    }
+    const next = { ...profile, dob };
     startTransition(async () => {
-      const result = await updateProfileAction(profile);
+      const result = await updateProfileAction(next);
       setStatus(
         result.ok
           ? { ok: true, text: "Profile updated." }
           : { ok: false, text: result.error },
       );
-      if (result.ok) router.refresh();
+      if (result.ok) {
+        setProfile(next);
+        router.refresh();
+      }
     });
   }
 
@@ -104,6 +145,23 @@ export default function ProfileSettings({
                           <option key={g}>{g}</option>
                         ))}
                       </select>
+                    ) : field.key === "dob" ? (
+                      <DateOfBirthField
+                        value={toDateInput(value)}
+                        onChange={(d) => update(field.key, d)}
+                        triggerClassName="w-full bg-transparent text-[15px]"
+                        placeholder="Add date of birth"
+                        defaultOpen
+                      />
+                    ) : field.key === "emergency" ? (
+                      <PhoneNumberInput
+                        bare
+                        label="Emergency Contact"
+                        code={emgCode}
+                        number={emgNumber}
+                        onCode={(c) => setEmergency(c, emgNumber)}
+                        onNumber={(n) => setEmergency(emgCode, n)}
+                      />
                     ) : (
                       <input
                         autoFocus
@@ -119,7 +177,8 @@ export default function ProfileSettings({
                     )
                   ) : (
                     <span className={`truncate text-[15px] ${value ? "text-body" : "text-muted"}`}>
-                      {value || "Not Provided"}
+                      {(field.key === "dob" && value ? formatBirthday(value) : value) ||
+                        "Not Provided"}
                     </span>
                   )}
                   <button

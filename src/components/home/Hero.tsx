@@ -13,8 +13,6 @@ const TABS = [
   { label: "Rent", type: "rent" },
 ] as const;
 
-const GUEST_OPTIONS = ["1 Guest", "2 Guest", "4 Guest", "6 Guest", "8 Guest"];
-
 const SLIDES = [
   {
     src: "/images/hero-beach.jpg",
@@ -62,11 +60,21 @@ export default function Hero({
   cities,
   tab,
   onTabChange,
+  maxGuests,
 }: {
   cities: string[];
   tab: PropertyType;
   onTabChange: (tab: PropertyType) => void;
+  /** Largest capacity for the current tab (already capped for sanity) — the
+   *  guest picker runs 1..maxGuests so its top option always returns a result. */
+  maxGuests: number;
 }) {
+  const guestCap = Math.max(1, maxGuests);
+  const guestOptions = Array.from({ length: guestCap }, (_, i) => i + 1);
+  const [guestSel, setGuestSel] = useState(1);
+  // Clamp to the current tab's cap so switching to a tab with smaller places
+  // never leaves a stale, no-result guest count selected.
+  const guests = Math.min(guestSel, guestCap);
   const [location, setLocation] = useState("");
   const [checkIn, setCheckIn] = useState<string | null>(null);
   const [checkOut, setCheckOut] = useState<string | null>(null);
@@ -171,10 +179,6 @@ export default function Hero({
             if (checkIn) params.set("checkin", checkIn);
             if (checkOut) params.set("checkout", checkOut);
             // Carry the chosen guest count through to search → villa → checkout.
-            const guests = parseInt(
-              String(new FormData(e.currentTarget).get("guests") ?? ""),
-              10,
-            );
             if (guests >= 1) params.set("guests", String(guests));
             router.push(`/search?${params.toString()}`);
           }}
@@ -197,10 +201,14 @@ export default function Hero({
                 <select
                   name="guests"
                   aria-label="Guest"
+                  value={guests}
+                  onChange={(e) => setGuestSel(Number(e.target.value))}
                   className="w-[150px] cursor-pointer appearance-none bg-transparent pl-2 pr-8 text-[18px] font-bold text-ink focus:outline-none"
                 >
-                  {GUEST_OPTIONS.map((o) => (
-                    <option key={o}>{o}</option>
+                  {guestOptions.map((n) => (
+                    <option key={n} value={n}>
+                      {n} Guest{n === 1 ? "" : "s"}
+                    </option>
                   ))}
                 </select>
                 <FieldChevron />

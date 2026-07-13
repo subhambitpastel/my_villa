@@ -10,7 +10,6 @@ const base = (process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "")
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const staticRoutes = [
     "",
-    "/villas",
     "/search",
     "/packages",
     "/promotions",

@@ -9,6 +9,11 @@ import { loginHref } from "@/lib/returnTo";
 import DateRangeField from "@/components/home/DateRangeField";
 import type { BookedRange } from "@/lib/queries";
 import type { VillaService } from "@/components/host/draft";
+import {
+  fullyBookedRanges,
+  roomsFreeForRange,
+  type RoomBooking,
+} from "@/lib/rooms";
 
 /* eslint-disable @next/next/no-img-element */
 
@@ -25,11 +30,19 @@ export default function BookingCard({
   bookedRanges,
   authed,
   services = [],
+  roomBased = false,
+  totalRooms = 1,
+  peoplePerRoom = 0,
+  roomBookings = [],
+  discount = 0,
+  hasLongStayPackages = false,
 }: {
   villaId: number;
   price: number;
   rating: number;
   reviews: number;
+  /** Host-set % off the nightly price (applied in the quote). */
+  discount?: number;
   defaultCheckIn: string;
   defaultCheckOut: string;
   defaultGuests?: number;
@@ -40,32 +53,78 @@ export default function BookingCard({
   authed: boolean;
   /** Extra services the host offers; picked in a dialog on Reserve. */
   services?: VillaService[];
+  /** Hotels/resorts sell rooms individually — enables the Rooms picker,
+   *  per-room pricing, and sold-out-only calendar blocking. */
+  roomBased?: boolean;
+  totalRooms?: number;
+  peoplePerRoom?: number;
+  /** Accepted reservations (with room counts) used to compute availability. */
+  roomBookings?: RoomBooking[];
+  /** Whether this villa offers a Weekly Escape / Monthly Retreat package — only
+   *  then is the long-stay discount note advertised on the booking card. */
+  hasLongStayPackages?: boolean;
 }) {
-  // The guest picker runs 1..maxGuests (owner-defined); at least 1 option.
-  const guestOptions = Math.max(1, maxGuests);
   const [checkIn, setCheckIn] = useState(defaultCheckIn);
   const [checkOut, setCheckOut] = useState(defaultCheckOut);
-  const [guests, setGuests] = useState(
-    Math.min(Math.max(1, defaultGuests), guestOptions),
+  // Hotels/resorts: start with enough rooms to seat the guests carried from
+  // search (e.g. 14 guests at 2 people/room → 7 rooms), capped at the inventory.
+  const [roomsSel, setRoomsSel] = useState(
+    roomBased
+      ? Math.min(
+          Math.max(1, totalRooms),
+          Math.max(1, Math.ceil(Math.max(1, defaultGuests) / Math.max(1, peoplePerRoom))),
+        )
+      : 1,
   );
+  const [guestsSel, setGuestsSel] = useState(Math.max(1, defaultGuests));
   const router = useRouter();
   // Availability isn't announced up front — the message only appears if the
   // guest tries to reserve a range that's actually taken (checked on click).
   const [showUnavailable, setShowUnavailable] = useState(false);
 
   const nights = Math.max(0, nightsBetween(checkIn, checkOut));
-  const unavailable =
-    nights >= 1 &&
-    bookedRanges.some((r) => r.checkIn < checkOut && r.checkOut > checkIn);
   const datesReady = nights >= 1 && checkIn >= today;
-  const q = quote(price, nights);
 
-  // Extra services chosen in the Reserve dialog (indices into `services`).
+  // Whole-villa stays block their entire range; hotels/resorts block only days
+  // where every room is taken (rendered struck-through on the calendar).
+  const calendarBlocked = roomBased
+    ? fullyBookedRanges(roomBookings, totalRooms)
+    : bookedRanges;
+
+  // Rooms the guest may take for the chosen range, and the resulting guest cap.
+  const roomsFree = roomBased
+    ? datesReady
+      ? roomsFreeForRange(checkIn, checkOut, roomBookings, totalRooms)
+      : totalRooms
+    : 1;
+  const roomsMax = Math.max(1, roomsFree);
+  const rooms = roomBased ? Math.min(roomsSel, roomsMax) : 1;
+  const guestCap = roomBased
+    ? Math.max(1, rooms * peoplePerRoom)
+    : Math.max(1, maxGuests);
+  const guests = Math.min(Math.max(1, guestsSel), guestCap);
+
+  const unavailable =
+    datesReady &&
+    (calendarBlocked.some((r) => r.checkIn < checkOut && r.checkOut > checkIn) ||
+      (roomBased && roomsFree < rooms));
+  const unitPrice = roomBased ? price * rooms : price;
+  const q = quote(unitPrice, nights, discount);
+
+  // Extra services chosen in the Reserve dialog (indices into `services`). Only
+  // paid services are offered — free ones come with the stay, so there's nothing
+  // to opt into. Original indices are kept so checkout resolves prices from the
+  // villa server-side.
+  const paidServices = services
+    .map((s, i) => ({ service: s, index: i }))
+    .filter(({ service }) => service.price > 0);
   const [showServices, setShowServices] = useState(false);
   const [chosen, setChosen] = useState<number[]>([]);
   const chosenTotal = chosen.reduce((sum, i) => sum + (services[i]?.price ?? 0), 0);
 
-  const paymentUrl = `/payment?villa=${villaId}&in=${checkIn}&out=${checkOut}&guests=${guests}`;
+  const paymentUrl = `/payment?villa=${villaId}&in=${checkIn}&out=${checkOut}&guests=${guests}${
+    roomBased ? `&rooms=${rooms}` : ""
+  }`;
 
   // Checkout carries the picked services as indices; prices are re-read from
   // the villa on the server, so the client can never set its own amounts.
@@ -83,7 +142,7 @@ export default function BookingCard({
       setShowUnavailable(true);
       return;
     }
-    if (services.length > 0) {
+    if (paidServices.length > 0) {
       setShowServices(true);
       return;
     }
@@ -113,7 +172,7 @@ export default function BookingCard({
           variant="booking"
           checkIn={checkIn || null}
           checkOut={checkOut || null}
-          bookedRanges={bookedRanges}
+          bookedRanges={calendarBlocked}
           onChange={(nextIn, nextOut) => {
             setCheckIn(nextIn ?? "");
             setCheckOut(nextOut ?? "");
@@ -121,6 +180,46 @@ export default function BookingCard({
           }}
         />
       </div>
+
+      {/* Hotels/resorts sell individual rooms — pick how many, then guests. */}
+      {roomBased && (
+        <label
+          htmlFor="booking-rooms"
+          className="relative mt-[22px] flex cursor-pointer items-center justify-between rounded-[10px] border-[1.5px] border-[#ddd] p-[15px]"
+        >
+          <span className="min-w-0">
+            <span className="block text-[18px] font-medium leading-[1.2] text-[#121212]">
+              Rooms
+            </span>
+            <span className="mt-0.5 block text-[16px] leading-[1.2] text-[#4a4a4a]">
+              {rooms} {rooms === 1 ? "room" : "rooms"}
+              {datesReady && (
+                <span className="text-[#8a8a94]"> · {roomsMax} available</span>
+              )}
+            </span>
+          </span>
+          <img
+            src="/icons/place/dropdown.svg"
+            alt=""
+            width={49}
+            height={49}
+            className="pointer-events-none h-[49px] w-[49px] shrink-0"
+          />
+          <select
+            id="booking-rooms"
+            value={rooms}
+            onChange={(e) => setRoomsSel(Number(e.target.value))}
+            aria-label="Number of rooms"
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          >
+            {Array.from({ length: roomsMax }, (_, i) => i + 1).map((n) => (
+              <option key={n} value={n}>
+                {n} {n === 1 ? "room" : "rooms"}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       {/* The native select overlays the whole box (invisible) so clicking
           anywhere — label, value, or the chevron — opens the dropdown. */}
@@ -146,11 +245,11 @@ export default function BookingCard({
         <select
           id="booking-guests"
           value={guests}
-          onChange={(e) => setGuests(Number(e.target.value))}
+          onChange={(e) => setGuestsSel(Number(e.target.value))}
           aria-label="Number of guests"
           className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
         >
-          {Array.from({ length: guestOptions }, (_, i) => i + 1).map((n) => (
+          {Array.from({ length: guestCap }, (_, i) => i + 1).map((n) => (
             <option key={n} value={n}>
               {n} {n === 1 ? "guest" : "guests"}
             </option>
@@ -180,8 +279,9 @@ export default function BookingCard({
             !
           </span>
           <span>
-            This villa is already booked for {formatRange(checkIn, checkOut)}.
-            Please choose different dates.
+            {roomBased
+              ? `No rooms left for ${formatRange(checkIn, checkOut)}. Try fewer rooms or different dates.`
+              : `This villa is already booked for ${formatRange(checkIn, checkOut)}. Please choose different dates.`}
           </span>
         </p>
       )}
@@ -189,7 +289,9 @@ export default function BookingCard({
       <dl className="mt-[45px] space-y-[18px] text-[20px] leading-[1.2] text-black">
         <div className="flex items-center justify-between">
           <dt>
-            ${price} × {nights} night{nights === 1 ? "" : "s"}
+            ${price}
+            {roomBased ? ` × ${rooms} room${rooms === 1 ? "" : "s"}` : ""} ×{" "}
+            {nights} night{nights === 1 ? "" : "s"}
           </dt>
           <dd className="font-light">${q.subtotal.toFixed(2)}</dd>
         </div>
@@ -209,9 +311,11 @@ export default function BookingCard({
         <p>Total before taxes</p>
         <p>${q.total.toFixed(2)}</p>
       </div>
-      <p className="mt-4 text-center text-[13px] text-[#7a7a85]">
-        Stay 7+ nights for 15% off, 28+ nights for 30% off — applied automatically.
-      </p>
+      {hasLongStayPackages && (
+        <p className="mt-4 text-center text-[13px] text-[#7a7a85]">
+          Stay 7+ nights for 15% off, 28+ nights for 30% off — applied automatically.
+        </p>
+      )}
 
       {showServices && (
         <div
@@ -226,11 +330,11 @@ export default function BookingCard({
               Add extra services
             </h3>
             <p className="mt-1 text-[13px] text-[#7a7a85]">
-              Services offered by the host for your stay — paid ones are added
-              to your total.
+              Optional paid add-ons for your stay — pick any you&apos;d like and
+              they&apos;re added to your total.
             </p>
             <ul className="mt-4 max-h-[300px] space-y-3 overflow-y-auto">
-              {services.map((s, i) => (
+              {paidServices.map(({ service: s, index: i }) => (
                 <li key={s.name}>
                   <label className="flex cursor-pointer items-center gap-2.5 text-[14px] text-[#121212]">
                     <input
@@ -246,12 +350,8 @@ export default function BookingCard({
                       className="checkbox-brand"
                     />
                     <span className="min-w-0 flex-1">{s.name}</span>
-                    <span
-                      className={`shrink-0 text-[13px] font-semibold ${
-                        s.price > 0 ? "text-brand" : "text-[#7a7a85]"
-                      }`}
-                    >
-                      {s.price > 0 ? `+$${s.price.toFixed(2)}` : "Free"}
+                    <span className="shrink-0 text-[13px] font-semibold text-brand">
+                      +${s.price.toFixed(2)}
                     </span>
                   </label>
                 </li>

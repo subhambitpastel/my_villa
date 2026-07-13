@@ -35,6 +35,9 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
       ? b.createdAt.localeCompare(a.createdAt) || b.id - a.id
       : a.createdAt.localeCompare(b.createdAt) || a.id - b.id,
   );
+  // Package bookings get their own section so room usage per package is clear.
+  const villaReqs = sorted.filter((r) => !r.package);
+  const pkgReqs = sorted.filter((r) => r.package);
   const confirmed = requests.filter((r) => r.status === "accepted").length;
 
   return (
@@ -68,7 +71,7 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
       </div>
 
       <ul className="mt-3 space-y-3">
-        {sorted.map((r) => (
+        {villaReqs.map((r) => (
           <li
             key={r.id}
             className={`${GRID} rounded-[6px] border border-[#dfdfdf] bg-white px-4 py-2 text-[13px] text-[#121212]`}
@@ -83,7 +86,7 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
               />
               {r.tenant}
             </span>
-            <span className="truncate">{r.villa}</span>
+            <span className="min-w-0 truncate">{r.villa}</span>
             <span>{r.dates}</span>
             <span>{r.guests}</span>
             <span className="flex flex-col items-end gap-1.5 text-right">
@@ -109,12 +112,84 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
             </span>
           </li>
         ))}
-        {requests.length === 0 && (
+        {villaReqs.length === 0 && (
           <li className="rounded-[6px] border border-[#dfdfdf] px-4 py-4 text-center text-[13px] text-[#a1a1a2]">
-            No bookings yet.
+            No villa bookings yet.
           </li>
         )}
       </ul>
+
+      {pkgReqs.length > 0 && (
+        <section className="mt-8">
+          <h2 className="text-[16px] font-semibold text-[#121212]">
+            Package bookings
+          </h2>
+          <p className="mt-1 text-[12px] text-[#a1a1a2]">
+            Fixed all-inclusive packages guests booked — with the rooms each
+            reserved on your property.
+          </p>
+          <ul className="mt-4 space-y-3">
+            {pkgReqs.map((r) => (
+              <li
+                key={r.id}
+                className="rounded-[6px] border border-[#dfdfdf] px-4 py-3"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <Image
+                      src={r.avatar}
+                      alt=""
+                      width={30}
+                      height={30}
+                      className="h-[30px] w-[30px] shrink-0 rounded-full object-cover"
+                    />
+                    <div className="min-w-0">
+                      <p className="text-[14px] font-semibold text-heading">
+                        {r.package!.name}
+                      </p>
+                      <p className="text-[12px] text-gray">
+                        {r.tenant} · {r.villa}
+                      </p>
+                      <p className="mt-0.5 text-[12px] text-[#a1a1a2]">
+                        {r.package!.nights} night
+                        {r.package!.nights === 1 ? "" : "s"} · {r.dates} ·{" "}
+                        {r.guests} ·{" "}
+                        <span className="font-medium text-brand">
+                          {r.rooms} room{r.rooms === 1 ? "" : "s"} reserved
+                        </span>
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 flex-col items-end gap-1.5 text-right">
+                    <span className="text-[14px] font-semibold text-brand">
+                      ${r.package!.price.toFixed(2)}
+                    </span>
+                    <span
+                      className={`text-[13px] font-semibold ${
+                        r.status === "declined" || r.status === "cancelled"
+                          ? "text-[#eb5757]"
+                          : "text-brand"
+                      }`}
+                    >
+                      {STATUS_LABEL[r.status] ?? "Confirmed"}
+                    </span>
+                    {r.status === "accepted" && (
+                      <button
+                        type="button"
+                        disabled={pending}
+                        onClick={() => setCancelling(r)}
+                        className="text-[13px] text-[#eb5757] underline hover:opacity-80 disabled:opacity-50"
+                      >
+                        Cancel Booking
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <p className="mt-5 text-[11px] leading-relaxed text-[#121212]">
         Guests pay in full at checkout, so their stay is confirmed

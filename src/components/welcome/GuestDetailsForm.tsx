@@ -4,6 +4,14 @@ import { useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { completeGuestProfileAction, updateAvatarAction } from "@/lib/actions";
+import { isAtLeastAge, toDateInput } from "@/lib/dates";
+import {
+  isValidPhoneNumber,
+  joinDialNumber,
+  splitDialNumber,
+} from "@/lib/countries";
+import DateOfBirthField from "@/components/ui/DateOfBirthField";
+import PhoneNumberInput from "@/components/ui/PhoneNumberInput";
 
 const label = "mb-2 block text-[16px] text-brand";
 const input =
@@ -38,6 +46,9 @@ export default function GuestDetailsForm({
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
   const [pending, startTransition] = useTransition();
   const [avatar, setAvatar] = useState<string | null>(avatarUrl || null);
+  const initEmergency = splitDialNumber(defaults.emergency);
+  const [emgCode, setEmgCode] = useState(initEmergency.code);
+  const [emgNumber, setEmgNumber] = useState(initEmergency.number);
   const fileRef = useRef<HTMLInputElement>(null);
 
   async function changeAvatar(file: File) {
@@ -51,17 +62,26 @@ export default function GuestDetailsForm({
     e.preventDefault();
     const data = new FormData(e.currentTarget);
     const get = (k: string) => String(data.get(k) ?? "").trim();
+    const next: typeof errors = {};
+    // Emergency contact is optional; validate only when a number is entered.
+    let emergency = "";
+    if (emgNumber.trim()) {
+      if (!emgCode) next.emergency = "Select the country code.";
+      else if (!isValidPhoneNumber(emgNumber))
+        next.emergency = "Enter a valid emergency contact number.";
+      else emergency = joinDialNumber(emgCode, emgNumber);
+    }
     const values = {
       fullName: get("fullName"),
       gender: get("gender"),
       dob: get("dob"),
       address: get("address"),
-      emergency: get("emergency"),
+      emergency,
     };
 
-    const next: typeof errors = {};
     if (!values.fullName) next.fullName = "Full name is required.";
     if (!values.dob) next.dob = "Date of birth is required.";
+    else if (!isAtLeastAge(values.dob)) next.dob = "You must be at least 18 years old.";
     if (!values.address) next.address = "Home address is required.";
     setErrors(next);
     if (Object.keys(next).length > 0) return;
@@ -108,13 +128,13 @@ export default function GuestDetailsForm({
           </div>
           <div>
             <label htmlFor="g-dob" className={label}>Date of Birth</label>
-            <input
+            <DateOfBirthField
               id="g-dob"
               name="dob"
-              type="date"
-              defaultValue={defaults.dob}
-              aria-invalid={!!errors.dob}
-              className={input}
+              defaultValue={toDateInput(defaults.dob)}
+              ariaInvalid={!!errors.dob}
+              triggerClassName={input}
+              placeholder="Add date of birth"
             />
             {errors.dob && <ErrorText>{errors.dob}</ErrorText>}
           </div>
@@ -151,14 +171,15 @@ export default function GuestDetailsForm({
             <label htmlFor="g-emergency" className={label}>
               Emergency Contact <span className="text-[#9d9da6]">(optional)</span>
             </label>
-            <input
-              id="g-emergency"
-              name="emergency"
-              defaultValue={defaults.emergency}
-              placeholder="Someone we can reach during your stays"
-              autoComplete="tel"
-              className={input}
+            <PhoneNumberInput
+              label="Emergency Contact"
+              code={emgCode}
+              number={emgNumber}
+              onCode={setEmgCode}
+              onNumber={setEmgNumber}
+              invalid={!!errors.emergency}
             />
+            {errors.emergency && <ErrorText>{errors.emergency}</ErrorText>}
           </div>
         </div>
 
