@@ -272,16 +272,21 @@ function StepPersonal({
             {errors.gender && <ErrorText>{errors.gender}</ErrorText>}
           </div>
           <div>
-            <label htmlFor="h-email" className={label}>Email Address</label>
+            <label htmlFor="h-email" className={label}>
+              Email Address{" "}
+              <span className="text-[#9d9da6]">(can&apos;t be changed)</span>
+            </label>
+            {/* Email is fixed at signup — shown for reference, not editable. */}
             <input
               id="h-email"
               name="email"
               type="email"
               defaultValue={draft.personal.email}
-              placeholder="Example1@myvilla.com"
+              readOnly
+              tabIndex={-1}
               autoComplete="email"
               aria-invalid={!!errors.email}
-              className={input}
+              className={`${input} cursor-not-allowed border-[#d9d9d9] bg-[#f3f3f3] text-[#6b6b6b] focus:border-[#d9d9d9] focus:ring-0`}
             />
             {errors.email && <ErrorText>{errors.email}</ErrorText>}
           </div>

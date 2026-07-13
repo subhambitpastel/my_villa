@@ -182,16 +182,12 @@ export async function resetPasswordAction(
 export async function updateProfileAction(profile: {
   fullName: string;
   gender: string;
-  email: string;
   dob: string;
   address: string;
   emergency: string;
 }): Promise<ActionResult> {
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in.");
-
-  const email = profile.email.trim().toLowerCase();
-  if (!EMAIL_RE.test(email)) return fail("Enter a valid email address.");
 
   if (profile.dob.trim() && !isAtLeastAge(profile.dob))
     return fail("You must be at least 18 years old.");
@@ -200,19 +196,15 @@ export async function updateProfileAction(profile: {
   if (emgErr) return fail(emgErr);
 
   const db = getDb();
-  const clash = await db
-    .prepare("SELECT id FROM users WHERE email = ? AND id != ?")
-    .get(email, user.id);
-  if (clash) return fail("That email is already in use.");
-
+  // Email is fixed at signup and can't be edited from the app — it's never
+  // updated here, so an account's login email always stays what they registered.
   await db.prepare(
     `UPDATE users
-     SET full_name = ?, gender = ?, email = ?, dob = ?, address = ?, emergency = ?
+     SET full_name = ?, gender = ?, dob = ?, address = ?, emergency = ?
      WHERE id = ?`,
   ).run(
     profile.fullName.trim(),
     profile.gender,
-    email,
     profile.dob.trim(),
     profile.address.trim(),
     profile.emergency.trim(),

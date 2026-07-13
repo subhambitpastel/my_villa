@@ -22,10 +22,17 @@ type Profile = {
   emergency: string;
 };
 
-const FIELDS: { key: keyof Profile; label: string; type?: string }[] = [
+// `readOnly` fields are shown but can't be edited. Email is set at signup and
+// isn't changeable from the app, so it has no Edit control.
+const FIELDS: {
+  key: keyof Profile;
+  label: string;
+  type?: string;
+  readOnly?: boolean;
+}[] = [
   { key: "fullName", label: "Full name" },
   { key: "gender", label: "Gender" },
-  { key: "email", label: "Email Address", type: "email" },
+  { key: "email", label: "Email Address", type: "email", readOnly: true },
   { key: "dob", label: "Date of Birth" },
   { key: "address", label: "Address" },
   { key: "emergency", label: "Emergency Contact" },
@@ -128,7 +135,7 @@ export default function ProfileSettings({
         <div className="max-w-md flex-1 space-y-5">
           {FIELDS.map((field) => {
             const value = profile[field.key];
-            const isEditing = editing === field.key;
+            const isEditing = editing === field.key && !field.readOnly;
             return (
               <div key={field.key}>
                 <span className="mb-1.5 block text-[15px] text-brand">
@@ -188,13 +195,15 @@ export default function ProfileSettings({
                         "Not Provided"}
                     </span>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => setEditing(isEditing ? null : field.key)}
-                    className="shrink-0 text-[13px] font-medium text-[#121212] underline"
-                  >
-                    {isEditing ? "Done" : value ? "Edit" : "Add"}
-                  </button>
+                  {!field.readOnly && (
+                    <button
+                      type="button"
+                      onClick={() => setEditing(isEditing ? null : field.key)}
+                      className="shrink-0 text-[13px] font-medium text-[#121212] underline"
+                    >
+                      {isEditing ? "Done" : value ? "Edit" : "Add"}
+                    </button>
+                  )}
                 </div>
               </div>
             );
