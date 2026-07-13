@@ -270,9 +270,19 @@ WHERE villas.id = agg.id
 const TS = (offsetParam: string) =>
   `to_char((now() AT TIME ZONE 'UTC') + (${offsetParam})::interval, 'YYYY-MM-DD HH24:MI:SS')`;
 
-async function seed(pool: pg.Pool) {
+async function seed(pool: pg.Pool, force: boolean) {
   const { rows } = await pool.query("SELECT COUNT(*)::int AS n FROM users");
-  if ((rows[0] as { n: number }).n > 0) return;
+  const hasData = (rows[0] as { n: number }).n > 0;
+  // "if-empty" mode leaves an already-populated database untouched. "force" mode
+  // wipes every data table first (identity sequences reset too) so a reseed
+  // always yields exactly the demo dataset instead of piling on duplicates.
+  if (hasData && !force) return;
+  if (force) {
+    await pool.query(
+      `TRUNCATE users, villas, sessions, bookings, password_resets,
+                favorites, reviews, packages RESTART IDENTITY CASCADE`,
+    );
+  }
 
   const demoHash = hashPasswordSync("myvilla123");
   const insUser = (
@@ -533,15 +543,22 @@ async function seed(pool: pg.Pool) {
 }
 
 /**
- * Demo data is seeded on by default in development so the local app is
- * populated (Tatiana + tenants, demo villas/bookings, all with password
- * "myvilla123"). In production it's OFF unless explicitly opted in with
- * SEED_DEMO=1, so those fake credentials never ship to a live database.
+ * Demo data seeding (Tatiana + tenants, demo villas/bookings, all with password
+ * "myvilla123") is controlled by SEED_DEMO, evaluated once per server start:
+ *   • "1"   → force: remove ALL existing data, then reseed. Every boot resets
+ *             the database to exactly the demo dataset.
+ *   • "2"   → if-empty: seed only when the database is empty; never remove data.
+ *   • "0"   → off: never seed.
+ *   • unset → dev seeds if-empty so the local app is populated; production is OFF
+ *             so the fake credentials never ship to a live database.
  */
-function shouldSeedDemo(): boolean {
-  if (process.env.SEED_DEMO === "1") return true;
-  if (process.env.SEED_DEMO === "0") return false;
-  return process.env.NODE_ENV !== "production";
+type SeedMode = "force" | "if-empty" | "off";
+function seedMode(): SeedMode {
+  const v = process.env.SEED_DEMO;
+  if (v === "1") return "force";
+  if (v === "2") return "if-empty";
+  if (v === "0") return "off";
+  return process.env.NODE_ENV !== "production" ? "if-empty" : "off";
 }
 
 function connectionConfig(): pg.PoolConfig {
@@ -559,7 +576,8 @@ function connectionConfig(): pg.PoolConfig {
 async function init(): Promise<pg.Pool> {
   const pool = new Pool(connectionConfig());
   await pool.query(SCHEMA);
-  if (shouldSeedDemo()) await seed(pool);
+  const mode = seedMode();
+  if (mode !== "off") await seed(pool, mode === "force");
   // Sweep expired sessions / reset tokens so those tables don't grow forever.
   try {
     const now = new Date().toISOString();

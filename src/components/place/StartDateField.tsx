@@ -33,6 +33,7 @@ export default function StartDateField({
   today,
   nights,
   isUnavailable,
+  hasBlockedDates = false,
 }: {
   /** Selected start date "YYYY-MM-DD", or "" for none. */
   value: string;
@@ -43,6 +44,8 @@ export default function StartDateField({
   nights: number;
   /** True when a stay of `nights` starting on that day can't be booked. */
   isUnavailable: (day: string) => boolean;
+  /** Whether any dates are already booked — shows the crossed-out note. */
+  hasBlockedDates?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState<string | null>(null);
@@ -214,6 +217,11 @@ export default function StartDateField({
           <p className="mt-3 text-[13px] text-gray">
             Select your start date — your {nights}-night stay is highlighted.
           </p>
+          {hasBlockedDates && (
+            <p className="mt-1 text-[13px] text-soft">
+              Crossed-out dates are unavailable — they are already booked.
+            </p>
+          )}
         </div>
       )}
     </div>

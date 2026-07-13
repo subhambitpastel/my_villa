@@ -114,6 +114,8 @@ export default function MyPackages({
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<Form>(() => emptyForm(villas[0]?.id ?? ""));
   const [newInclusion, setNewInclusion] = useState("");
+  // Package awaiting a delete confirmation.
+  const [confirming, setConfirming] = useState<PackageItem | null>(null);
 
   function resetForm() {
     setEditingId(null);
@@ -200,10 +202,13 @@ export default function MyPackages({
     });
   }
 
-  function remove(id: number) {
+  function confirmRemove() {
+    if (!confirming) return;
+    const id = confirming.id;
     startTransition(async () => {
       await deletePackageAction(id);
       if (editingId === id) resetForm();
+      setConfirming(null);
       router.refresh();
     });
   }
@@ -661,7 +666,7 @@ export default function MyPackages({
                     <button
                       type="button"
                       disabled={pending}
-                      onClick={() => remove(p.id)}
+                      onClick={() => setConfirming(p)}
                       className="text-[13px] font-medium text-[#eb5757] underline disabled:opacity-50"
                     >
                       Delete
@@ -672,6 +677,56 @@ export default function MyPackages({
             </ul>
           )}
         </>
+      )}
+
+      {confirming && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm deleting your package"
+          onClick={(e) =>
+            e.target === e.currentTarget && !pending && setConfirming(null)
+          }
+        >
+          <div className="w-full max-w-[440px] rounded-[12px] bg-white p-6 shadow-[0px_20px_60px_0px_rgba(0,0,0,0.25)]">
+            <div className="flex items-start gap-3">
+              <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#fdecec] text-[#eb5757]">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m-8 0v12a2 2 0 002 2h4a2 2 0 002-2V7M10 11v6M14 11v6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
+              <div>
+                <h3 className="text-[18px] font-semibold text-[#121212]">
+                  Delete this package?
+                </h3>
+                <p className="mt-1.5 text-[14px] leading-relaxed text-[#4a4a4a]">
+                  Are you sure you want to delete{" "}
+                  <span className="font-semibold">{confirming.name}</span>? This
+                  removes the package from your villa and can&apos;t be undone.
+                </p>
+              </div>
+            </div>
+            <div className="mt-6 flex items-center justify-end gap-4">
+              <button
+                type="button"
+                disabled={pending}
+                onClick={() => setConfirming(null)}
+                className="text-[14px] text-[#7a7a85] underline disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={pending}
+                onClick={confirmRemove}
+                className="rounded-[8px] bg-[#eb5757] px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-[#d64545] disabled:opacity-60"
+              >
+                {pending ? "Deleting…" : "Delete package"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

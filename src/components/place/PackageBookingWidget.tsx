@@ -106,6 +106,7 @@ export default function PackageBookingWidget({
           today={today}
           nights={nights}
           isUnavailable={(day) => !spanAvailable(day)}
+          hasBlockedDates={bookedRanges.length > 0 || roomBookings.length > 0}
         />
       </div>
       {start && checkOut && (
