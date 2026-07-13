@@ -269,7 +269,7 @@ export default async function SearchPage({
             <div className="w-full shrink-0 lg:w-[440px]">
               <SearchFilters
                 maxGuests={await getMaxVillaGuests()}
-                amenities={await getAvailableAmenities(user?.id)}
+                amenities={await getAvailableAmenities(filters, checkIn, checkOut)}
               />
 
               <div className="mt-[55px] space-y-[15px]">

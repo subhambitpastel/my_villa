@@ -9,15 +9,6 @@ import {
 
 /* eslint-disable @next/next/no-img-element */
 
-const FACILITY_ICONS: Record<string, { icon: string; w: number; h: number }> = {
-  "Air Conditioner": { icon: "/icons/place/ac.svg", w: 54, h: 50 },
-  "Long Stays": { icon: "/icons/place/calendar.svg", w: 48, h: 48 },
-  TV: { icon: "/icons/place/tv.svg", w: 48, h: 53 },
-  "Free Parking": { icon: "/icons/place/parking.svg", w: 61, h: 32 },
-  "Smoke Alarm": { icon: "/icons/place/smoke.svg", w: 44, h: 44 },
-  Wifi: { icon: "/icons/place/wifi.svg", w: 40, h: 31 },
-};
-
 const FALLBACK_DESCRIPTION =
   "Accommodation located three blocks from the main square, consisting of kitchen, patio, green area, living room, dining room, pets are acceptable. Due to the location of the house it is easy and close to have access to public parking.";
 
@@ -29,17 +20,13 @@ function Divider({ className = "" }: { className?: string }) {
   return <hr className={`border-t border-[#c6c6c6] ${className}`} />;
 }
 
+// A plain bulleted row (no icon) — matches the Extra Services list so both
+// sections line up cleanly. Icons were dropped: their varying sizes threw off
+// the alignment.
 function FacilityItem({ label }: { label: string }) {
-  const known = FACILITY_ICONS[label];
   return (
-    <li className="flex items-center gap-[15px] text-[20px] leading-[1.3] text-[#121212]">
-      <span className="flex w-[61px] justify-start">
-        {known ? (
-          <img src={known.icon} alt="" width={known.w} height={known.h} />
-        ) : (
-          <Dot />
-        )}
-      </span>
+    <li className="flex items-center gap-[10px] text-[20px] leading-[1.3] text-[#121212]">
+      <span className="h-[6px] w-[6px] shrink-0 rounded-full bg-brand" />
       {label}
     </li>
   );
@@ -72,8 +59,22 @@ export default function VillaDetailView({
 }) {
   const reviewRows = distribution.reduce((s, d) => s + d.count, 0);
   const gallery = villa.gallery;
-  const leftFacilities = villa.facilityList.filter((_, i) => i % 2 === 0);
-  const rightFacilities = villa.facilityList.filter((_, i) => i % 2 === 1);
+  // Free services (price 0) are offered at no cost, so they belong with the
+  // villa's facilities under "Facilities Provided"; only paid services (price > 0)
+  // go under "Extra Services".
+  const paidServices = villa.serviceList.filter((s) => s.price > 0);
+  const paidServiceNames = new Set(paidServices.map((s) => s.name));
+  const freeServiceNames = villa.serviceList
+    .filter((s) => s.price <= 0)
+    .map((s) => s.name);
+  // A paid add-on belongs only under "Extra Services" — so drop any facility
+  // name that's also charged for (some listings carry the same label as both a
+  // free facility and a paid service), leaving it out of "Facilities Provided".
+  const allFacilities = [
+    ...new Set([...villa.facilityList, ...freeServiceNames]),
+  ].filter((name) => !paidServiceNames.has(name));
+  const leftFacilities = allFacilities.filter((_, i) => i % 2 === 0);
+  const rightFacilities = allFacilities.filter((_, i) => i % 2 === 1);
   const joined = new Date(villa.hostJoined.replace(" ", "T") + "Z");
   const joinedLabel = joined.toLocaleDateString("en-US", {
     month: "long",
@@ -133,7 +134,7 @@ export default function VillaDetailView({
             </p>
           </section>
 
-          {villa.serviceList.length > 0 && (
+          {paidServices.length > 0 && (
             <>
               <Divider className="mt-[30px]" />
               <section className="mt-[30px]">
@@ -141,15 +142,13 @@ export default function VillaDetailView({
                   Extra Services
                 </h2>
                 <ul className="mt-[15px] space-y-[10px] text-[18px] leading-[1.35] text-[#121212]">
-                  {villa.serviceList.map((s) => (
+                  {paidServices.map((s) => (
                     <li key={s.name} className="flex items-center gap-[10px]">
                       <span className="h-[6px] w-[6px] shrink-0 rounded-full bg-brand" />
                       {s.name}
-                      {s.price > 0 && (
-                        <span className="text-[16px] text-[#4a4a4a]">
-                          — ${s.price}
-                        </span>
-                      )}
+                      <span className="text-[16px] text-[#4a4a4a]">
+                        — ${s.price}
+                      </span>
                     </li>
                   ))}
                 </ul>
@@ -180,8 +179,8 @@ export default function VillaDetailView({
 
       <Divider className="mt-[30px]" />
 
-      {/* Facilities */}
-      {villa.facilityList.length > 0 && (
+      {/* Facilities — the villa's amenities plus any free services */}
+      {allFacilities.length > 0 && (
         <>
           <section className="mt-[30px]">
             <h2 className="text-[24px] font-semibold leading-[1.3] text-brand">Facilities Provided</h2>

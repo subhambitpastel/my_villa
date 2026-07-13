@@ -601,9 +601,16 @@ export async function getVillaDetail(id: number): Promise<VillaDetail | null> {
   };
 }
 
-export async function searchVillas(
+/**
+ * Build the WHERE clause shared by the search results and the amenity facet.
+ * `opts.amenities: false` omits the amenity conditions, so the facet can be
+ * derived from villas matching every OTHER active filter. The surrounding query
+ * must alias the villas table `v` (RVW_COUNT/RVW_RATING reference v.id).
+ */
+function villaSearchWhere(
   filters: SearchFilterInput,
-): Promise<CatalogVilla[]> {
+  opts: { amenities: boolean } = { amenities: true },
+): { where: string[]; params: (string | number)[] } {
   const where: string[] = [];
   const params: (string | number)[] = [];
 
@@ -630,9 +637,15 @@ export async function searchVillas(
     where.push("max_guests >= ?");
     params.push(filters.guests);
   }
-  for (const amenity of filters.amenities ?? []) {
-    where.push("facilities ILIKE ?");
-    params.push(`%${JSON.stringify(amenity)}%`);
+  if (opts.amenities) {
+    for (const amenity of filters.amenities ?? []) {
+      // An amenity chip can be a facility or a service (free or paid), so match
+      // either column. JSON.stringify quotes the name on both sides, so the
+      // match is on the exact token (e.g. "BBQ Corner" won't hit "BBQ Corners").
+      const token = `%${JSON.stringify(amenity)}%`;
+      where.push("(facilities ILIKE ? OR services ILIKE ?)");
+      params.push(token, token);
+    }
   }
   if (filters.type === "resort") {
     where.push("kind = 'Resort'");
@@ -645,6 +658,13 @@ export async function searchVillas(
     where.push("owner_id != ?");
     params.push(filters.excludeOwnerId);
   }
+  return { where, params };
+}
+
+export async function searchVillas(
+  filters: SearchFilterInput,
+): Promise<CatalogVilla[]> {
+  const { where, params } = villaSearchWhere(filters);
 
   const orderBy = {
     newest: "created_at DESC, id DESC",
@@ -851,24 +871,59 @@ export async function getBookingForManage(
   };
 }
 
-/** Facility chips that at least one *listed* property actually offers, in the
- *  canonical FACILITY_CHIPS order. The search filter renders only these, so it
- *  never shows an amenity that can't return a result. Mirrors searchVillas's
- *  owner exclusion so a guest never sees an amenity only their own (hidden)
- *  listings carry. */
+/**
+ * Amenity chips to show in the search filter — a villa's facilities plus its
+ * services (both free and paid). Canonical FACILITY_CHIPS come first, then the
+ * service names. Only amenities that can still return at least one result are
+ * shown: they're derived from the villas matching every OTHER active filter
+ * (query, price, rating, guests, type, owner exclusion) and — when stay dates
+ * are set — actually free for those dates. So an amenity offered only by a place
+ * that's filtered out (wrong city, over budget, already booked…) never appears.
+ * Any amenity the guest has already selected stays listed so it remains
+ * toggleable even if the rest of the search would otherwise hide it.
+ */
 export async function getAvailableAmenities(
-  excludeOwnerId?: number,
+  filters: SearchFilterInput,
+  checkIn?: string,
+  checkOut?: string,
 ): Promise<string[]> {
-  const where = excludeOwnerId != null ? "WHERE owner_id != ?" : "";
-  const params = excludeOwnerId != null ? [excludeOwnerId] : [];
+  // Match every filter EXCEPT the amenity selection itself.
+  const { where, params } = villaSearchWhere(filters, { amenities: false });
   const rows = (await getDb()
-    .prepare(`SELECT facilities FROM villas ${where}`)
-    .all(...params)) as { facilities: string }[];
-  const present = new Set<string>();
-  for (const row of rows) {
-    for (const f of parseJsonList(row.facilities)) present.add(f);
+    .prepare(
+      `SELECT v.id, v.facilities, v.services FROM villas v
+       ${where.length ? "WHERE " + where.join(" AND ") : ""}
+       LIMIT 200`,
+    )
+    .all(...params)) as { id: number; facilities: string; services: string }[];
+
+  // With stay dates chosen, only count villas actually free for the range.
+  let candidates = rows;
+  if (checkIn && checkOut) {
+    const free = await Promise.all(
+      rows.map((r) => isVillaAvailable(r.id, checkIn, checkOut)),
+    );
+    candidates = rows.filter((_, i) => free[i]);
   }
-  return FACILITY_CHIPS.filter((chip) => present.has(chip));
+
+  // Amenity chips = each villa's facilities plus its services (free AND paid) —
+  // every offering a guest might want to filter by.
+  const present = new Set<string>();
+  for (const row of candidates) {
+    for (const f of parseJsonList(row.facilities)) present.add(f);
+    for (const s of parseServiceList(row.services)) present.add(s.name);
+  }
+
+  const selected = filters.amenities ?? [];
+  // Keep any already-selected amenity listed so it stays toggleable.
+  const show = new Set<string>([...present, ...selected]);
+  // Canonical facility chips first (in FACILITY_CHIPS order), then the service
+  // names (anything not a canonical chip) sorted, so the list stays stable.
+  const facilityChips = FACILITY_CHIPS.filter((c) => show.has(c));
+  const serviceChips = [...show]
+    .filter((n) => !FACILITY_CHIPS.includes(n))
+    .sort((a, b) => a.localeCompare(b));
+  return [...facilityChips, ...serviceChips];
 }
 
 export async function getVillaCities(): Promise<string[]> {
