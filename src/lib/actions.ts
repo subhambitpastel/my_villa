@@ -19,20 +19,8 @@ import { createSession, destroySession, getCurrentUser } from "./session";
 import { appBaseUrl, sendEmail } from "./email";
 import { clientIp, rateLimit } from "./rateLimit";
 import { MAX_VILLA_IMAGES, MIN_VILLA_IMAGES } from "@/components/host/draft";
-import { isValidPhoneNumber, splitDialNumber } from "./countries";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
-
-/** Validate an optional stored emergency contact ("+CC number"). Returns an
- *  error message, or null when it's empty (allowed) or well-formed. */
-function emergencyError(emergency: string): string | null {
-  const value = (emergency ?? "").trim();
-  if (!value) return null;
-  const { code, number } = splitDialNumber(value);
-  return !code || !isValidPhoneNumber(number, code)
-    ? "Enter a valid emergency contact number with its country code."
-    : null;
-}
 
 const TOO_MANY = "Too many attempts. Please wait a minute and try again.";
 
@@ -184,7 +172,6 @@ export async function updateProfileAction(profile: {
   gender: string;
   dob: string;
   address: string;
-  emergency: string;
 }): Promise<ActionResult> {
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in.");
@@ -192,22 +179,18 @@ export async function updateProfileAction(profile: {
   if (profile.dob.trim() && !isAtLeastAge(profile.dob))
     return fail("You must be at least 18 years old.");
 
-  const emgErr = emergencyError(profile.emergency);
-  if (emgErr) return fail(emgErr);
-
   const db = getDb();
   // Email is fixed at signup and can't be edited from the app — it's never
   // updated here, so an account's login email always stays what they registered.
   await db.prepare(
     `UPDATE users
-     SET full_name = ?, gender = ?, dob = ?, address = ?, emergency = ?
+     SET full_name = ?, gender = ?, dob = ?, address = ?
      WHERE id = ?`,
   ).run(
     profile.fullName.trim(),
     profile.gender,
     profile.dob.trim(),
     profile.address.trim(),
-    profile.emergency.trim(),
     user.id,
   );
   revalidatePath("/profile", "layout");
@@ -243,7 +226,6 @@ export async function completeGuestProfileAction(input: {
   gender: string;
   dob: string;
   address: string;
-  emergency: string;
 }): Promise<ActionResult> {
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in.");
@@ -256,12 +238,10 @@ export async function completeGuestProfileAction(input: {
   if (age < 18) return fail("You must be at least 18 years old to book stays.");
   if (age > 120) return fail("Please enter a valid date of birth.");
   if (!input.address.trim()) return fail("Home address is required.");
-  const emgErr = emergencyError(input.emergency);
-  if (emgErr) return fail(emgErr);
 
   await getDb()
     .prepare(
-      `UPDATE users SET full_name = ?, gender = ?, dob = ?, address = ?, emergency = ?
+      `UPDATE users SET full_name = ?, gender = ?, dob = ?, address = ?
        WHERE id = ?`,
     )
     .run(
@@ -269,7 +249,6 @@ export async function completeGuestProfileAction(input: {
       input.gender,
       input.dob,
       input.address.trim(),
-      input.emergency.trim(),
       user.id,
     );
   revalidatePath("/profile", "layout");
@@ -389,7 +368,6 @@ export async function createVillaAction(
       gender: string;
       dob: string;
       address: string;
-      emergency: string;
     };
     payment?: PaymentInput;
   },
@@ -398,10 +376,6 @@ export async function createVillaAction(
   if (!user) return fail("You must be signed in to host a villa.");
   const invalid = validateVillaInput(input);
   if (invalid) return fail(invalid);
-  if (input.hostProfile) {
-    const emgErr = emergencyError(input.hostProfile.emergency);
-    if (emgErr) return fail(emgErr);
-  }
 
   const images =
     input.images && input.images.length > 0
@@ -444,14 +418,13 @@ export async function createVillaAction(
       // The wizard's first step doubles as the host's profile — keep it saved.
       if (input.hostProfile) {
         await db.prepare(
-          `UPDATE users SET full_name = ?, gender = ?, dob = ?, address = ?, emergency = ?
+          `UPDATE users SET full_name = ?, gender = ?, dob = ?, address = ?
            WHERE id = ?`,
         ).run(
           input.hostProfile.fullName.trim(),
           input.hostProfile.gender,
           input.hostProfile.dob.trim(),
           input.hostProfile.address.trim(),
-          input.hostProfile.emergency.trim(),
           user.id,
         );
       }

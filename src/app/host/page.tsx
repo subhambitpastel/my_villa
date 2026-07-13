@@ -32,7 +32,6 @@ export default async function HostPage({
         email: user.email,
         dob: user.dob,
         address: user.address,
-        emergency: user.emergency,
       }
     : undefined;
 

@@ -19,7 +19,6 @@ export default async function ProfilePage() {
         email: user.email,
         dob: user.dob,
         address: user.address,
-        emergency: user.emergency,
       }}
       avatar={user.avatar}
     />

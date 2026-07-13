@@ -5,13 +5,7 @@ import Avatar from "@/components/ui/Avatar";
 import { useRouter } from "next/navigation";
 import { updateAvatarAction, updateProfileAction } from "@/lib/actions";
 import { formatBirthday, isAtLeastAge, toDateInput } from "@/lib/dates";
-import {
-  isValidPhoneNumber,
-  joinDialNumber,
-  splitDialNumber,
-} from "@/lib/countries";
 import DateOfBirthField from "@/components/ui/DateOfBirthField";
-import PhoneNumberInput from "@/components/ui/PhoneNumberInput";
 
 type Profile = {
   fullName: string;
@@ -19,7 +13,6 @@ type Profile = {
   email: string;
   dob: string;
   address: string;
-  emergency: string;
 };
 
 // `readOnly` fields are shown but can't be edited. Email is set at signup and
@@ -35,7 +28,6 @@ const FIELDS: {
   { key: "email", label: "Email Address", type: "email", readOnly: true },
   { key: "dob", label: "Date of Birth" },
   { key: "address", label: "Address" },
-  { key: "emergency", label: "Emergency Contact" },
 ];
 
 const GENDERS = ["Female", "Male", "Non-binary", "Prefer not to say"];
@@ -56,22 +48,11 @@ export default function ProfileSettings({
   // it's uploaded then, not the moment it's chosen.
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [pending, startTransition] = useTransition();
-  const initEmergency = splitDialNumber(initialProfile.emergency);
-  const [emgCode, setEmgCode] = useState(initEmergency.code);
-  const [emgNumber, setEmgNumber] = useState(initEmergency.number);
   const fileRef = useRef<HTMLInputElement>(null);
 
   function update(key: keyof Profile, value: string) {
     setProfile((cur) => ({ ...cur, [key]: value }));
     setStatus(null);
-  }
-
-  // Emergency contact edits flow through here so its two inputs (code + number)
-  // stay in sync with the single stored "+CC number" string.
-  function setEmergency(code: string, number: string) {
-    setEmgCode(code);
-    setEmgNumber(number);
-    update("emergency", joinDialNumber(code, number));
   }
 
   function applyChanges() {
@@ -81,18 +62,6 @@ export default function ProfileSettings({
     if (dob && !isAtLeastAge(dob)) {
       setStatus({ ok: false, text: "You must be at least 18 years old." });
       return;
-    }
-    // Emergency contact is optional, but a provided number must be valid and
-    // carry a country code.
-    if (profile.emergency) {
-      const emg = splitDialNumber(profile.emergency);
-      if (!emg.code || !isValidPhoneNumber(emg.number, emg.code)) {
-        setStatus({
-          ok: false,
-          text: "Enter a valid emergency contact number with its country code.",
-        });
-        return;
-      }
     }
     const next = { ...profile, dob };
     startTransition(async () => {
@@ -166,15 +135,6 @@ export default function ProfileSettings({
                         triggerClassName="w-full bg-transparent text-[15px]"
                         placeholder="Add date of birth"
                         defaultOpen
-                      />
-                    ) : field.key === "emergency" ? (
-                      <PhoneNumberInput
-                        bare
-                        label="Emergency Contact"
-                        code={emgCode}
-                        number={emgNumber}
-                        onCode={(c) => setEmergency(c, emgNumber)}
-                        onNumber={(n) => setEmergency(emgCode, n)}
                       />
                     ) : (
                       <input

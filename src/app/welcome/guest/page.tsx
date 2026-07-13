@@ -30,7 +30,6 @@ export default async function GuestWelcomePage() {
                 gender: user.gender,
                 dob: user.dob,
                 address: user.address,
-                emergency: user.emergency,
               }}
               avatarUrl={user.avatar}
             />

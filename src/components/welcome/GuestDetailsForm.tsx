@@ -5,13 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { completeGuestProfileAction, updateAvatarAction } from "@/lib/actions";
 import { isAtLeastAge, toDateInput } from "@/lib/dates";
-import {
-  isValidPhoneNumber,
-  joinDialNumber,
-  splitDialNumber,
-} from "@/lib/countries";
 import DateOfBirthField from "@/components/ui/DateOfBirthField";
-import PhoneNumberInput from "@/components/ui/PhoneNumberInput";
 
 const label = "mb-2 block text-[16px] text-brand";
 const input =
@@ -26,7 +20,6 @@ type Defaults = {
   gender: string;
   dob: string;
   address: string;
-  emergency: string;
 };
 
 function ErrorText({ children }: { children: React.ReactNode }) {
@@ -51,9 +44,6 @@ export default function GuestDetailsForm({
   // The picked avatar is only previewed until the form is saved — it's uploaded
   // as part of "Save", not the moment it's chosen.
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
-  const initEmergency = splitDialNumber(defaults.emergency);
-  const [emgCode, setEmgCode] = useState(initEmergency.code);
-  const [emgNumber, setEmgNumber] = useState(initEmergency.number);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Preview the picked photo and remember it; it's only uploaded on Save.
@@ -67,20 +57,11 @@ export default function GuestDetailsForm({
     const data = new FormData(e.currentTarget);
     const get = (k: string) => String(data.get(k) ?? "").trim();
     const next: typeof errors = {};
-    // Emergency contact is optional; validate only when a number is entered.
-    let emergency = "";
-    if (emgNumber.trim()) {
-      if (!emgCode) next.emergency = "Select the country code.";
-      else if (!isValidPhoneNumber(emgNumber, emgCode))
-        next.emergency = "Enter a valid emergency contact number.";
-      else emergency = joinDialNumber(emgCode, emgNumber);
-    }
     const values = {
       fullName: get("fullName"),
       gender: get("gender"),
       dob: get("dob"),
       address: get("address"),
-      emergency,
     };
 
     if (!values.fullName) next.fullName = "Full name is required.";
@@ -177,20 +158,6 @@ export default function GuestDetailsForm({
                 <option key={g}>{g}</option>
               ))}
             </select>
-          </div>
-          <div>
-            <label htmlFor="g-emergency" className={label}>
-              Emergency Contact <span className="text-[#9d9da6]">(optional)</span>
-            </label>
-            <PhoneNumberInput
-              label="Emergency Contact"
-              code={emgCode}
-              number={emgNumber}
-              onCode={setEmgCode}
-              onNumber={setEmgNumber}
-              invalid={!!errors.emergency}
-            />
-            {errors.emergency && <ErrorText>{errors.emergency}</ErrorText>}
           </div>
         </div>
 

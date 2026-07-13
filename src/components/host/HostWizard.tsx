@@ -12,13 +12,7 @@ import {
 import { useMounted } from "@/lib/useMounted";
 import { isRoomBased } from "@/lib/rooms";
 import { isAtLeastAge, toDateInput } from "@/lib/dates";
-import {
-  isValidPhoneNumber,
-  joinDialNumber,
-  splitDialNumber,
-} from "@/lib/countries";
 import DateOfBirthField from "@/components/ui/DateOfBirthField";
-import PhoneNumberInput from "@/components/ui/PhoneNumberInput";
 import SignInGate from "@/components/account/SignInGate";
 import {
   DEFAULT_DRAFT,
@@ -188,9 +182,6 @@ function StepPersonal({
   const [avatar, setAvatar] = useState<string | null>(
     avatarUrl || "/images/host/avatar.png",
   );
-  const initEmergency = splitDialNumber(draft.personal.emergency);
-  const [emgCode, setEmgCode] = useState(initEmergency.code);
-  const [emgNumber, setEmgNumber] = useState(initEmergency.number);
   const fileRef = useRef<HTMLInputElement>(null);
 
   async function changeAvatar(file: File) {
@@ -205,22 +196,12 @@ function StepPersonal({
     const data = new FormData(e.currentTarget);
     const get = (k: string) => String(data.get(k) ?? "").trim();
     const next: typeof errors = {};
-    // Emergency contact is optional, but if a number is entered it must have a
-    // country code and be a valid phone number.
-    let emergency = "";
-    if (emgNumber.trim()) {
-      if (!emgCode) next.emergency = "Select the country code.";
-      else if (!isValidPhoneNumber(emgNumber, emgCode))
-        next.emergency = "Enter a valid emergency contact number.";
-      else emergency = joinDialNumber(emgCode, emgNumber);
-    }
     const personal = {
       fullName: get("fullName"),
       gender: get("gender"),
       email: get("email"),
       dob: get("dob"),
       address: get("address"),
-      emergency,
     };
     if (!personal.fullName) next.fullName = "Full name is required.";
     if (!personal.gender) next.gender = "Please select your gender.";
@@ -314,18 +295,6 @@ function StepPersonal({
               className={input}
             />
             {errors.address && <ErrorText>{errors.address}</ErrorText>}
-          </div>
-          <div>
-            <label htmlFor="h-emergency" className={label}>Emergency Contact</label>
-            <PhoneNumberInput
-              label="Emergency Contact"
-              code={emgCode}
-              number={emgNumber}
-              onCode={setEmgCode}
-              onNumber={setEmgNumber}
-              invalid={!!errors.emergency}
-            />
-            {errors.emergency && <ErrorText>{errors.emergency}</ErrorText>}
           </div>
         </div>
 

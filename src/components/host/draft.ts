@@ -37,7 +37,6 @@ export type Draft = {
     email: string;
     dob: string;
     address: string;
-    emergency: string;
   };
   villa: {
     kind: string;
@@ -80,7 +79,7 @@ export const DEFAULT_IMAGES = [
 
 export const DEFAULT_DRAFT: Draft = {
   step: 0,
-  personal: { fullName: "", gender: "", email: "", dob: "", address: "", emergency: "" },
+  personal: { fullName: "", gender: "", email: "", dob: "", address: "" },
   villa: {
     kind: "Villa Living",
     name: "",
