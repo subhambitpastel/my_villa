@@ -47,6 +47,9 @@ export default async function AccountPage() {
     image: v.image,
     liked: favorites.has(v.id),
   }));
+  // Only hosts have villas to show — a guest (hosting off, owns nothing) never
+  // sees the "My Villas" section, not even an empty-state prompt to list one.
+  const isHost = user.hosting_enabled === 1 || myVillas.length > 0;
 
   return (
     <>
@@ -116,7 +119,8 @@ export default async function AccountPage() {
               </p>
             </section>
 
-            {/* My Villas */}
+            {/* My Villas — hosts only */}
+            {isHost && (
             <section className="min-w-0 flex-1">
               <div className="mb-[30px] flex items-center justify-between">
                 <h2 className="font-nunito text-[24px] font-bold text-heading">My Villas</h2>
@@ -151,6 +155,7 @@ export default async function AccountPage() {
                 />
               </div>
             </section>
+            )}
           </div>
 
           {/* Reviews */}
