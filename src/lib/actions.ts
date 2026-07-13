@@ -1,7 +1,6 @@
 "use server";
 
 import { randomBytes } from "node:crypto";
-import fs from "node:fs/promises";
 import path from "node:path";
 import { revalidatePath } from "next/cache";
 import { getDb, tx, type UserRow } from "./db";
@@ -1181,7 +1180,15 @@ export async function toggleFavoriteAction(
 
 /* ----------------------------- uploads ---------------------------- */
 
-const UPLOAD_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"]);
+// Allowed image extensions mapped to the Content-Type served back from the DB.
+const EXT_MIME: Record<string, string> = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".avif": "image/avif",
+};
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 const MAX_UPLOAD_FILES = 8;
 
@@ -1207,9 +1214,18 @@ function sniffImage(buf: Buffer): boolean {
   return false;
 }
 
-async function saveUpload(file: File, subdir: string): Promise<string | null> {
+/**
+ * Persist an uploaded image as bytes in the database and return the URL that
+ * serves it (`/api/images/<id>`). Storing blobs in Postgres — instead of on the
+ * local disk — keeps uploads alive across redeploys on hosts with an ephemeral
+ * filesystem (Railway, containers). Returns null if the file isn't a valid,
+ * within-limits image. `ownerId` records who uploaded it (nulled if they're
+ * later deleted).
+ */
+async function saveUpload(file: File, ownerId: number): Promise<string | null> {
   const ext = path.extname(file.name || "").toLowerCase();
-  if (!UPLOAD_EXTS.has(ext) || file.size === 0 || file.size > MAX_UPLOAD_BYTES) {
+  const mime = EXT_MIME[ext];
+  if (!mime || file.size === 0 || file.size > MAX_UPLOAD_BYTES) {
     return null;
   }
   const buf = Buffer.from(await file.arrayBuffer());
@@ -1217,11 +1233,13 @@ async function saveUpload(file: File, subdir: string): Promise<string | null> {
   // the extension looks fine (a valid ext + arbitrary bytes was accepted before).
   if (!sniffImage(buf)) return null;
 
-  const dir = path.join(process.cwd(), "public", "uploads", subdir);
-  await fs.mkdir(dir, { recursive: true });
-  const name = `${randomBytes(8).toString("hex")}${ext}`;
-  await fs.writeFile(path.join(dir, name), buf);
-  return `/uploads/${subdir}/${name}`;
+  // The id carries the extension so the served URL looks like a normal image
+  // path (helps the image optimizer and browser); lookup is still a single PK.
+  const id = `${randomBytes(16).toString("hex")}${ext}`;
+  await getDb()
+    .prepare("INSERT INTO images (id, mime, bytes, owner_id) VALUES (?, ?, ?, ?)")
+    .run(id, mime, buf, ownerId);
+  return `/api/images/${id}`;
 }
 
 export type UploadResult =
@@ -1242,7 +1260,7 @@ export async function uploadImagesAction(
 
   const paths: string[] = [];
   for (const file of files) {
-    const saved = await saveUpload(file, "villas");
+    const saved = await saveUpload(file, user.id);
     // Any non-image (or oversized) file fails the whole batch — we never
     // silently drop a file the host thought they uploaded.
     if (!saved) {
@@ -1265,7 +1283,7 @@ export async function updateAvatarAction(
   const file = formData.get("avatar");
   if (!(file instanceof File)) return fail("No image received.");
 
-  const saved = await saveUpload(file, "avatars");
+  const saved = await saveUpload(file, user.id);
   if (!saved) {
     return fail("Only JPG, PNG, WEBP, GIF or AVIF images up to 8 MB are allowed.");
   }

@@ -45,6 +45,9 @@ export default function ProfileSettings({
   const [editing, setEditing] = useState<keyof Profile | null>(null);
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
   const [avatar, setAvatar] = useState<string | null>(null);
+  // The picked avatar is only previewed until the user clicks "Apply Changes" —
+  // it's uploaded then, not the moment it's chosen.
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [pending, startTransition] = useTransition();
   const initEmergency = splitDialNumber(initialProfile.emergency);
   const [emgCode, setEmgCode] = useState(initEmergency.code);
@@ -86,6 +89,19 @@ export default function ProfileSettings({
     }
     const next = { ...profile, dob };
     startTransition(async () => {
+      // Persist a newly-picked profile photo (if any) as part of applying the
+      // changes — not the moment it was chosen.
+      if (avatarFile) {
+        const data = new FormData();
+        data.append("avatar", avatarFile);
+        const av = await updateAvatarAction(data);
+        if (!av.ok) {
+          setAvatar(null);
+          setStatus({ ok: false, text: av.error });
+          return;
+        }
+        setAvatarFile(null);
+      }
       const result = await updateProfileAction(next);
       setStatus(
         result.ok
@@ -99,20 +115,11 @@ export default function ProfileSettings({
     });
   }
 
-  function changeAvatar(file: File) {
-    setAvatar(URL.createObjectURL(file)); // instant preview
-    startTransition(async () => {
-      const data = new FormData();
-      data.append("avatar", file);
-      const result = await updateAvatarAction(data);
-      if (!result.ok) {
-        setAvatar(null);
-        setStatus({ ok: false, text: result.error });
-        return;
-      }
-      setStatus({ ok: true, text: "Profile picture updated." });
-      router.refresh();
-    });
+  // Preview the picked photo and remember it; it's only uploaded on Apply.
+  function pickAvatar(file: File) {
+    setAvatar(URL.createObjectURL(file));
+    setAvatarFile(file);
+    setStatus(null);
   }
 
   return (
@@ -241,7 +248,7 @@ export default function ProfileSettings({
             className="hidden"
             onChange={(e) => {
               const f = e.target.files?.[0];
-              if (f) changeAvatar(f);
+              if (f) pickAvatar(f);
               e.target.value = "";
             }}
           />

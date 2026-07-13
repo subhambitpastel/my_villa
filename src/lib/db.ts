@@ -80,6 +80,16 @@ export type PackageRow = {
   created_at: string;
 };
 
+// A runtime-uploaded image, stored as bytes in the DB and served by
+// /api/images/[id]. `bytes` comes back from node-postgres as a Node Buffer.
+export type ImageRow = {
+  id: string;
+  mime: string;
+  bytes: Buffer;
+  owner_id: number | null;
+  created_at: string;
+};
+
 export type BookingStatus =
   | "pending"
   | "accepted"
@@ -222,6 +232,20 @@ CREATE TABLE IF NOT EXISTS packages (
   discount    INTEGER NOT NULL DEFAULT 0,
   price       REAL NOT NULL DEFAULT 0,
   inclusions  TEXT NOT NULL DEFAULT '[]',
+  created_at  TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
+);
+
+-- User-uploaded images (villa photos, profile avatars) stored as BYTEA blobs
+-- rather than files on disk. The host's filesystem is ephemeral (Railway/VM
+-- redeploys wipe it), so uploads must live in the database to survive. Each row
+-- is served by GET /api/images/[id]; the id (a random hex + extension) is what's
+-- stored in villas.image/images and users.avatar. Bundled /images/* assets stay
+-- as static files — only runtime uploads land here.
+CREATE TABLE IF NOT EXISTS images (
+  id          TEXT PRIMARY KEY,
+  mime        TEXT NOT NULL,
+  bytes       BYTEA NOT NULL,
+  owner_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at  TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 

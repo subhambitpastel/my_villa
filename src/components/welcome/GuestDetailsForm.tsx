@@ -48,16 +48,18 @@ export default function GuestDetailsForm({
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
   const [pending, startTransition] = useTransition();
   const [avatar, setAvatar] = useState<string | null>(avatarUrl || null);
+  // The picked avatar is only previewed until the form is saved — it's uploaded
+  // as part of "Save", not the moment it's chosen.
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const initEmergency = splitDialNumber(defaults.emergency);
   const [emgCode, setEmgCode] = useState(initEmergency.code);
   const [emgNumber, setEmgNumber] = useState(initEmergency.number);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  async function changeAvatar(file: File) {
-    setAvatar(URL.createObjectURL(file)); // instant preview; persists below
-    const data = new FormData();
-    data.append("avatar", file);
-    await updateAvatarAction(data);
+  // Preview the picked photo and remember it; it's only uploaded on Save.
+  function pickAvatar(file: File) {
+    setAvatar(URL.createObjectURL(file));
+    setAvatarFile(file);
   }
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
@@ -89,6 +91,17 @@ export default function GuestDetailsForm({
     if (Object.keys(next).length > 0) return;
 
     startTransition(async () => {
+      // Persist the chosen profile photo (if any) as part of saving — not when
+      // it was picked.
+      if (avatarFile) {
+        const data = new FormData();
+        data.append("avatar", avatarFile);
+        const av = await updateAvatarAction(data);
+        if (!av.ok) {
+          setErrors({ form: av.error });
+          return;
+        }
+      }
       const result = await completeGuestProfileAction(values);
       if (!result.ok) {
         setErrors({ form: result.error });
@@ -207,7 +220,7 @@ export default function GuestDetailsForm({
             className="hidden"
             onChange={(e) => {
               const f = e.target.files?.[0];
-              if (f) void changeAvatar(f);
+              if (f) pickAvatar(f);
               e.target.value = "";
             }}
           />
