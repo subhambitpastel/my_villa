@@ -17,7 +17,9 @@ const label = "mb-2 block text-[16px] text-brand";
 const input =
   "block w-full rounded-[8px] border border-[#d9d9d9] bg-white px-4 py-2.5 text-[15px] text-ink placeholder:text-[#9d9da6] focus:outline-none focus:border-brand focus:ring-2 focus:ring-brand/20";
 
-const GENDERS = ["Female", "Male", "Non-binary", "Prefer not to say"];
+// "Prefer not to say" is the select's empty default option, not a list entry —
+// listing it here too made it appear twice in the dropdown.
+const GENDERS = ["Female", "Male", "Non-binary"];
 
 type Defaults = {
   fullName: string;
@@ -67,7 +69,7 @@ export default function GuestDetailsForm({
     let emergency = "";
     if (emgNumber.trim()) {
       if (!emgCode) next.emergency = "Select the country code.";
-      else if (!isValidPhoneNumber(emgNumber))
+      else if (!isValidPhoneNumber(emgNumber, emgCode))
         next.emergency = "Enter a valid emergency contact number.";
       else emergency = joinDialNumber(emgCode, emgNumber);
     }
@@ -106,10 +108,6 @@ export default function GuestDetailsForm({
       <h2 className="text-[17px] font-bold text-ink">
         A few details before you book
       </h2>
-      <p className="mt-1 text-sm text-body">
-        Hosts see who&apos;s requesting to stay — and we need to know
-        you&apos;re over 18.
-      </p>
 
       <div className="mt-6 flex flex-col-reverse gap-8 sm:flex-row">
         <div className="flex-1 space-y-4">

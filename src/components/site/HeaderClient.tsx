@@ -4,9 +4,8 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import Logo from "./Logo";
+import Avatar from "@/components/ui/Avatar";
 import { logoutAction } from "@/lib/actions";
-
-/* eslint-disable @next/next/no-img-element */
 
 const NAV_LINKS = [
   { label: "Home", href: "/" },
@@ -17,27 +16,29 @@ const NAV_LINKS = [
   { label: "Blog", href: "/blog" },
 ];
 
-// Account links shown in the signed-in avatar dropdown.
-const ACCOUNT_LINKS = [
+// Account links shown in the signed-in avatar dropdown. hostOnly entries are
+// hidden from guests whose hosting mode is off (same rule as the profile
+// sidebar's host tabs).
+const ACCOUNT_LINKS: { label: string; href: string; hostOnly?: boolean }[] = [
   { label: "My Account", href: "/account" },
   { label: "My Bookings", href: "/profile/bookings" },
-  { label: "My Property", href: "/profile/properties" },
+  { label: "My Property", href: "/profile/properties", hostOnly: true },
   { label: "My Favorites", href: "/profile/favorites" },
   { label: "Settings", href: "/profile/settings" },
 ];
-
-const DEFAULT_AVATAR = "/images/host/avatar.png";
 
 /** Round avatar that reveals an account menu on hover (and click/keyboard). */
 function UserMenu({
   avatar,
   name,
   email,
+  links,
   onSignOut,
 }: {
   avatar: string;
   name: string;
   email: string;
+  links: typeof ACCOUNT_LINKS;
   onSignOut: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -99,11 +100,7 @@ function UserMenu({
         aria-label="Account menu"
         className="block h-10 w-10 overflow-hidden rounded-full ring-2 ring-transparent transition hover:ring-brand/40 focus:outline-none focus-visible:ring-brand"
       >
-        <img
-          src={avatar || DEFAULT_AVATAR}
-          alt=""
-          className="h-full w-full object-cover"
-        />
+        <Avatar src={avatar} alt="" className="h-full w-full object-cover" />
       </button>
 
       {open && (
@@ -112,8 +109,8 @@ function UserMenu({
           className="absolute right-0 top-[calc(100%+8px)] w-60 overflow-hidden rounded-[12px] border border-line/50 bg-white p-1.5 text-[14px] shadow-[0px_12px_40px_0px_rgba(0,0,0,0.15)]"
         >
           <div className="flex items-center gap-3 px-3 py-2.5">
-            <img
-              src={avatar || DEFAULT_AVATAR}
+            <Avatar
+              src={avatar}
               alt=""
               className="h-9 w-9 shrink-0 rounded-full object-cover"
             />
@@ -129,7 +126,7 @@ function UserMenu({
             </span>
           </div>
           <hr className="my-1 border-line/50" />
-          {ACCOUNT_LINKS.map((it) => (
+          {links.map((it) => (
             <Link
               key={it.href}
               href={it.href}
@@ -160,11 +157,14 @@ function UserMenu({
 
 export default function HeaderClient({
   authed,
+  isHost = false,
   avatar = "",
   name = "",
   email = "",
 }: {
   authed: boolean;
+  /** Hosting mode on (or owns villas) — shows the host-only account links. */
+  isHost?: boolean;
   avatar?: string;
   name?: string;
   email?: string;
@@ -173,6 +173,7 @@ export default function HeaderClient({
   const router = useRouter();
   const pathname = usePathname();
   const [, startTransition] = useTransition();
+  const accountLinks = ACCOUNT_LINKS.filter((it) => !it.hostOnly || isHost);
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
@@ -222,6 +223,7 @@ export default function HeaderClient({
               avatar={avatar}
               name={name}
               email={email}
+              links={accountLinks}
               onSignOut={signOut}
             />
           ) : (
@@ -274,8 +276,8 @@ export default function HeaderClient({
             {authed ? (
               <>
                 <li className="flex items-center gap-3 border-t border-line/40 pt-3">
-                  <img
-                    src={avatar || DEFAULT_AVATAR}
+                  <Avatar
+                    src={avatar}
                     alt=""
                     className="h-9 w-9 shrink-0 rounded-full object-cover"
                   />
@@ -288,7 +290,7 @@ export default function HeaderClient({
                     )}
                   </span>
                 </li>
-                {ACCOUNT_LINKS.map((it) => (
+                {accountLinks.map((it) => (
                   <li key={it.href}>
                     <Link href={it.href} className="block text-base text-ink">
                       {it.label}

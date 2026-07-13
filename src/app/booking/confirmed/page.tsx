@@ -108,7 +108,7 @@ export default async function BookingConfirmedPage({
               </Link>
               <Link
                 href="/"
-                className="rounded-[8px] px-6 py-2.5 text-[14px] font-semibold text-[#4a4a4a] underline"
+                className="rounded-[8px] border border-line px-6 py-2.5 text-[14px] font-semibold text-[#4a4a4a] transition-colors hover:bg-line/20"
               >
                 Back to Home
               </Link>

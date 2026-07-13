@@ -4,19 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import DateRangeField from "@/components/home/DateRangeField";
 
-// Matches the facility chips hosts pick in the wizard, so filters hit real data.
-const AMENITIES = [
-  "Wifi",
-  "Free Parking",
-  "Air Conditioner",
-  "Long Stays",
-  "Smoke Alarm",
-  "Swimming Pool",
-  "Jaccuzzi",
-  "BBQ Corner",
-  "TV",
-];
-
 const SORTS = [
   { value: "newest", label: "Newest first" },
   { value: "price_asc", label: "Price: low to high" },
@@ -44,7 +31,15 @@ function digitsToNumber(v: string): number | null {
   return digits === "" ? null : Number(digits);
 }
 
-export default function SearchFilters({ maxGuests }: { maxGuests: number }) {
+export default function SearchFilters({
+  maxGuests,
+  amenities = [],
+}: {
+  maxGuests: number;
+  /** Facility chips at least one listed property offers — derived server-side so
+   *  every amenity shown can actually return a result. */
+  amenities?: string[];
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -371,24 +366,28 @@ export default function SearchFilters({ maxGuests }: { maxGuests: number }) {
           })}
         </div>
 
-        <h3 className="mt-6 text-[16px] font-medium text-[#121212]">Amenities</h3>
-        <div className="mt-3 flex flex-wrap gap-x-2.5 gap-y-3">
-          {AMENITIES.map((a) => (
-            <button
-              key={a}
-              type="button"
-              onClick={() => toggleAmenity(a)}
-              aria-pressed={selected.includes(a)}
-              className={`rounded-full px-3.5 py-1.5 text-[13px] transition-colors ${
-                selected.includes(a)
-                  ? "bg-brand text-white"
-                  : "bg-[#e9e8fd] text-brand hover:bg-brand/20"
-              }`}
-            >
-              {a}
-            </button>
-          ))}
-        </div>
+        {amenities.length > 0 && (
+          <>
+            <h3 className="mt-6 text-[16px] font-medium text-[#121212]">Amenities</h3>
+            <div className="mt-3 flex flex-wrap gap-x-2.5 gap-y-3">
+              {amenities.map((a) => (
+                <button
+                  key={a}
+                  type="button"
+                  onClick={() => toggleAmenity(a)}
+                  aria-pressed={selected.includes(a)}
+                  className={`rounded-full px-3.5 py-1.5 text-[13px] transition-colors ${
+                    selected.includes(a)
+                      ? "bg-brand text-white"
+                      : "bg-[#e9e8fd] text-brand hover:bg-brand/20"
+                  }`}
+                >
+                  {a}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
 
         <h3 className="mt-6 text-[16px] font-medium text-[#121212]">Rating</h3>
         <div className="mt-3 flex gap-3">

@@ -26,54 +26,12 @@ const SETTINGS: {
     ),
   },
   {
-    title: "Privacy & Sharing",
-    description:
-      "Control the apps that are connected to your accounts, things you share, and who sees them.",
-    icon: (
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-        <path d="M12 1.5l8.5 3.7v5.6c0 5.3-3.6 10.2-8.5 12-4.9-1.8-8.5-6.7-8.5-12V5.2L12 1.5zm0 6a2.2 2.2 0 00-2.2 2.2c0 .9.5 1.6 1.2 2v2.6c0 .6.4 1 1 1s1-.4 1-1v-2.6c.7-.4 1.2-1.1 1.2-2A2.2 2.2 0 0012 7.5z" />
-      </svg>
-    ),
-  },
-  {
-    title: "Notifications Settings",
-    description:
-      "Choose how your prefer your notifications to be & how you like to be contacted.",
-    icon: (
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-        <path d="M12 22a2.5 2.5 0 002.5-2.5h-5A2.5 2.5 0 0012 22zm8-5.5v1H4v-1l2-2v-5a6 6 0 014.5-5.9V3a1.5 1.5 0 013 0v.6A6 6 0 0118 9.5v5l2 2z" />
-      </svg>
-    ),
-  },
-  {
     title: "Login & Security",
     description: "Reset your password and manage your sign-in details.",
     href: "/recover",
     icon: (
       <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
         <path d="M14.5 2a7.5 7.5 0 00-7.1 9.9L2 17.3V22h4.7l1.2-1.2v-2.1H10l1.5-1.5v-2.1h2.1l.8-.8A7.5 7.5 0 1014.5 2zm2 7a1.8 1.8 0 110-3.5 1.8 1.8 0 010 3.5z" />
-      </svg>
-    ),
-  },
-  {
-    title: "Professional Tools",
-    description: "Manage professional Tools if you own a bigger business in MyVilla",
-    icon: (
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-        <rect x="3" y="13" width="4.5" height="8" rx="0.8" />
-        <rect x="9.75" y="8" width="4.5" height="13" rx="0.8" />
-        <rect x="16.5" y="3" width="4.5" height="18" rx="0.8" />
-      </svg>
-    ),
-  },
-  {
-    title: "Global Preferences",
-    description: "Settings related to currency, languages and others.",
-    icon: (
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-        <path d="M3 7h10M17.5 7H21M3 17h3.5M11 17h10" />
-        <circle cx="15.5" cy="7" r="2.4" fill="none" />
-        <circle cx="8.5" cy="17" r="2.4" fill="none" />
       </svg>
     ),
   },

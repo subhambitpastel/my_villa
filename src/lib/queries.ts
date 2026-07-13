@@ -1,6 +1,6 @@
 // Read-side queries mapping DB rows to the display shapes the UI renders.
 import { getDb, timeAgo, type BookingStatus, type VillaRow } from "./db";
-import type { VillaService } from "@/components/host/draft";
+import { FACILITY_CHIPS, type VillaService } from "@/components/host/draft";
 import { roomCapacity, roomsFreeForRange, type RoomBooking } from "./rooms";
 import { parsePackageType, type PackageType } from "./packageTypes";
 
@@ -45,6 +45,9 @@ export type CatalogVilla = {
 export type BookingItem = {
   id: number;
   villa: string;
+  /** The property kind — "Hotel", "Resort" or a villa-rental kind — shown as a
+   *  label on each booking. */
+  kind: string;
   posted: string;
   dates: string;
   guests: string;
@@ -375,6 +378,9 @@ export type PackageDetail = {
   villaCity: string;
   villaKind: string;
   villaImage: string;
+  /** The villa's photo gallery (cover first), so the package page can show the
+   *  same multi-image gallery as the villa detail page. */
+  gallery: string[];
   villaDescription: string;
   villaRooms: number;
   peoplePerRoom: number;
@@ -390,7 +396,8 @@ export async function getPackageDetail(
     .prepare(
       `SELECT p.id, p.name, p.description, p.nights, p.max_guests, p.discount, p.price, p.inclusions,
               v.id AS villa_id, v.name AS villa_name, v.city AS villa_city,
-              v.kind AS villa_kind, v.image AS villa_image, v.description AS villa_description,
+              v.kind AS villa_kind, v.image AS villa_image, v.images AS villa_images,
+              v.description AS villa_description,
               v.rooms AS villa_rooms, v.people_per_room AS people_per_room, v.owner_id AS owner_id,
               ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
        FROM packages p JOIN villas v ON v.id = p.villa_id
@@ -411,6 +418,7 @@ export async function getPackageDetail(
         villa_city: string;
         villa_kind: string;
         villa_image: string;
+        villa_images: string;
         villa_description: string;
         villa_rooms: number;
         people_per_room: number;
@@ -420,6 +428,7 @@ export async function getPackageDetail(
       }
     | undefined;
   if (!row) return null;
+  const gallery = parseJsonList(row.villa_images);
   return {
     id: row.id,
     name: row.name,
@@ -434,6 +443,7 @@ export async function getPackageDetail(
     villaCity: row.villa_city,
     villaKind: row.villa_kind,
     villaImage: row.villa_image,
+    gallery: gallery.length > 0 ? gallery : [row.villa_image],
     villaDescription: row.villa_description,
     villaRooms: row.villa_rooms,
     peoplePerRoom: row.people_per_room,
@@ -611,8 +621,9 @@ export async function searchVillas(
     params.push(filters.max);
   }
   if (filters.rating != null) {
-    // New listings (0 reviews) stay visible regardless of the rating floor.
-    where.push(`(${RVW_RATING} >= ? OR ${RVW_COUNT} = 0)`);
+    // A rating floor is an explicit quality filter, so unrated (0-review) new
+    // listings are excluded — they have no rating to meet the threshold.
+    where.push(`(${RVW_COUNT} > 0 AND ${RVW_RATING} >= ?)`);
     params.push(filters.rating);
   }
   if (filters.guests != null) {
@@ -777,6 +788,9 @@ export type ManageBooking = {
   peoplePerRoom: number;
   /** Rooms this reservation holds (1 for whole-villa stays). */
   bookingRooms: number;
+  /** Set when this booking is a package — its length/occupancy are fixed, so the
+   *  manage view lets the guest move the start date but not change duration. */
+  package: PackageSnapshot | null;
 };
 
 /** A single booking (owned by the guest) with the villa fields the manage page
@@ -788,7 +802,7 @@ export async function getBookingForManage(
   const row = (await getDb()
     .prepare(
       `SELECT b.id, b.villa_id, b.check_in, b.check_out, b.guests, b.rooms AS booking_rooms,
-              b.status,
+              b.status, b.package,
               v.name AS villa_name, v.city AS villa_city, v.image AS villa_image,
               v.price, v.max_guests, v.rooms, v.bathrooms, v.kind, v.people_per_room
        FROM bookings b JOIN villas v ON v.id = b.villa_id
@@ -803,6 +817,7 @@ export async function getBookingForManage(
         guests: number;
         booking_rooms: number;
         status: BookingStatus;
+        package: string;
         villa_name: string;
         villa_city: string;
         villa_image: string;
@@ -832,7 +847,28 @@ export async function getBookingForManage(
     kind: row.kind,
     peoplePerRoom: row.people_per_room,
     bookingRooms: Math.max(1, row.booking_rooms),
+    package: parsePackage(row.package),
   };
+}
+
+/** Facility chips that at least one *listed* property actually offers, in the
+ *  canonical FACILITY_CHIPS order. The search filter renders only these, so it
+ *  never shows an amenity that can't return a result. Mirrors searchVillas's
+ *  owner exclusion so a guest never sees an amenity only their own (hidden)
+ *  listings carry. */
+export async function getAvailableAmenities(
+  excludeOwnerId?: number,
+): Promise<string[]> {
+  const where = excludeOwnerId != null ? "WHERE owner_id != ?" : "";
+  const params = excludeOwnerId != null ? [excludeOwnerId] : [];
+  const rows = (await getDb()
+    .prepare(`SELECT facilities FROM villas ${where}`)
+    .all(...params)) as { facilities: string }[];
+  const present = new Set<string>();
+  for (const row of rows) {
+    for (const f of parseJsonList(row.facilities)) present.add(f);
+  }
+  return FACILITY_CHIPS.filter((chip) => present.has(chip));
 }
 
 export async function getVillaCities(): Promise<string[]> {
@@ -904,7 +940,7 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
     .prepare(
       `SELECT b.id, b.dates, b.check_out, b.guests, b.status, b.created_at, b.extras,
               b.package,
-              v.name AS villa_name, v.city AS villa_city,
+              v.name AS villa_name, v.city AS villa_city, v.kind AS villa_kind,
               rv.stars AS my_rating
        FROM bookings b
        JOIN villas v ON v.id = b.villa_id
@@ -923,12 +959,14 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
     package: string;
     villa_name: string;
     villa_city: string;
+    villa_kind: string;
     my_rating: number | null;
   }>;
   const today = new Date().toISOString().slice(0, 10);
   return rows.map((r) => ({
     id: r.id,
     villa: `${r.villa_name}, ${r.villa_city}`,
+    kind: r.villa_kind,
     posted: timeAgo(r.created_at),
     dates: r.dates,
     guests: guestsLabel(r.guests),

@@ -30,6 +30,7 @@ export default function PackageBookingWidget({
   roomBased,
   totalRooms,
   peoplePerRoom,
+  defaultStart = "",
 }: {
   packageId: number;
   villaId: number;
@@ -44,9 +45,11 @@ export default function PackageBookingWidget({
   roomBased: boolean;
   totalRooms: number;
   peoplePerRoom: number;
+  /** Start date to preselect — set when returning here via checkout's "Edit". */
+  defaultStart?: string;
 }) {
   const router = useRouter();
-  const [start, setStart] = useState("");
+  const [start, setStart] = useState(defaultStart);
   const checkOut = start ? addDays(start, nights) : "";
   const roomsNeeded = roomsForGuests(villaKind, maxGuests, peoplePerRoom);
 

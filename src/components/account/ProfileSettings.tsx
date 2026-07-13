@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState, useTransition } from "react";
-import Image from "next/image";
+import Avatar from "@/components/ui/Avatar";
 import { useRouter } from "next/navigation";
 import { updateAvatarAction, updateProfileAction } from "@/lib/actions";
 import { formatBirthday, isAtLeastAge, toDateInput } from "@/lib/dates";
@@ -76,7 +76,7 @@ export default function ProfileSettings({
     // carry a country code.
     if (profile.emergency) {
       const emg = splitDialNumber(profile.emergency);
-      if (!emg.code || !isValidPhoneNumber(emg.number)) {
+      if (!emg.code || !isValidPhoneNumber(emg.number, emg.code)) {
         setStatus({
           ok: false,
           text: "Enter a valid emergency contact number with its country code.",
@@ -220,18 +220,11 @@ export default function ProfileSettings({
 
         <div className="flex flex-col items-center gap-2 sm:w-52">
           <span className="relative block h-24 w-24 overflow-hidden rounded-full bg-line/40">
-            {avatar ? (
-              /* eslint-disable-next-line @next/next/no-img-element */
-              <img src={avatar} alt="Profile" className="h-full w-full object-cover" />
-            ) : (
-              <Image
-                src={savedAvatar || "/images/host/avatar.png"}
-                alt="Profile"
-                fill
-                sizes="6rem"
-                className="object-cover object-top"
-              />
-            )}
+            <Avatar
+              src={avatar || savedAvatar}
+              alt="Profile"
+              className="h-full w-full object-cover object-top"
+            />
           </span>
           <p className="text-[18px] font-bold text-black">{profile.fullName}</p>
           <button

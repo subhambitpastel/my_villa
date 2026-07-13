@@ -22,8 +22,27 @@ import { isRoomBased } from "@/lib/rooms";
 import { dayFromNow, nightsBetween, parseDay } from "@/lib/dates";
 
 type Search = {
-  searchParams: Promise<{ id?: string; in?: string; out?: string; guests?: string }>;
+  searchParams: Promise<{
+    id?: string;
+    in?: string;
+    out?: string;
+    guests?: string;
+    /** Rooms carried back when editing a hotel/resort booking from checkout. */
+    rooms?: string;
+    /** Chosen paid-service indices, carried back when editing from checkout. */
+    svc?: string;
+    /** The filtered /search URL to return to (set when arriving from a result). */
+    from?: string;
+  }>;
 };
+
+/** Only honour a `from` that points back to our own /search results, so the
+ *  breadcrumb can't be turned into an off-site or arbitrary redirect. */
+function backToSearchHref(from: string | undefined): string {
+  return from && from.startsWith("/search") && !from.startsWith("//")
+    ? from
+    : "/search";
+}
 
 async function loadVilla(id: string | undefined): Promise<VillaDetail | null> {
   const byId = id ? await getVillaDetail(Number(id)) : null;
@@ -45,7 +64,16 @@ export async function generateMetadata({ searchParams }: Search): Promise<Metada
 }
 
 export default async function PlacePage({ searchParams }: Search) {
-  const { id, in: inParam, out: outParam, guests: guestsParam } = await searchParams;
+  const {
+    id,
+    in: inParam,
+    out: outParam,
+    guests: guestsParam,
+    rooms: roomsParam,
+    svc: svcParam,
+    from,
+  } = await searchParams;
+  const backHref = backToSearchHref(from);
   const villa = await loadVilla(id);
   const user = await getCurrentUser();
   const saved =
@@ -58,13 +86,23 @@ export default async function PlacePage({ searchParams }: Search) {
     nightsBetween(inParam!, outParam!) >= 1 &&
     inParam! >= dayFromNow(0)
   );
-  const defaultCheckIn = carriedDates ? inParam! : dayFromNow(7);
-  const defaultCheckOut = carriedDates ? outParam! : dayFromNow(10);
+  // With no dates carried from search, default to a today → tomorrow (1-night)
+  // stay rather than a week out.
+  const defaultCheckIn = carriedDates ? inParam! : dayFromNow(0);
+  const defaultCheckOut = carriedDates ? outParam! : dayFromNow(1);
   const carriedGuests = Number(guestsParam);
   const defaultGuests =
     Number.isInteger(carriedGuests) && carriedGuests >= 1 && carriedGuests <= 30
       ? carriedGuests
       : 2;
+  // Rooms + chosen paid services carried back when editing from checkout, so the
+  // booking card reopens with exactly what the guest had picked.
+  const carriedRooms = Number(roomsParam);
+  const defaultRooms =
+    Number.isInteger(carriedRooms) && carriedRooms >= 1 ? carriedRooms : undefined;
+  const defaultServices = (svcParam ? svcParam.split(",") : [])
+    .map((n) => Number(n))
+    .filter((n) => Number.isInteger(n) && n >= 0);
 
   if (!villa) {
     return (
@@ -112,7 +150,7 @@ export default async function PlacePage({ searchParams }: Search) {
             <>
               <Link href="/" className="underline">Home</Link>
               <span className="font-light">{"  /  "}</span>
-              <Link href="/search" className="underline">Search</Link>
+              <Link href={backHref} className="underline">Search</Link>
               <span className="font-light">{" / "}</span>
               <span>{villa.name}</span>
             </>
@@ -161,6 +199,8 @@ export default async function PlacePage({ searchParams }: Search) {
                 defaultCheckIn={defaultCheckIn}
                 defaultCheckOut={defaultCheckOut}
                 defaultGuests={defaultGuests}
+                defaultRooms={defaultRooms}
+                defaultServices={defaultServices}
                 maxGuests={villa.max_guests}
                 today={dayFromNow(0)}
                 bookedRanges={bookedRanges}

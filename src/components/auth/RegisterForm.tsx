@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { registerAction } from "@/lib/actions";
-import { dialCodeFromValue } from "@/lib/countries";
+import { dialCodeFromValue, isValidPhoneNumber } from "@/lib/countries";
 import { safeNext } from "@/lib/returnTo";
 import {
   CountryField,
@@ -26,6 +26,9 @@ export default function RegisterForm() {
   const returnTo = safeNext(useSearchParams().get("next"));
   const [errors, setErrors] = useState<Errors>({});
   const [submitting, setSubmitting] = useState(false);
+  // Picking a phone dial code auto-selects the matching country below (the
+  // user can still change it afterwards).
+  const [country, setCountry] = useState("");
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -42,7 +45,7 @@ export default function RegisterForm() {
     else if (!EMAIL_RE.test(email)) next.email = "Enter a valid email address.";
     if (!phoneNumber) next.phone = "Phone number is required.";
     else if (!phoneCode) next.phone = "Select your country code.";
-    else if (phoneNumber.replace(/[\s-]/g, "").length < 6 || /[^\d\s-]/.test(phoneNumber))
+    else if (!isValidPhoneNumber(phoneNumber, phoneCode))
       next.phone = "Enter a valid phone number.";
     if (!country) next.country = "Please choose your country or region.";
     if (!password) next.password = "Password is required.";
@@ -96,11 +99,14 @@ export default function RegisterForm() {
           codeName="phoneCode"
           numberName="phoneNumber"
           error={errors.phone}
+          onCountryChange={setCountry}
         />
         <CountryField
           label="Country or Region"
           name="country"
           error={errors.country}
+          value={country}
+          onChange={setCountry}
         />
         <TextField
           label="Password"

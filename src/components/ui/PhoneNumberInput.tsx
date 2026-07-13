@@ -1,6 +1,6 @@
 "use client";
 
-import { DIAL_CODES } from "@/lib/countries";
+import { DIAL_CODES, capPhoneNumber } from "@/lib/countries";
 
 /**
  * Controlled country-code + phone-number input. `bare` drops the outer border
@@ -46,7 +46,13 @@ export default function PhoneNumberInput({
     <div className={wrapper}>
       <select
         value={code}
-        onChange={(e) => onCode(e.target.value)}
+        onChange={(e) => {
+          const next = e.target.value;
+          onCode(next);
+          // Re-trim to the new country's max length so switching to a shorter
+          // country doesn't leave an over-long number behind.
+          onNumber(capPhoneNumber(number, next));
+        }}
         aria-label={`${label} country code`}
         aria-invalid={invalid}
         className={selectCls}
@@ -63,7 +69,8 @@ export default function PhoneNumberInput({
         type="tel"
         inputMode="tel"
         value={number}
-        onChange={(e) => onNumber(e.target.value.replace(/[^\d\s-]/g, ""))}
+        onChange={(e) => onNumber(capPhoneNumber(e.target.value, code))}
+        maxLength={20}
         placeholder="Phone number"
         aria-label={label}
         aria-invalid={invalid}

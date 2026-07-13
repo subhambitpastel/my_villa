@@ -115,6 +115,12 @@ export default function DateRangeField({
     ...Array<null>(firstWeekday).fill(null),
     ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
   ];
+  // The "unavailable dates" note should track the month actually on screen — a
+  // booking in some other month shouldn't claim there are crossed-out dates here
+  // (e.g. editing your own stay, whose month has no other bookings to cut).
+  const monthHasBooked = cells.some(
+    (day) => day !== null && isBooked(keyOf(view.year, view.month, day)),
+  );
 
   // While choosing check-out, the hovered day previews the range end — but not
   // across a booked block (that range can't be selected anyway).
@@ -347,7 +353,7 @@ export default function DateRangeField({
                 ? "Now select your check-out date"
                 : "Select your check-out date"}
           </p>
-          {bookedRanges.length > 0 && (
+          {monthHasBooked && (
             <p className="mt-1 text-[13px] text-soft">
               Crossed-out dates are unavailable — they are already booked.
             </p>

@@ -2,12 +2,12 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { nightsBetween, formatRange } from "@/lib/dates";
+import { addDays, nightsBetween } from "@/lib/dates";
 import { quote } from "@/lib/pricing";
 import { updateBookingAction, cancelBookingAction } from "@/lib/actions";
-import DateRangeField from "@/components/home/DateRangeField";
+import StartDateField from "@/components/place/StartDateField";
 import type { BookedRange } from "@/lib/queries";
-import { fullyBookedRanges, type RoomBooking } from "@/lib/rooms";
+import { fullyBookedRanges, roomsFreeForRange, type RoomBooking } from "@/lib/rooms";
 
 /* eslint-disable @next/next/no-img-element */
 
@@ -26,6 +26,7 @@ export default function ManageBookingCard({
   rooms = 1,
   roomBookings = [],
   discount = 0,
+  packageStay = null,
 }: {
   bookingId: number;
   price: number;
@@ -45,9 +46,19 @@ export default function ManageBookingCard({
   peoplePerRoom?: number;
   rooms?: number;
   roomBookings?: RoomBooking[];
+  /** Set when this booking is a package: its length and occupancy are fixed, so
+   *  the guest may only shift the start date (never change nights or guests). */
+  packageStay?: { nights: number; price: number } | null;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
+  const isPackage = packageStay != null;
+  // A booking's length is fixed on an edit: a package sets it, and a nightly
+  // stay keeps whatever nights it was booked for. Editing only shifts the dates,
+  // so the number of nights — and therefore the price — never changes.
+  const stayNights = isPackage
+    ? packageStay.nights
+    : Math.max(1, nightsBetween(initialCheckIn, initialCheckOut));
   // Guest cap: the rooms this booking holds × people-per-room (hotels/resorts),
   // else the whole-villa capacity.
   const guestCap = roomBased
@@ -68,6 +79,16 @@ export default function ManageBookingCard({
   const calendarBlocked = roomBased
     ? fullyBookedRanges(roomBookings, totalRooms)
     : bookedRanges;
+
+  // The fixed-length stay can move: a start date is bookable only if the whole
+  // N-night span (this booking's own rooms excluded) is free.
+  function spanAvailable(day: string): boolean {
+    if (!day || day < today) return false;
+    const co = addDays(day, stayNights);
+    return roomBased
+      ? roomsFreeForRange(day, co, roomBookings, totalRooms) >= rooms
+      : !calendarBlocked.some((r) => r.checkIn < co && r.checkOut > day);
+  }
 
   const nights = Math.max(0, nightsBetween(checkIn, checkOut));
   const datesReady = nights >= 1 && checkIn >= today;
@@ -90,10 +111,8 @@ export default function ManageBookingCard({
         setMessage({ ok: false, text: res.error });
         return;
       }
-      setMessage({
-        ok: true,
-        text: `Booking updated to ${formatRange(checkIn, checkOut)} for ${guests} guest${guests === 1 ? "" : "s"}.`,
-      });
+      // Update saved — return to the bookings list (same as after a cancel).
+      router.push("/profile/bookings");
       router.refresh();
     });
   }
@@ -116,26 +135,40 @@ export default function ManageBookingCard({
     <aside className="h-fit w-full min-w-0 max-w-[576px] rounded-[20px] bg-white px-[41px] py-[48px] shadow-[0px_15px_50px_0px_rgba(0,0,0,0.18)] lg:mt-[60px]">
       <div className="flex items-center justify-between">
         <p className="text-black">
-          <span className="text-[24px] font-semibold">${price} </span>
-          <span className="text-[18px]">/ night</span>
+          {isPackage ? (
+            <>
+              <span className="text-[24px] font-semibold">
+                ${packageStay.price.toFixed(2)}{" "}
+              </span>
+              <span className="text-[18px]">all-inclusive</span>
+            </>
+          ) : (
+            <>
+              <span className="text-[24px] font-semibold">${price} </span>
+              <span className="text-[18px]">/ night</span>
+            </>
+          )}
         </p>
         <span className="rounded-[6px] bg-[#e9e8fd] px-3 py-1 text-[13px] font-semibold text-brand">
           Confirmed
         </span>
       </div>
 
-      {/* Same calendar range picker as the villa page — this booking's own dates
-          are NOT blocked, so the guest can keep or adjust them. */}
+      {/* The stay length is fixed on an edit (a package sets it; a nightly stay
+          keeps its original nights), so the guest only picks a NEW start date and
+          the whole span shifts with it — the price stays the same. Their own
+          dates aren't blocked, so keeping them is always allowed. */}
       <div className="mt-5">
-        <DateRangeField
-          variant="booking"
-          checkIn={checkIn || null}
-          checkOut={checkOut || null}
-          bookedRanges={calendarBlocked}
-          onChange={(nextIn, nextOut) => {
-            setCheckIn(nextIn ?? "");
-            setCheckOut(nextOut ?? "");
+        <StartDateField
+          value={checkIn}
+          onChange={(day) => {
+            setCheckIn(day);
+            setCheckOut(addDays(day, stayNights));
           }}
+          today={today}
+          nights={stayNights}
+          isUnavailable={(day) => !spanAvailable(day)}
+          hasBlockedDates={calendarBlocked.length > 0}
         />
       </div>
 
@@ -150,40 +183,52 @@ export default function ManageBookingCard({
         </div>
       )}
 
-      {/* Guest picker — capped by the rooms this booking holds. */}
-      <label
-        htmlFor="manage-guests"
-        className="relative mt-[22px] flex cursor-pointer items-center justify-between rounded-[10px] border-[1.5px] border-[#ddd] p-[15px]"
-      >
-        <span className="min-w-0">
-          <span className="block text-[18px] font-medium leading-[1.2] text-[#121212]">
+      {/* A package's occupancy is fixed, so guests are shown read-only; nightly
+          stays can change guests up to the rooms they hold. */}
+      {isPackage ? (
+        <div className="mt-[22px] flex items-center justify-between rounded-[10px] border-[1.5px] border-[#ddd] bg-[#faf9ff] p-[15px]">
+          <span className="text-[18px] font-medium leading-[1.2] text-[#121212]">
             Guests
           </span>
-          <span className="mt-0.5 block text-[16px] leading-[1.2] text-[#4a4a4a]">
-            {guests} {guests === 1 ? "guest" : "guests"}
+          <span className="text-[16px] leading-[1.2] text-[#4a4a4a]">
+            {guests} {guests === 1 ? "guest" : "guests"} · set by package
           </span>
-        </span>
-        <img
-          src="/icons/place/dropdown.svg"
-          alt=""
-          width={49}
-          height={49}
-          className="pointer-events-none h-[49px] w-[49px] shrink-0"
-        />
-        <select
-          id="manage-guests"
-          value={guests}
-          onChange={(e) => setGuests(Number(e.target.value))}
-          aria-label="Number of guests"
-          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+        </div>
+      ) : (
+        <label
+          htmlFor="manage-guests"
+          className="relative mt-[22px] flex cursor-pointer items-center justify-between rounded-[10px] border-[1.5px] border-[#ddd] p-[15px]"
         >
-          {Array.from({ length: guestCap }, (_, i) => i + 1).map((n) => (
-            <option key={n} value={n}>
-              {n} {n === 1 ? "guest" : "guests"}
-            </option>
-          ))}
-        </select>
-      </label>
+          <span className="min-w-0">
+            <span className="block text-[18px] font-medium leading-[1.2] text-[#121212]">
+              Guests
+            </span>
+            <span className="mt-0.5 block text-[16px] leading-[1.2] text-[#4a4a4a]">
+              {guests} {guests === 1 ? "guest" : "guests"}
+            </span>
+          </span>
+          <img
+            src="/icons/place/dropdown.svg"
+            alt=""
+            width={49}
+            height={49}
+            className="pointer-events-none h-[49px] w-[49px] shrink-0"
+          />
+          <select
+            id="manage-guests"
+            value={guests}
+            onChange={(e) => setGuests(Number(e.target.value))}
+            aria-label="Number of guests"
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          >
+            {Array.from({ length: guestCap }, (_, i) => i + 1).map((n) => (
+              <option key={n} value={n}>
+                {n} {n === 1 ? "guest" : "guests"}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       <button
         type="button"
@@ -232,6 +277,16 @@ export default function ManageBookingCard({
         </div>
       )}
 
+      {/* Leave without changing anything — no update, no cancel. */}
+      <button
+        type="button"
+        onClick={() => router.push("/profile/bookings")}
+        disabled={pending}
+        className="mt-4 w-full text-center text-[15px] font-medium text-[#4a4a4a] underline transition-colors hover:text-[#121212] disabled:opacity-50"
+      >
+        Back to My Bookings
+      </button>
+
       {message && (
         <p
           role={message.ok ? "status" : "alert"}
@@ -245,31 +300,52 @@ export default function ManageBookingCard({
         </p>
       )}
 
-      <dl className="mt-[40px] space-y-[18px] text-[20px] leading-[1.2] text-black">
-        <div className="flex items-center justify-between">
-          <dt>
-            ${price}
-            {roomBased ? ` × ${rooms} room${rooms === 1 ? "" : "s"}` : ""} ×{" "}
-            {nights} night{nights === 1 ? "" : "s"}
-          </dt>
-          <dd className="font-light">${q.subtotal.toFixed(2)}</dd>
-        </div>
-        {q.discountAmount > 0 && (
-          <div className="flex items-center justify-between text-brand">
-            <dt>{q.discount.label}</dt>
-            <dd className="font-light">−${q.discountAmount.toFixed(2)}</dd>
+      {isPackage ? (
+        <>
+          <dl className="mt-[40px] space-y-[18px] text-[20px] leading-[1.2] text-black">
+            <div className="flex items-center justify-between">
+              <dt>
+                {packageStay.nights} night{packageStay.nights === 1 ? "" : "s"} ·
+                all-inclusive
+              </dt>
+              <dd className="font-light">${packageStay.price.toFixed(2)}</dd>
+            </div>
+          </dl>
+          <hr className="mt-[25px] border-t border-[#c6c6c6]" />
+          <div className="mt-5 flex items-center justify-between text-[20px] font-semibold leading-[1.2] text-[#121212]">
+            <p>Total (USD)</p>
+            <p>${packageStay.price.toFixed(2)}</p>
           </div>
-        )}
-        <div className="flex items-center justify-between">
-          <dt>Service Fee</dt>
-          <dd className="font-light">${q.serviceFee.toFixed(2)}</dd>
-        </div>
-      </dl>
-      <hr className="mt-[25px] border-t border-[#c6c6c6]" />
-      <div className="mt-5 flex items-center justify-between text-[20px] font-semibold leading-[1.2] text-[#121212]">
-        <p>Total before taxes</p>
-        <p>${q.total.toFixed(2)}</p>
-      </div>
+        </>
+      ) : (
+        <>
+          <dl className="mt-[40px] space-y-[18px] text-[20px] leading-[1.2] text-black">
+            <div className="flex items-center justify-between">
+              <dt>
+                ${price}
+                {roomBased ? ` × ${rooms} room${rooms === 1 ? "" : "s"}` : ""} ×{" "}
+                {nights} night{nights === 1 ? "" : "s"}
+              </dt>
+              <dd className="font-light">${q.subtotal.toFixed(2)}</dd>
+            </div>
+            {q.discountAmount > 0 && (
+              <div className="flex items-center justify-between text-brand">
+                <dt>{q.discount.label}</dt>
+                <dd className="font-light">−${q.discountAmount.toFixed(2)}</dd>
+              </div>
+            )}
+            <div className="flex items-center justify-between">
+              <dt>Service Fee</dt>
+              <dd className="font-light">${q.serviceFee.toFixed(2)}</dd>
+            </div>
+          </dl>
+          <hr className="mt-[25px] border-t border-[#c6c6c6]" />
+          <div className="mt-5 flex items-center justify-between text-[20px] font-semibold leading-[1.2] text-[#121212]">
+            <p>Total before taxes</p>
+            <p>${q.total.toFixed(2)}</p>
+          </div>
+        </>
+      )}
     </aside>
   );
 }

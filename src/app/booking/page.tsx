@@ -103,6 +103,11 @@ export default async function ManageBookingPage({
               rooms={booking.bookingRooms}
               roomBookings={roomBookings}
               discount={villa.discount}
+              packageStay={
+                booking.package
+                  ? { nights: booking.package.nights, price: booking.package.price }
+                  : null
+              }
             />
           }
         />

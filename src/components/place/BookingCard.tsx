@@ -25,6 +25,8 @@ export default function BookingCard({
   defaultCheckIn,
   defaultCheckOut,
   defaultGuests = 2,
+  defaultRooms,
+  defaultServices = [],
   maxGuests,
   today,
   bookedRanges,
@@ -46,6 +48,10 @@ export default function BookingCard({
   defaultCheckIn: string;
   defaultCheckOut: string;
   defaultGuests?: number;
+  /** Rooms to preselect (carried back when editing a hotel/resort from checkout). */
+  defaultRooms?: number;
+  /** Paid-service indices to preselect (carried back when editing from checkout). */
+  defaultServices?: number[];
   /** Guest capacity the villa owner set — caps the guest picker. */
   maxGuests: number;
   today: string;
@@ -66,13 +72,18 @@ export default function BookingCard({
 }) {
   const [checkIn, setCheckIn] = useState(defaultCheckIn);
   const [checkOut, setCheckOut] = useState(defaultCheckOut);
-  // Hotels/resorts: start with enough rooms to seat the guests carried from
-  // search (e.g. 14 guests at 2 people/room → 7 rooms), capped at the inventory.
+  // Hotels/resorts: start with the rooms carried back from checkout if any,
+  // else enough to seat the guests carried from search (e.g. 14 guests at 2
+  // people/room → 7 rooms), capped at the inventory.
   const [roomsSel, setRoomsSel] = useState(
     roomBased
       ? Math.min(
           Math.max(1, totalRooms),
-          Math.max(1, Math.ceil(Math.max(1, defaultGuests) / Math.max(1, peoplePerRoom))),
+          Math.max(
+            1,
+            defaultRooms ||
+              Math.ceil(Math.max(1, defaultGuests) / Math.max(1, peoplePerRoom)),
+          ),
         )
       : 1,
   );
@@ -99,6 +110,8 @@ export default function BookingCard({
     : 1;
   const roomsMax = Math.max(1, roomsFree);
   const rooms = roomBased ? Math.min(roomsSel, roomsMax) : 1;
+  // Every room is taken for the chosen range — no inventory to offer.
+  const soldOut = roomBased && datesReady && roomsFree === 0;
   const guestCap = roomBased
     ? Math.max(1, rooms * peoplePerRoom)
     : Math.max(1, maxGuests);
@@ -118,9 +131,27 @@ export default function BookingCard({
   const paidServices = services
     .map((s, i) => ({ service: s, index: i }))
     .filter(({ service }) => service.price > 0);
-  const [showServices, setShowServices] = useState(false);
-  const [chosen, setChosen] = useState<number[]>([]);
+  // Preselect any paid services carried back from checkout (edit flow), keeping
+  // only indices that are real paid services on this villa.
+  const [chosen, setChosen] = useState<number[]>(() => {
+    const paid = new Set(paidServices.map((p) => p.index));
+    return defaultServices.filter((i) => paid.has(i));
+  });
   const chosenTotal = chosen.reduce((sum, i) => sum + (services[i]?.price ?? 0), 0);
+  const toggleService = (i: number) =>
+    setChosen((cur) => (cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i]));
+
+  // Paid services the guest hasn't already ticked on the card — offered one more
+  // time in a popup on Reserve. When nothing's left unticked, the popup is
+  // skipped entirely. `popupChosen` holds the extras added from the popup only.
+  const unselectedServices = paidServices.filter(
+    ({ index }) => !chosen.includes(index),
+  );
+  const [showServices, setShowServices] = useState(false);
+  const [popupChosen, setPopupChosen] = useState<number[]>([]);
+  const togglePopup = (i: number) =>
+    setPopupChosen((cur) => (cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i]));
+  const popupTotal = popupChosen.reduce((sum, i) => sum + (services[i]?.price ?? 0), 0);
 
   const paymentUrl = `/payment?villa=${villaId}&in=${checkIn}&out=${checkOut}&guests=${guests}${
     roomBased ? `&rooms=${rooms}` : ""
@@ -142,11 +173,15 @@ export default function BookingCard({
       setShowUnavailable(true);
       return;
     }
-    if (paidServices.length > 0) {
+    // Offer any still-unselected paid services one last time in a popup; if the
+    // guest already ticked them all inline, there's nothing to add — go straight
+    // to checkout.
+    if (unselectedServices.length > 0) {
+      setPopupChosen([]);
       setShowServices(true);
       return;
     }
-    goToPayment([]);
+    goToPayment(chosen);
   }
 
   return (
@@ -185,16 +220,26 @@ export default function BookingCard({
       {roomBased && (
         <label
           htmlFor="booking-rooms"
-          className="relative mt-[22px] flex cursor-pointer items-center justify-between rounded-[10px] border-[1.5px] border-[#ddd] p-[15px]"
+          className={`relative mt-[22px] flex items-center justify-between rounded-[10px] border-[1.5px] p-[15px] ${
+            soldOut ? "cursor-not-allowed border-[#f0c4c0]" : "cursor-pointer border-[#ddd]"
+          }`}
         >
           <span className="min-w-0">
             <span className="block text-[18px] font-medium leading-[1.2] text-[#121212]">
               Rooms
             </span>
-            <span className="mt-0.5 block text-[16px] leading-[1.2] text-[#4a4a4a]">
-              {rooms} {rooms === 1 ? "room" : "rooms"}
-              {datesReady && (
-                <span className="text-[#8a8a94]"> · {roomsMax} available</span>
+            <span className="mt-0.5 block text-[16px] leading-[1.2]">
+              {soldOut ? (
+                <span className="font-medium text-[#c0392b]">
+                  Sold out for these dates
+                </span>
+              ) : (
+                <span className="text-[#4a4a4a]">
+                  {rooms} {rooms === 1 ? "room" : "rooms"}
+                  {datesReady && (
+                    <span className="text-[#8a8a94]"> · {roomsFree} available</span>
+                  )}
+                </span>
               )}
             </span>
           </span>
@@ -209,8 +254,9 @@ export default function BookingCard({
             id="booking-rooms"
             value={rooms}
             onChange={(e) => setRoomsSel(Number(e.target.value))}
+            disabled={soldOut}
             aria-label="Number of rooms"
-            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
           >
             {Array.from({ length: roomsMax }, (_, i) => i + 1).map((n) => (
               <option key={n} value={n}>
@@ -256,6 +302,35 @@ export default function BookingCard({
           ))}
         </select>
       </label>
+
+      {/* Paid add-ons, pickable right here on the details page — the choices
+          carry into checkout (and back again if the guest edits their booking). */}
+      {paidServices.length > 0 && (
+        <div className="mt-[22px]">
+          <p className="text-[18px] font-medium leading-[1.2] text-[#121212]">
+            Extra Services{" "}
+            <span className="text-[14px] font-normal text-[#8a8a94]">(optional)</span>
+          </p>
+          <ul className="mt-3 max-h-[220px] space-y-2.5 overflow-y-auto">
+            {paidServices.map(({ service: s, index: i }) => (
+              <li key={s.name}>
+                <label className="flex cursor-pointer items-center gap-2.5 text-[16px] text-[#121212]">
+                  <input
+                    type="checkbox"
+                    checked={chosen.includes(i)}
+                    onChange={() => toggleService(i)}
+                    className="checkbox-brand"
+                  />
+                  <span className="min-w-0 flex-1">{s.name}</span>
+                  <span className="shrink-0 text-[15px] font-semibold text-brand">
+                    +${s.price.toFixed(2)}
+                  </span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <button
         type="button"
@@ -305,11 +380,17 @@ export default function BookingCard({
           <dt>Service Fee</dt>
           <dd className="font-light">${q.serviceFee.toFixed(2)}</dd>
         </div>
+        {chosenTotal > 0 && (
+          <div className="flex items-center justify-between">
+            <dt>Extra services</dt>
+            <dd className="font-light">+${chosenTotal.toFixed(2)}</dd>
+          </div>
+        )}
       </dl>
       <hr className="mt-[25px] border-t border-[#c6c6c6]" />
       <div className="mt-5 flex items-center justify-between text-[20px] font-semibold leading-[1.2] text-[#121212]">
         <p>Total before taxes</p>
-        <p>${q.total.toFixed(2)}</p>
+        <p>${(q.total + chosenTotal).toFixed(2)}</p>
       </div>
       {hasLongStayPackages && (
         <p className="mt-4 text-center text-[13px] text-[#7a7a85]">
@@ -327,26 +408,20 @@ export default function BookingCard({
         >
           <div className="w-full max-w-[460px] rounded-[12px] bg-white p-6 shadow-[0px_20px_60px_0px_rgba(0,0,0,0.25)]">
             <h3 className="text-[18px] font-semibold text-[#121212]">
-              Add extra services
+              Add more extra services
             </h3>
             <p className="mt-1 text-[13px] text-[#7a7a85]">
-              Optional paid add-ons for your stay — pick any you&apos;d like and
-              they&apos;re added to your total.
+              Optional paid add-ons you haven&apos;t picked yet — add any before
+              you continue to checkout.
             </p>
             <ul className="mt-4 max-h-[300px] space-y-3 overflow-y-auto">
-              {paidServices.map(({ service: s, index: i }) => (
+              {unselectedServices.map(({ service: s, index: i }) => (
                 <li key={s.name}>
                   <label className="flex cursor-pointer items-center gap-2.5 text-[14px] text-[#121212]">
                     <input
                       type="checkbox"
-                      checked={chosen.includes(i)}
-                      onChange={() =>
-                        setChosen((cur) =>
-                          cur.includes(i)
-                            ? cur.filter((x) => x !== i)
-                            : [...cur, i],
-                        )
-                      }
+                      checked={popupChosen.includes(i)}
+                      onChange={() => togglePopup(i)}
                       className="checkbox-brand"
                     />
                     <span className="min-w-0 flex-1">{s.name}</span>
@@ -360,19 +435,19 @@ export default function BookingCard({
             <hr className="mt-4 border-t border-[#e3e3e8]" />
             <div className="mt-3 flex items-center justify-between text-[15px] font-semibold text-[#121212]">
               <span>Total before taxes</span>
-              <span>${(q.total + chosenTotal).toFixed(2)}</span>
+              <span>${(q.total + chosenTotal + popupTotal).toFixed(2)}</span>
             </div>
             <div className="mt-5 flex items-center justify-end gap-4">
               <button
                 type="button"
-                onClick={() => goToPayment([])}
+                onClick={() => goToPayment(chosen)}
                 className="text-[14px] text-[#7a7a85] underline"
               >
                 Skip
               </button>
               <button
                 type="button"
-                onClick={() => goToPayment(chosen)}
+                onClick={() => goToPayment([...chosen, ...popupChosen])}
                 className="rounded-[8px] bg-brand px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-brand-dark"
               >
                 Continue

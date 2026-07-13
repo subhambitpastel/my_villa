@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
-import Image from "next/image";
 import Link from "next/link";
 import Header from "@/components/site/Header";
 import Footer from "@/components/site/Footer";
+import VillaGallery from "@/components/place/VillaGallery";
 import PackageBookingWidget from "@/components/place/PackageBookingWidget";
 import { getCurrentUser } from "@/lib/session";
 import {
@@ -11,9 +11,9 @@ import {
   getRoomBookings,
 } from "@/lib/queries";
 import { isRoomBased, roomsForGuests } from "@/lib/rooms";
-import { dayFromNow } from "@/lib/dates";
+import { dayFromNow, parseDay } from "@/lib/dates";
 
-type Search = { searchParams: Promise<{ id?: string }> };
+type Search = { searchParams: Promise<{ id?: string; in?: string }> };
 
 export async function generateMetadata({ searchParams }: Search): Promise<Metadata> {
   const { id } = await searchParams;
@@ -36,9 +36,14 @@ function Check() {
 }
 
 export default async function PackagePage({ searchParams }: Search) {
-  const { id } = await searchParams;
+  const { id, in: startParam } = await searchParams;
   const pkg = id ? await getPackageDetail(Number(id)) : null;
   const user = await getCurrentUser();
+  // Preselect a start date only when checkout's "Edit" sends the guest back with
+  // a real, non-past `in`; the widget still re-checks availability for it.
+  const today = dayFromNow(0);
+  const defaultStart =
+    startParam && parseDay(startParam) && startParam >= today ? startParam : "";
 
   if (!pkg) {
     return (
@@ -101,16 +106,7 @@ export default async function PackagePage({ searchParams }: Search) {
             </div>
           </div>
 
-          <div className="relative mt-[20px] h-64 w-full overflow-hidden rounded-[21px] shadow-[0px_15px_30px_0px_rgba(0,0,0,0.1)] sm:h-[380px]">
-            <Image
-              src={pkg.villaImage}
-              alt={`${pkg.villaName}, ${pkg.villaCity}`}
-              fill
-              priority
-              sizes="(max-width: 1024px) 100vw, 1200px"
-              className="object-cover"
-            />
-          </div>
+          <VillaGallery gallery={pkg.gallery} name={pkg.villaName} />
 
           <div className="mt-10 flex flex-col gap-10 lg:flex-row lg:gap-[5.875%]">
             <div className="w-full lg:w-[58.125%] lg:shrink-0">
@@ -184,12 +180,13 @@ export default async function PackagePage({ searchParams }: Search) {
                 maxGuests={pkg.maxGuests}
                 price={pkg.price}
                 authed={user !== null}
-                today={dayFromNow(0)}
+                today={today}
                 bookedRanges={bookedRanges}
                 roomBookings={roomBookings}
                 roomBased={roomBased}
                 totalRooms={pkg.villaRooms}
                 peoplePerRoom={pkg.peoplePerRoom}
+                defaultStart={defaultStart}
               />
             )}
           </div>

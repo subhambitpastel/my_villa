@@ -29,7 +29,7 @@ const CHOICES = [
     key: "host",
     title: "I have a villa to rent",
     description:
-      "List your property, set your price and start receiving rent requests from guests.",
+      "List your property, set your price and start receiving bookings from guests.",
     cta: "Host your villa",
     icon: (
       <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

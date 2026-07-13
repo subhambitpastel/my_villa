@@ -1,6 +1,7 @@
 import Image from "next/image";
 import type { VillaDetail } from "@/lib/queries";
-import GalleryLightbox from "@/components/place/GalleryLightbox";
+import Avatar from "@/components/ui/Avatar";
+import VillaGallery from "@/components/place/VillaGallery";
 import {
   getVillaReviews,
   getVillaReviewDistribution,
@@ -71,7 +72,6 @@ export default function VillaDetailView({
 }) {
   const reviewRows = distribution.reduce((s, d) => s + d.count, 0);
   const gallery = villa.gallery;
-  const sideImages = gallery.slice(1, 5);
   const leftFacilities = villa.facilityList.filter((_, i) => i % 2 === 0);
   const rightFacilities = villa.facilityList.filter((_, i) => i % 2 === 1);
   const joined = new Date(villa.hostJoined.replace(" ", "T") + "Z");
@@ -101,50 +101,8 @@ export default function VillaDetailView({
         {topActions}
       </div>
 
-      {/* Gallery — Figma: 950px hero + 2×2 of 300px tiles on a 1600px row.
-          Widths are fr ratios so the whole gallery scales below 1648px. */}
-      {sideImages.length > 0 ? (
-        <div className="relative mt-[14px] grid grid-cols-2 gap-x-[26px] gap-y-[22px] lg:grid-cols-[950fr_301fr_301fr] lg:gap-x-6">
-          <div className="relative col-span-2 h-72 overflow-hidden rounded-[21px] shadow-[0px_15px_30px_0px_rgba(0,0,0,0.1)] lg:col-span-1 lg:row-span-2 lg:aspect-[950/622] lg:h-auto">
-            <Image
-              src={gallery[0]}
-              alt={`${villa.name} main photo`}
-              fill
-              priority
-              sizes="(max-width: 1024px) 100vw, (max-width: 1648px) 60vw, 950px"
-              className="object-cover"
-            />
-          </div>
-          {sideImages.map((src, i) => (
-            <div
-              key={`${src}-${i}`}
-              className="relative h-40 overflow-hidden rounded-[21px] shadow-[0px_15px_30px_0px_rgba(0,0,0,0.1)] lg:aspect-square lg:h-auto"
-            >
-              <Image
-                src={src}
-                alt={`${villa.name} photo ${i + 2}`}
-                fill
-                sizes="(max-width: 1024px) 50vw, (max-width: 1648px) 20vw, 300px"
-                className="object-cover"
-              />
-            </div>
-          ))}
-          {gallery.length > 5 && (
-            <GalleryLightbox images={gallery} name={villa.name} />
-          )}
-        </div>
-      ) : (
-        <div className="relative mt-[14px] h-72 overflow-hidden rounded-[21px] shadow-[0px_15px_30px_0px_rgba(0,0,0,0.1)] lg:aspect-[950/622] lg:h-auto lg:w-[59.375%]">
-          <Image
-            src={gallery[0]}
-            alt={`${villa.name} main photo`}
-            fill
-            priority
-            sizes="(max-width: 1024px) 100vw, (max-width: 1648px) 60vw, 950px"
-            className="object-cover"
-          />
-        </div>
-      )}
+      {/* Gallery — Figma: 950px hero + 2×2 of 300px tiles on a 1600px row. */}
+      <VillaGallery gallery={gallery} name={villa.name} />
 
       {/* Two-column: details + right-hand card */}
       {/* Figma: 930px details + 94px gap + 576px card on a 1600px row */}
@@ -215,25 +173,6 @@ export default function VillaDetailView({
             </>
           )}
 
-          <Divider className="mt-[30px]" />
-
-          <section className="mt-[30px]">
-            <h2 className="text-[24px] font-semibold leading-[1.3] text-brand">Your Bedroom</h2>
-            <div className="relative mt-[15px] h-60 max-w-[648px] overflow-hidden rounded-[10px] lg:h-[368px]">
-              <Image
-                src={gallery[1] ?? gallery[0]}
-                alt="Bedroom"
-                fill
-                sizes="(max-width: 640px) 100vw, 648px"
-                className="object-cover"
-              />
-            </div>
-            <p className="mt-5 text-[20px] font-semibold leading-[1.3] text-[#121212]">Bedroom</p>
-            <p className="mt-[10px] text-[18px] leading-[1.35] text-[#121212]">
-              {villa.rooms} {villa.rooms === 1 ? "room" : "rooms"} ·{" "}
-              {villa.bathrooms} {villa.bathrooms === 1 ? "bathroom" : "bathrooms"}
-            </p>
-          </section>
         </div>
 
         {rightColumn}
@@ -278,11 +217,9 @@ export default function VillaDetailView({
               {reviews.map((r) => (
                 <article key={r.id}>
                   <div className="flex items-center gap-[15px]">
-                    <Image
-                      src={r.authorAvatar || "/images/place/avatar-host.png"}
+                    <Avatar
+                      src={r.authorAvatar}
                       alt=""
-                      width={103}
-                      height={103}
                       className="h-[103px] w-[103px] rounded-full object-cover"
                     />
                     <div>
@@ -376,11 +313,9 @@ export default function VillaDetailView({
       {/* Host */}
       <section className="mt-[50px]">
         <div className="flex items-center gap-5">
-          <Image
-            src={villa.hostAvatar || "/images/place/avatar-host.png"}
+          <Avatar
+            src={villa.hostAvatar}
             alt={`Host ${villa.hostName}`}
-            width={103}
-            height={103}
             className="h-[103px] w-[103px] rounded-full object-cover"
           />
           <div>
@@ -419,26 +354,6 @@ export default function VillaDetailView({
         </p>
       </section>
 
-      <Divider className="mt-[30px]" />
-
-      {/* House Rules */}
-      <section className="mt-[30px]">
-        <h2 className="text-[28px] font-semibold leading-[1.3] text-brand">House Rules</h2>
-        <ul className="mt-[30px] space-y-[15px] text-[20px] leading-[1.3] text-[#121212]">
-          <li className="flex items-center gap-[9px]">
-            <img src="/icons/place/clock.svg" alt="" width={39} height={39} className="h-[39px] w-[39px]" />
-            Check-in: After 1:00 pm
-          </li>
-          <li className="flex items-center gap-[9px]">
-            <img src="/icons/place/clock.svg" alt="" width={39} height={39} className="h-[39px] w-[39px]" />
-            Checkout: 12:00 pm
-          </li>
-          <li className="flex items-center gap-[11px]">
-            <img src="/icons/place/paw.svg" alt="" width={36} height={36} className="h-9 w-9" />
-            Pets are allowed
-          </li>
-        </ul>
-      </section>
     </div>
   );
 }

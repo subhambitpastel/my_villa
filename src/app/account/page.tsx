@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import Image from "next/image";
 import Link from "next/link";
+import Avatar from "@/components/ui/Avatar";
 import Header from "@/components/site/Header";
 import Footer from "@/components/site/Footer";
 import { redirect } from "next/navigation";
@@ -69,11 +69,9 @@ export default async function AccountPage() {
             {/* Host info */}
             <section className="w-full max-w-[523px] shrink-0">
               <div className="flex items-center gap-5">
-                <Image
-                  src={user.avatar || "/images/place/avatar-host.png"}
+                <Avatar
+                  src={user.avatar}
                   alt={user.full_name || user.email}
-                  width={103}
-                  height={103}
                   className="h-[103px] w-[103px] rounded-full object-cover"
                 />
                 <div>
@@ -168,11 +166,9 @@ export default async function AccountPage() {
                   {hostReviews.map((r) => (
                     <article key={r.id}>
                       <div className="flex items-center gap-[15px]">
-                        <Image
-                          src={r.authorAvatar || "/images/place/avatar-host.png"}
+                        <Avatar
+                          src={r.authorAvatar}
                           alt=""
-                          width={103}
-                          height={103}
                           className="h-[103px] w-[103px] rounded-full object-cover"
                         />
                         <div>

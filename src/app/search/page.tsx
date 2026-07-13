@@ -7,6 +7,7 @@ import SearchFilters from "@/components/search/SearchFilters";
 import FavoriteButton from "@/components/site/FavoriteButton";
 import { getCurrentUser } from "@/lib/session";
 import {
+  getAvailableAmenities,
   getFavoriteVillaIds,
   getMaxVillaGuests,
   isVillaAvailable,
@@ -66,13 +67,15 @@ function ResultCard({
   liked,
   authed,
   datesQuery,
+  fromQuery,
 }: {
   result: Result;
   liked: boolean;
   authed: boolean;
   datesQuery: string;
+  fromQuery: string;
 }) {
-  const placeHref = `/place?id=${result.id}${datesQuery}`;
+  const placeHref = `/place?id=${result.id}${datesQuery}${fromQuery}`;
   const discount = result.discount ?? 0;
   const discounted = Math.round(result.price * (1 - discount / 100));
   return (
@@ -210,6 +213,17 @@ export default async function SearchPage({
   const datesQuery =
     (checkIn ? `&in=${checkIn}&out=${checkOut}` : "") +
     (guests ? `&guests=${guests}` : "");
+  // …and carry the full current search URL so a result's villa page can send
+  // the guest back to THESE filtered results via its breadcrumb (browser-back
+  // already preserves them; this fixes the in-page "Search" link).
+  const searchQs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    const v = one(value);
+    if (v) searchQs.set(key, v);
+  }
+  const fromQuery = searchQs.size
+    ? `&from=${encodeURIComponent(`/search?${searchQs.toString()}`)}`
+    : "";
   const clearParams = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     const v = one(value);
@@ -253,7 +267,10 @@ export default async function SearchPage({
           <div className="mt-[30px] flex flex-col gap-10 lg:flex-row lg:gap-[90px]">
             {/* Left rail */}
             <div className="w-full shrink-0 lg:w-[440px]">
-              <SearchFilters maxGuests={await getMaxVillaGuests()} />
+              <SearchFilters
+                maxGuests={await getMaxVillaGuests()}
+                amenities={await getAvailableAmenities(user?.id)}
+              />
 
               <div className="mt-[55px] space-y-[15px]">
                 <Link href="#" className="group relative block h-[150px] overflow-hidden rounded-[10px]">
@@ -336,6 +353,7 @@ export default async function SearchPage({
                         liked={favorites.has(r.id)}
                         authed={user !== null}
                         datesQuery={datesQuery}
+                        fromQuery={fromQuery}
                       />
                     </li>
                   ))}

@@ -23,9 +23,6 @@ export default async function GuestWelcomePage() {
           <h1 className="text-center text-[32px] font-semibold leading-[1.3] text-black">
             Almost there!
           </h1>
-          <p className="mt-2 text-center text-[17px] text-[#4a4a4a]">
-            Complete your guest profile — no villa details needed.
-          </p>
           <div className="mt-8">
             <GuestDetailsForm
               defaults={{

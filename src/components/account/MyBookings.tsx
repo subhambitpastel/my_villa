@@ -118,6 +118,9 @@ function VillaCell({ b }: { b: BookingItem }) {
   return (
     <span className="min-w-0">
       <span className="block truncate">{b.villa}</span>
+      <span className="mt-0.5 inline-block rounded-[3px] bg-[#f1f0f6] px-1.5 py-0.5 text-[10px] font-medium text-[#5a5a66]">
+        {b.kind}
+      </span>
       {b.package && (
         <span
           className="mt-0.5 inline-block max-w-full truncate rounded-[3px] bg-[#e9e8fd] px-1.5 py-0.5 text-[10px] font-medium text-brand"
@@ -297,7 +300,12 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
                     <p className="text-[14px] font-semibold text-heading">
                       {b.package!.name}
                     </p>
-                    <p className="text-[12px] text-gray">{b.villa}</p>
+                    <p className="flex flex-wrap items-center gap-1.5 text-[12px] text-gray">
+                      {b.villa}
+                      <span className="rounded-[3px] bg-[#f1f0f6] px-1.5 py-0.5 text-[10px] font-medium text-[#5a5a66]">
+                        {b.kind}
+                      </span>
+                    </p>
                     <p className="mt-0.5 text-[12px] text-[#a1a1a2]">
                       {b.package!.nights} night{b.package!.nights === 1 ? "" : "s"}{" "}
                       · {b.dates} · {b.guests}

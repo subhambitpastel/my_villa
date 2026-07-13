@@ -8,7 +8,12 @@ import { getDb, tx, type UserRow } from "./db";
 import { addDays, formatRange, isAtLeastAge, nightsBetween, parseDay } from "./dates";
 import { bookingReference } from "./pricing";
 import { parsePackageType, presetNights, presetDiscount } from "./packageTypes";
-import { getPackageById, isVillaAvailable, parseServiceList } from "./queries";
+import {
+  getPackageById,
+  isVillaAvailable,
+  parsePackage,
+  parseServiceList,
+} from "./queries";
 import { isRoomBased, roomCapacity, roomsForGuests } from "./rooms";
 import { hashPasswordSync, verifyPassword } from "./password";
 import { createSession, destroySession, getCurrentUser } from "./session";
@@ -25,7 +30,7 @@ function emergencyError(emergency: string): string | null {
   const value = (emergency ?? "").trim();
   if (!value) return null;
   const { code, number } = splitDialNumber(value);
-  return !code || !isValidPhoneNumber(number)
+  return !code || !isValidPhoneNumber(number, code)
     ? "Enter a valid emergency contact number with its country code."
     : null;
 }
@@ -990,7 +995,8 @@ export async function updateBookingAction(
   const db = getDb();
   const booking = (await db
     .prepare(
-      `SELECT b.id, b.villa_id, b.status, b.rooms, v.kind, v.max_guests, v.people_per_room
+      `SELECT b.id, b.villa_id, b.status, b.rooms, b.package, b.check_in, b.check_out,
+              v.kind, v.max_guests, v.people_per_room
        FROM bookings b JOIN villas v ON v.id = b.villa_id
        WHERE b.id = ? AND b.guest_id = ?`,
     )
@@ -1000,6 +1006,9 @@ export async function updateBookingAction(
         villa_id: number;
         status: string;
         rooms: number;
+        package: string;
+        check_in: string;
+        check_out: string;
         kind: string;
         max_guests: number;
         people_per_room: number;
@@ -1009,16 +1018,28 @@ export async function updateBookingAction(
   if (booking.status !== "accepted")
     return fail("Only active bookings can be changed.");
 
+  // The stay's length is fixed on an edit — a package's nights, or a nightly
+  // booking's original span — so the guest may shift the start date but never
+  // stretch or shrink it. Derive the checkout from the (possibly moved) check-in
+  // and ignore any client-sent checkout, so the number of nights (and the price)
+  // can't change. A package's occupancy is fixed too.
+  const pkg = parsePackage(booking.package);
+  const fixedNights = pkg
+    ? pkg.nights
+    : Math.max(1, nightsBetween(booking.check_in, booking.check_out));
+  const checkOut = addDays(input.checkIn, fixedNights);
+  const effGuests = pkg ? Math.max(1, pkg.guests) : guests;
+
   // Dates and guests can change here; the room count stays as booked. Cap guests
   // to what those rooms sleep (hotels/resorts) or the whole-villa capacity.
   const roomsHeld = Math.max(1, booking.rooms);
   if (isRoomBased(booking.kind)) {
     const guestCap = roomsHeld * Math.max(1, booking.people_per_room);
-    if (guests > guestCap)
+    if (effGuests > guestCap)
       return fail(
         `${roomsHeld} room${roomsHeld === 1 ? "" : "s"} sleep${roomsHeld === 1 ? "s" : ""} up to ${guestCap} guest${guestCap === 1 ? "" : "s"}.`,
       );
-  } else if (guests > booking.max_guests) {
+  } else if (effGuests > booking.max_guests) {
     return fail(
       `This villa sleeps up to ${booking.max_guests} guest${booking.max_guests === 1 ? "" : "s"}.`,
     );
@@ -1032,7 +1053,7 @@ export async function updateBookingAction(
         !(await isVillaAvailable(
           booking.villa_id,
           input.checkIn,
-          input.checkOut,
+          checkOut,
           roomsHeld,
           booking.id,
         ))
@@ -1043,9 +1064,9 @@ export async function updateBookingAction(
          WHERE id = ? AND guest_id = ? AND status = 'accepted'`,
       ).run(
         input.checkIn,
-        input.checkOut,
-        formatRange(input.checkIn, input.checkOut),
-        guests,
+        checkOut,
+        formatRange(input.checkIn, checkOut),
+        effGuests,
         bookingId,
         user.id,
       );

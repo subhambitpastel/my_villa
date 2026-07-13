@@ -18,6 +18,7 @@ import { getCurrentUser } from "@/lib/session";
 import { isRoomBased, roomsForGuests } from "@/lib/rooms";
 import { addDays, dayFromNow, formatDay, nightsBetween, parseDay } from "@/lib/dates";
 import { quote } from "@/lib/pricing";
+import { dialValueFor } from "@/lib/countries";
 import { loginHref } from "@/lib/returnTo";
 import type { VillaRow } from "@/lib/db";
 
@@ -306,8 +307,15 @@ export default async function PaymentPage({
                     checkOut={checkOut}
                     guests={guests}
                     rooms={rooms}
+                    roomBased={roomBased}
                     services={svcIndices}
                     packageId={pkg ? pkg.id : undefined}
+                    profile={{
+                      email: user.email,
+                      phoneCode: dialValueFor(user.phone_code, user.country),
+                      phoneNumber: user.phone_number,
+                      country: user.country,
+                    }}
                   />
                 </>
               ) : ownBooking ? (

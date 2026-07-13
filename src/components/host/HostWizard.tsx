@@ -210,7 +210,7 @@ function StepPersonal({
     let emergency = "";
     if (emgNumber.trim()) {
       if (!emgCode) next.emergency = "Select the country code.";
-      else if (!isValidPhoneNumber(emgNumber))
+      else if (!isValidPhoneNumber(emgNumber, emgCode))
         next.emergency = "Enter a valid emergency contact number.";
       else emergency = joinDialNumber(emgCode, emgNumber);
     }

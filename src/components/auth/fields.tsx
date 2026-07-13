@@ -1,7 +1,12 @@
 "use client";
 
-import { useId, useState } from "react";
-import { COUNTRIES, DIAL_CODE_OPTIONS } from "@/lib/countries";
+import { useId, useRef, useState } from "react";
+import {
+  COUNTRIES,
+  DIAL_CODE_OPTIONS,
+  countryFromDialValue,
+  capPhoneNumber,
+} from "@/lib/countries";
 
 const inputClasses = (hasError: boolean) =>
   `block h-[60px] w-full rounded-[10px] border bg-white p-[10px] text-[18px] text-[#121212] placeholder:text-[#696969] focus:outline-none focus:border-brand focus:ring-2 focus:ring-brand/25 ${
@@ -73,14 +78,19 @@ export function PhoneField({
   codeName,
   numberName,
   error,
+  onCountryChange,
 }: {
   label: string;
   codeName: string;
   numberName: string;
   error?: string;
+  /** Called with the country embedded in the picked dial code ("+1|Canada" →
+   *  "Canada") so the form can auto-select the matching country field. */
+  onCountryChange?: (country: string) => void;
 }) {
   const id = useId();
   const [code, setCode] = useState("");
+  const numRef = useRef<HTMLInputElement>(null);
   return (
     <FieldWrapper label={label} id={id} error={error}>
       <div
@@ -92,7 +102,14 @@ export function PhoneField({
           id={id}
           name={codeName}
           value={code}
-          onChange={(e) => setCode(e.target.value)}
+          onChange={(e) => {
+            const next = e.target.value;
+            setCode(next);
+            onCountryChange?.(countryFromDialValue(next));
+            // Trim any already-typed number to the new country's max length.
+            if (numRef.current)
+              numRef.current.value = capPhoneNumber(numRef.current.value, next);
+          }}
           autoComplete="tel-country-code"
           aria-label={`${label} country code`}
           aria-invalid={!!error}
@@ -111,10 +128,15 @@ export function PhoneField({
         </select>
         <span aria-hidden="true" className="my-[5px] w-px bg-[#4a4a4a]" />
         <input
+          ref={numRef}
           name={numberName}
           type="text"
           inputMode="tel"
           autoComplete="tel-national"
+          maxLength={20}
+          onInput={(e) => {
+            e.currentTarget.value = capPhoneNumber(e.currentTarget.value, code);
+          }}
           placeholder="000 - 0000 - 000"
           aria-label={label}
           aria-invalid={!!error}
@@ -129,13 +151,20 @@ export function CountryField({
   label,
   name,
   error,
+  value: controlled,
+  onChange,
 }: {
   label: string;
   name: string;
   error?: string;
+  /** Controlled mode — lets the form auto-select the country (e.g. to match
+   *  the picked phone dial code). Omit both for internal state. */
+  value?: string;
+  onChange?: (value: string) => void;
 }) {
   const id = useId();
-  const [value, setValue] = useState("");
+  const [internal, setInternal] = useState("");
+  const value = controlled ?? internal;
   return (
     <FieldWrapper label={label} id={id} error={error}>
       <div className="relative">
@@ -143,7 +172,10 @@ export function CountryField({
           id={id}
           name={name}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => {
+            setInternal(e.target.value);
+            onChange?.(e.target.value);
+          }}
           aria-invalid={!!error}
           className={`${inputClasses(!!error)} cursor-pointer appearance-none pr-14 ${
             value ? "text-[#121212]" : "text-[#696969]"

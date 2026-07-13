@@ -8,8 +8,15 @@ import {
   type PackageItem,
 } from "@/lib/queries";
 import { getCurrentUser } from "@/lib/session";
-import { isRoomBased } from "@/lib/rooms";
 import { PACKAGE_TYPES } from "@/lib/packageTypes";
+
+// Buckets a villa kind into the three types guests recognise — matches how the
+// search page groups Resort / Hotel / everything-else.
+function propertyTypeOf(kind: string): "Hotel" | "Resort" | "Villa" {
+  if (kind === "Hotel") return "Hotel";
+  if (kind === "Resort") return "Resort";
+  return "Villa";
+}
 
 export const metadata: Metadata = {
   title: "Packages",
@@ -19,7 +26,7 @@ export const metadata: Metadata = {
 
 /** A real owner-created package: fixed nights, occupancy and all-inclusive price. */
 function HostPackageCard({ pkg }: { pkg: PackageItem }) {
-  const roomBased = isRoomBased(pkg.villaKind);
+  const propertyType = propertyTypeOf(pkg.villaKind);
   return (
     <article className="flex flex-col overflow-hidden rounded-[12px] bg-white shadow-[0px_2px_4px_0px_rgba(28,5,77,0.1),0px_12px_32px_0px_rgba(0,0,0,0.05)]">
       <Link href={`/package?id=${pkg.id}`} className="relative block h-[180px]">
@@ -33,6 +40,9 @@ function HostPackageCard({ pkg }: { pkg: PackageItem }) {
         <span className="absolute left-3 top-3 rounded-full bg-white/90 px-3 py-1 text-[12px] font-semibold text-brand">
           {pkg.nights} night{pkg.nights === 1 ? "" : "s"}
         </span>
+        <span className="absolute bottom-3 left-3 rounded-full bg-black/55 px-3 py-1 text-[12px] font-semibold text-white backdrop-blur-sm">
+          {propertyType}
+        </span>
         {pkg.discount > 0 && (
           <span className="absolute right-3 top-3 rounded-full bg-accent px-3 py-1 text-[12px] font-semibold text-white">
             {pkg.discount}% off
@@ -45,8 +55,8 @@ function HostPackageCard({ pkg }: { pkg: PackageItem }) {
           {pkg.villaName}, {pkg.villaCity}
         </p>
         <p className="mt-1 text-[12px] text-muted">
-          Up to {pkg.maxGuests} guest{pkg.maxGuests === 1 ? "" : "s"} ·{" "}
-          {roomBased ? "hotel/resort" : "whole villa"}
+          {propertyType} · Up to {pkg.maxGuests} guest
+          {pkg.maxGuests === 1 ? "" : "s"}
         </p>
         {pkg.inclusions.length > 0 && (
           <ul className="mt-3 flex flex-wrap gap-1.5">
