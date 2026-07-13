@@ -36,8 +36,6 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   // Don't advertise the framework.
   poweredByHeader: false,
-  // Container-friendly build output (safe for `next start` too).
-  output: "standalone",
   experimental: {
     // Villa image uploads accept up to 8 files × 8 MB (see uploadImagesAction).
     // Server Actions cap the request body at 1 MB by default, which rejected
