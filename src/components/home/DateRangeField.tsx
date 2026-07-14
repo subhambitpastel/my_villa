@@ -18,6 +18,13 @@ const pad = (n: number) => String(n).padStart(2, "0");
 // YYYY-MM-DD keys compare correctly as plain strings.
 const keyOf = (y: number, m: number, d: number) => `${y}-${pad(m + 1)}-${pad(d)}`;
 
+/** The calendar day before `key` (handles month/year boundaries). */
+const prevDayKey = (key: string) => {
+  const [y, m, d] = key.split("-").map(Number);
+  const p = new Date(Date.UTC(y, m - 1, d - 1));
+  return keyOf(p.getUTCFullYear(), p.getUTCMonth(), p.getUTCDate());
+};
+
 function todayKey() {
   const now = new Date();
   return keyOf(now.getFullYear(), now.getMonth(), now.getDate());
@@ -310,8 +317,25 @@ export default function DateRangeField({
             {cells.map((day, i) => {
               if (day === null) return <span key={`empty-${i}`} />;
               const key = keyOf(view.year, view.month, day);
-              const disabled = key < today || isBooked(key);
+              const booked = isBooked(key);
               const isEdge = key === checkIn || key === checkOut;
+              // A booked day whose PREVIOUS day is free is a "check-out only"
+              // turnover day — the first night of a stay, but its morning is free
+              // for a departing guest. So a new stay can END here (someone checks
+              // out in the morning before this booking checks in the afternoon),
+              // just never START here. That makes it different from a fully-booked
+              // middle night, which is blocked outright — so it isn't crossed out.
+              const checkoutOnly = booked && !isBooked(prevDayKey(key));
+              // While picking check-out, allow a booked day when the whole span up
+              // to it is free (e.g. book 17→18 in the gap between a 14–17 and an
+              // 18–22 stay). The already-picked check-out edge stays enabled too.
+              const turnoverCheckout =
+                active === "checkout" &&
+                checkIn !== null &&
+                key > checkIn &&
+                !spanCrossesBooked(checkIn, key);
+              const disabled =
+                key < today || (booked && !turnoverCheckout && !isEdge);
               const inRange =
                 !isEdge &&
                 checkIn !== null &&
@@ -327,11 +351,21 @@ export default function DateRangeField({
                   onMouseEnter={() => setHover(key)}
                   aria-label={`${day} ${MONTH_NAMES[view.month]} ${view.year}`}
                   aria-pressed={isEdge}
-                  title={isBooked(key) ? "Already booked" : undefined}
+                  title={
+                    !booked
+                      ? undefined
+                      : !disabled
+                        ? "Available as check-out"
+                        : checkoutOnly
+                          ? "Check-out only — a stay can end here, not start here"
+                          : "Already booked"
+                  }
                   className={`mx-auto flex h-9 w-9 items-center justify-center rounded-full text-[14px] transition-colors ${
                     disabled
-                      ? isBooked(key)
-                        ? "cursor-default text-soft/70 line-through"
+                      ? booked
+                        ? checkoutOnly
+                          ? "cursor-default text-ink"
+                          : "cursor-default text-soft/70 line-through"
                         : "cursor-default text-soft/70"
                       : isEdge
                         ? "bg-brand font-semibold text-white"

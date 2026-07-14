@@ -15,7 +15,8 @@ import {
   getVillaReviewDistribution,
 } from "@/lib/queries";
 import { isRoomBased } from "@/lib/rooms";
-import { dayFromNow } from "@/lib/dates";
+import { dayFromNow, nightsBetween } from "@/lib/dates";
+import { quote } from "@/lib/pricing";
 import { loginHref } from "@/lib/returnTo";
 
 export const metadata: Metadata = {
@@ -65,6 +66,26 @@ export default async function ManageBookingPage({
     ? []
     : await getBookedRanges(booking.villaId, booking.id);
 
+  // What this booking's stay currently totals at TODAY's price — the figure the
+  // modify flow reconciles the new total against. Both are computed at the same
+  // (current) price + service prices, so the difference reflects only the guest's
+  // changes (nights/rooms/guests/add-ons), never a price drift. Add-ons are
+  // matched back to the villa's live service list by name for their indices.
+  const originalExtras = booking.extras
+    .map((e) => villa.serviceList.findIndex((s) => s.name === e.name))
+    .filter((i) => i >= 0);
+  const oldNights = Math.max(1, nightsBetween(booking.checkIn, booking.checkOut));
+  const oldExtrasTotal = originalExtras.reduce(
+    (sum, i) => sum + (villa.serviceList[i]?.price ?? 0),
+    0,
+  );
+  const originalTotal =
+    quote(
+      villa.price * (roomBased ? booking.bookingRooms : 1),
+      oldNights,
+      villa.discount,
+    ).total + oldExtrasTotal;
+
   return (
     <>
       <Header />
@@ -90,6 +111,7 @@ export default async function ManageBookingPage({
           rightColumn={
             <ManageBookingCard
               bookingId={booking.id}
+              villaId={villa.id}
               price={villa.price}
               checkIn={booking.checkIn}
               checkOut={booking.checkOut}
@@ -103,6 +125,9 @@ export default async function ManageBookingPage({
               rooms={booking.bookingRooms}
               roomBookings={roomBookings}
               discount={villa.discount}
+              services={villa.serviceList}
+              originalExtras={originalExtras}
+              originalTotal={originalTotal}
               packageStay={
                 booking.package
                   ? { nights: booking.package.nights, price: booking.package.price }

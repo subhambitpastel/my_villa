@@ -11,10 +11,9 @@ const label = "mb-2 block text-[16px] text-brand";
 const input =
   "block w-full rounded-[8px] border border-[#d9d9d9] bg-white px-4 py-2.5 text-[15px] text-ink placeholder:text-[#9d9da6] focus:outline-none focus:border-brand focus:ring-2 focus:ring-brand/20";
 
-// "Prefer not to say" is rendered as the first option (and is the default),
-// so it's not repeated in this list — that made it appear twice before.
-const GENDERS = ["Female", "Male", "Non-binary"];
-const DEFAULT_GENDER = "Prefer not to say";
+// "Prefer not to say" is a normal, selectable option — never an auto-applied
+// default — so the guest actively chooses a gender, matching the host form.
+const GENDERS = ["Female", "Male", "Non-binary", "Prefer not to say"];
 
 type Defaults = {
   fullName: string;
@@ -66,6 +65,7 @@ export default function GuestDetailsForm({
     };
 
     if (!values.fullName) next.fullName = "Full name is required.";
+    if (!values.gender) next.gender = "Please select your gender.";
     if (!values.dob) next.dob = "Date of birth is required.";
     else if (!isAtLeastAge(values.dob)) next.dob = "You must be at least 18 years old.";
     if (!values.address) next.address = "Home address is required.";
@@ -146,19 +146,21 @@ export default function GuestDetailsForm({
           </div>
           <div>
             <label htmlFor="g-gender" className={label}>
-              Gender <span className="text-[#9d9da6]">(optional)</span>
+              Gender
             </label>
             <select
               id="g-gender"
               name="gender"
-              defaultValue={defaults.gender || DEFAULT_GENDER}
+              defaultValue={defaults.gender}
+              aria-invalid={!!errors.gender}
               className={input}
             >
-              <option value={DEFAULT_GENDER}>{DEFAULT_GENDER}</option>
+              <option value="" disabled>Select your gender.</option>
               {GENDERS.map((g) => (
                 <option key={g}>{g}</option>
               ))}
             </select>
+            {errors.gender && <ErrorText>{errors.gender}</ErrorText>}
           </div>
         </div>
 

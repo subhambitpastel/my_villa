@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { rateStayAction } from "@/lib/actions";
 import type { BookingItem } from "@/lib/queries";
+import { bookingReference } from "@/lib/pricing";
+import { isRoomBased } from "@/lib/rooms";
 
 /* eslint-disable @next/next/no-img-element */
 
@@ -141,6 +143,126 @@ function VillaCell({ b }: { b: BookingItem }) {
   );
 }
 
+/** Chevron that points down, rotating up when the row is expanded. */
+function ExpandIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="10"
+      height="7"
+      viewBox="0 0 9 6"
+      fill="none"
+      aria-hidden="true"
+      className={`mt-1 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
+    >
+      <path d="M1 1l3.5 3.5L8 1" stroke="#4a4a4a" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  accent = false,
+}: {
+  label: string;
+  value: string;
+  accent?: boolean;
+}) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[#9a9aa5]">
+        {label}
+      </p>
+      <p
+        className={`mt-1 truncate text-[15px] font-semibold ${
+          accent ? "text-brand" : "text-[#121212]"
+        }`}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+/** The extra details revealed when a booking row is expanded. Shows only what
+ *  the collapsed row doesn't already — the amount charged, reference, exact
+ *  length and any add-on prices — so nothing is repeated. */
+function BookingDetails({ b }: { b: BookingItem }) {
+  const roomBased = isRoomBased(b.kind);
+  return (
+    <div className="border-t border-[#ececf0] bg-[#faf9fc] px-4 py-4">
+      <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
+        <Stat label="Amount paid" value={`$${b.amountPaid.toFixed(2)}`} accent />
+        <Stat label="Reference" value={bookingReference(b.id)} />
+        {b.nights > 0 && (
+          <Stat label="Stay length" value={`${b.nights} night${b.nights === 1 ? "" : "s"}`} />
+        )}
+        {roomBased && (
+          <Stat label="Rooms" value={`${b.rooms} room${b.rooms === 1 ? "" : "s"}`} />
+        )}
+      </div>
+
+      {b.extras.length > 0 && (
+        <div className="mt-4 border-t border-[#ececf0] pt-3">
+          <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[#9a9aa5]">
+            Paid add-ons
+          </p>
+          <ul className="mt-2 max-w-[360px] space-y-1.5">
+            {b.extras.map((e) => (
+              <li key={e.name} className="flex items-center justify-between gap-4 text-[13px]">
+                <span className="truncate text-[#3a3a44]">{e.name}</span>
+                <span className="shrink-0 font-semibold text-[#121212]">
+                  ${e.price.toFixed(2)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A bookings-table row that expands on click to reveal payment & stay details.
+ *  `actions` is the right-hand status/action cell (differs for active vs history). */
+function BookingRow({ b, actions }: { b: BookingItem; actions: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <li className="overflow-hidden rounded-[6px] border border-[#dfdfdf] bg-white">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
+        className={`${GRID} cursor-pointer px-4 py-3 text-[13px] text-[#121212] transition-colors hover:bg-[#faf9ff]`}
+      >
+        <span className="flex min-w-0 items-start gap-2">
+          <ExpandIcon open={open} />
+          <VillaCell b={b} />
+        </span>
+        <span title={`Booked on ${b.bookedAt}`}>{b.posted}</span>
+        <span>{b.dates}</span>
+        <span>{b.guests}</span>
+        {/* Actions (cancel / rate) shouldn't toggle the row. */}
+        <span
+          className="flex flex-col items-end gap-1.5 text-right"
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          {actions}
+        </span>
+      </div>
+      {open && <BookingDetails b={b} />}
+    </li>
+  );
+}
+
 export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -199,7 +321,7 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
 
       <div className={`${GRID} mt-6 px-4 text-[13px] text-[#a1a1a2]`}>
         <span>Name of Villa</span>
-        <span>Posted</span>
+        <span>Booked</span>
         <span>Stay Duration</span>
         <span>No. of Guests</span>
         <span className="text-right">Status</span>
@@ -207,29 +329,29 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
 
       <ul className="mt-3 space-y-3">
         {active.map((b) => (
-          <li
+          <BookingRow
             key={b.id}
-            className={`${GRID} rounded-[6px] border border-[#dfdfdf] bg-white px-4 py-3 text-[13px] text-[#121212]`}
-          >
-            <VillaCell b={b} />
-            <span>{b.posted}</span>
-            <span>{b.dates}</span>
-            <span>{b.guests}</span>
-            <span className="flex flex-col items-end gap-1.5 text-right">
-              <span
-                className="rounded-[3px] bg-[#e9e8fd] px-2 py-0.5 text-[11px] font-semibold text-brand"
-                title="Paid at checkout — your stay is confirmed"
-              >
-                Confirmed
-              </span>
-              <Link
-                href={`/booking?id=${b.id}`}
-                className="text-[13px] text-[#eb5757] underline hover:opacity-80"
-              >
-                Cancel Booking
-              </Link>
-            </span>
-          </li>
+            b={b}
+            actions={
+              <>
+                <span
+                  className="rounded-[3px] bg-[#e9e8fd] px-2 py-0.5 text-[11px] font-semibold text-brand"
+                  title="Paid at checkout — your stay is confirmed"
+                >
+                  Confirmed
+                </span>
+                {/* A booking can only be cancelled while it's still upcoming. */}
+                {b.upcoming && (
+                  <Link
+                    href={`/booking?id=${b.id}`}
+                    className="text-[13px] text-[#eb5757] underline hover:opacity-80"
+                  >
+                    Cancel Booking
+                  </Link>
+                )}
+              </>
+            }
+          />
         ))}
         {active.length === 0 && (
           <li className="rounded-[6px] border border-[#dfdfdf] px-4 py-4 text-center text-[13px] text-[#a1a1a2]">
@@ -247,35 +369,40 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
         />
       </div>
 
-      <ul className="mt-4 space-y-3">
+      <div className={`${GRID} mt-4 px-4 text-[13px] text-[#a1a1a2]`}>
+        <span>Name of Villa</span>
+        <span>Booked</span>
+        <span>Stay Duration</span>
+        <span>No. of Guests</span>
+        <span className="text-right">Status</span>
+      </div>
+
+      <ul className="mt-3 space-y-3">
         {history.map((b) => (
-          <li
+          <BookingRow
             key={b.id}
-            className={`${GRID} rounded-[6px] border border-[#dfdfdf] bg-white px-4 py-3 text-[13px] text-[#121212]`}
-          >
-            <VillaCell b={b} />
-            <span>{b.posted}</span>
-            <span>{b.dates}</span>
-            <span>{b.guests}</span>
-            <span className="flex flex-col items-end gap-1.5 text-right">
-              <span
-                className={`text-[13px] font-semibold ${
-                  b.status === "declined" || b.status === "cancelled"
-                    ? "text-[#eb5757]"
-                    : "text-brand"
-                }`}
-              >
-                {STATUS_LABEL[b.status] ?? b.status}
-              </span>
-              {b.status === "completed" && (
-                <StarRater
-                  rated={b.myRating}
-                  disabled={pending}
-                  onRate={(stars) => openReview(b.id, stars)}
-                />
-              )}
-            </span>
-          </li>
+            b={b}
+            actions={
+              <>
+                <span
+                  className={`text-[13px] font-semibold ${
+                    b.status === "declined" || b.status === "cancelled"
+                      ? "text-[#eb5757]"
+                      : "text-brand"
+                  }`}
+                >
+                  {STATUS_LABEL[b.status] ?? b.status}
+                </span>
+                {b.status === "completed" && (
+                  <StarRater
+                    rated={b.myRating}
+                    disabled={pending}
+                    onRate={(stars) => openReview(b.id, stars)}
+                  />
+                )}
+              </>
+            }
+          />
         ))}
         {history.length === 0 && (
           <li className="rounded-[6px] border border-[#dfdfdf] px-4 py-4 text-center text-[13px] text-[#a1a1a2]">
@@ -336,7 +463,7 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
                     >
                       {STATUS_LABEL[b.status] ?? b.status}
                     </span>
-                    {b.status === "accepted" && (
+                    {b.status === "accepted" && b.upcoming && (
                       <Link
                         href={`/booking?id=${b.id}`}
                         className="text-[13px] text-[#eb5757] underline hover:opacity-80"

@@ -124,10 +124,10 @@ export default function BookingCard({
   const unitPrice = roomBased ? price * rooms : price;
   const q = quote(unitPrice, nights, discount);
 
-  // Extra services chosen in the Reserve dialog (indices into `services`). Only
-  // paid services are offered — free ones come with the stay, so there's nothing
-  // to opt into. Original indices are kept so checkout resolves prices from the
-  // villa server-side.
+  // Extra services the guest ticks inline on this card (indices into `services`).
+  // Only paid services are offered — free ones come with the stay, so there's
+  // nothing to opt into. Original indices are kept so checkout resolves prices
+  // from the villa server-side.
   const paidServices = services
     .map((s, i) => ({ service: s, index: i }))
     .filter(({ service }) => service.price > 0);
@@ -140,18 +140,6 @@ export default function BookingCard({
   const chosenTotal = chosen.reduce((sum, i) => sum + (services[i]?.price ?? 0), 0);
   const toggleService = (i: number) =>
     setChosen((cur) => (cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i]));
-
-  // Paid services the guest hasn't already ticked on the card — offered one more
-  // time in a popup on Reserve. When nothing's left unticked, the popup is
-  // skipped entirely. `popupChosen` holds the extras added from the popup only.
-  const unselectedServices = paidServices.filter(
-    ({ index }) => !chosen.includes(index),
-  );
-  const [showServices, setShowServices] = useState(false);
-  const [popupChosen, setPopupChosen] = useState<number[]>([]);
-  const togglePopup = (i: number) =>
-    setPopupChosen((cur) => (cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i]));
-  const popupTotal = popupChosen.reduce((sum, i) => sum + (services[i]?.price ?? 0), 0);
 
   const paymentUrl = `/payment?villa=${villaId}&in=${checkIn}&out=${checkOut}&guests=${guests}${
     roomBased ? `&rooms=${rooms}` : ""
@@ -173,14 +161,7 @@ export default function BookingCard({
       setShowUnavailable(true);
       return;
     }
-    // Offer any still-unselected paid services one last time in a popup; if the
-    // guest already ticked them all inline, there's nothing to add — go straight
-    // to checkout.
-    if (unselectedServices.length > 0) {
-      setPopupChosen([]);
-      setShowServices(true);
-      return;
-    }
+    // Extra services are picked inline on this card, so go straight to checkout.
     goToPayment(chosen);
   }
 
@@ -396,65 +377,6 @@ export default function BookingCard({
         <p className="mt-4 text-center text-[13px] text-[#7a7a85]">
           Stay 7+ nights for 15% off, 28+ nights for 30% off — applied automatically.
         </p>
-      )}
-
-      {showServices && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Add extra services"
-          onClick={(e) => e.target === e.currentTarget && setShowServices(false)}
-        >
-          <div className="w-full max-w-[460px] rounded-[12px] bg-white p-6 shadow-[0px_20px_60px_0px_rgba(0,0,0,0.25)]">
-            <h3 className="text-[18px] font-semibold text-[#121212]">
-              Add more extra services
-            </h3>
-            <p className="mt-1 text-[13px] text-[#7a7a85]">
-              Optional paid add-ons you haven&apos;t picked yet — add any before
-              you continue to checkout.
-            </p>
-            <ul className="mt-4 max-h-[300px] space-y-3 overflow-y-auto">
-              {unselectedServices.map(({ service: s, index: i }) => (
-                <li key={s.name}>
-                  <label className="flex cursor-pointer items-center gap-2.5 text-[14px] text-[#121212]">
-                    <input
-                      type="checkbox"
-                      checked={popupChosen.includes(i)}
-                      onChange={() => togglePopup(i)}
-                      className="checkbox-brand"
-                    />
-                    <span className="min-w-0 flex-1">{s.name}</span>
-                    <span className="shrink-0 text-[13px] font-semibold text-brand">
-                      +${s.price.toFixed(2)}
-                    </span>
-                  </label>
-                </li>
-              ))}
-            </ul>
-            <hr className="mt-4 border-t border-[#e3e3e8]" />
-            <div className="mt-3 flex items-center justify-between text-[15px] font-semibold text-[#121212]">
-              <span>Total before taxes</span>
-              <span>${(q.total + chosenTotal + popupTotal).toFixed(2)}</span>
-            </div>
-            <div className="mt-5 flex items-center justify-end gap-4">
-              <button
-                type="button"
-                onClick={() => goToPayment(chosen)}
-                className="text-[14px] text-[#7a7a85] underline"
-              >
-                Skip
-              </button>
-              <button
-                type="button"
-                onClick={() => goToPayment([...chosen, ...popupChosen])}
-                className="rounded-[8px] bg-brand px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-brand-dark"
-              >
-                Continue
-              </button>
-            </div>
-          </div>
-        </div>
       )}
     </aside>
   );

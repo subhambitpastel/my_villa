@@ -10,6 +10,7 @@ import {
   getPackageById,
   isVillaAvailable,
   getOwnBookingForRange,
+  getBookingForManage,
   parseServiceList,
   type PackageForBooking,
 } from "@/lib/queries";
@@ -36,6 +37,7 @@ function BookingSummary({
   rooms = 1,
   roomBased = false,
   pkg = null,
+  modify,
 }: {
   villa: VillaRow;
   nights: number;
@@ -46,6 +48,9 @@ function BookingSummary({
   roomBased?: boolean;
   /** Set for a package booking — one all-inclusive price, no nightly breakdown. */
   pkg?: PackageForBooking | null;
+  /** Set when this is a booking modification: shows the amount already paid and
+   *  the balance due now (the top-up) instead of a single total. */
+  modify?: { alreadyPaid: number; balanceDue: number };
 }) {
   const q = quote(villa.price * (roomBased ? rooms : 1), nights, villa.discount);
   const extrasTotal = extras.reduce((sum, s) => sum + s.price, 0);
@@ -135,9 +140,21 @@ function BookingSummary({
             </div>
           ))}
           <div className="flex items-center justify-between pt-8 font-semibold">
-            <dt>Total (USD)</dt>
+            <dt>{modify ? "New total (USD)" : "Total (USD)"}</dt>
             <dd>${(q.total + extrasTotal).toFixed(2)}</dd>
           </div>
+          {modify && (
+            <>
+              <div className="flex items-center justify-between text-[#4a4a4a]">
+                <dt>Already paid</dt>
+                <dd>−${modify.alreadyPaid.toFixed(2)}</dd>
+              </div>
+              <div className="flex items-center justify-between font-semibold text-brand">
+                <dt>Balance due now</dt>
+                <dd>${modify.balanceDue.toFixed(2)}</dd>
+              </div>
+            </>
+          )}
         </dl>
       )}
     </aside>
@@ -155,6 +172,8 @@ export default async function PaymentPage({
     rooms?: string;
     svc?: string;
     pkg?: string;
+    /** Set when this checkout is the top-up for modifying an existing booking. */
+    modify?: string;
   }>;
 }) {
   const params = await searchParams;
@@ -164,7 +183,7 @@ export default async function PaymentPage({
   const user = await getCurrentUser();
   if (!user) {
     const qs = new URLSearchParams();
-    for (const key of ["villa", "in", "out", "guests", "rooms", "svc", "pkg"] as const) {
+    for (const key of ["villa", "in", "out", "guests", "rooms", "svc", "pkg", "modify"] as const) {
       if (params[key]) qs.set(key, params[key]!);
     }
     redirect(loginHref(`/payment${qs.size ? "?" + qs.toString() : ""}`));
@@ -252,7 +271,59 @@ export default async function PaymentPage({
   }
 
   const nights = nightsBetween(checkIn, checkOut);
-  const available = await isVillaAvailable(villa.id, checkIn, checkOut, rooms);
+
+  // Modify mode: the guest edited an existing nightly booking and this checkout
+  // is the top-up for a HIGHER total. Confirm the booking is theirs, still active
+  // and upcoming, then work out the balance due — the new total minus what
+  // they've already paid, both priced at today's rate so the difference reflects
+  // only their changes. Non-increases never route here (the manage card applies
+  // those directly), so a ≤0 balance bounces back to the manage page.
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const modifyId = Number(params.modify);
+  const isModify = Number.isInteger(modifyId) && modifyId > 0;
+  let alreadyPaid = 0;
+  let balanceDue = 0;
+  if (isModify) {
+    const today = dayFromNow(0);
+    const mb = await getBookingForManage(modifyId, user.id);
+    if (
+      !mb ||
+      mb.villaId !== villa.id ||
+      mb.status !== "accepted" ||
+      mb.checkOut < today ||
+      mb.package !== null
+    ) {
+      redirect("/profile/bookings");
+    }
+    const villaServices = parseServiceList(villa.services);
+    const oldExtrasTotal = mb.extras
+      .map((e) => villaServices.findIndex((s) => s.name === e.name))
+      .filter((i) => i >= 0)
+      .reduce((sum, i) => sum + (villaServices[i]?.price ?? 0), 0);
+    alreadyPaid = round2(
+      quote(
+        villa.price * (roomBased ? mb.bookingRooms : 1),
+        Math.max(1, nightsBetween(mb.checkIn, mb.checkOut)),
+        villa.discount,
+      ).total + oldExtrasTotal,
+    );
+    const newTotal = round2(
+      quote(villa.price * (roomBased ? rooms : 1), nights, villa.discount).total +
+        extras.reduce((sum, e) => sum + e.price, 0),
+    );
+    balanceDue = round2(newTotal - alreadyPaid);
+    if (balanceDue <= 0) redirect(`/booking?id=${modifyId}`);
+  }
+
+  // The guest's own booking is excluded when modifying so its current dates never
+  // read as a clash against the (possibly overlapping) new range.
+  const available = await isVillaAvailable(
+    villa.id,
+    checkIn,
+    checkOut,
+    rooms,
+    isModify ? modifyId : 0,
+  );
   // If the dates are taken, is it the guest's OWN booking? (e.g. they just paid
   // and refreshed, or came back to checkout.) Then reassure them instead of
   // telling them the villa was snatched away.
@@ -278,7 +349,7 @@ export default async function PaymentPage({
               Confirm Payment
             </h1>
             <Link
-              href={`/place?id=${villa.id}`}
+              href={isModify ? `/booking?id=${modifyId}` : `/place?id=${villa.id}`}
               className="text-[30px] leading-[1.35] text-black underline"
             >
               Cancel
@@ -310,6 +381,9 @@ export default async function PaymentPage({
                     roomBased={roomBased}
                     services={svcIndices}
                     packageId={pkg ? pkg.id : undefined}
+                    modify={
+                      isModify ? { bookingId: modifyId, amountDue: balanceDue } : undefined
+                    }
                     profile={{
                       email: user.email,
                       phoneCode: dialValueFor(user.phone_code, user.country),
@@ -392,6 +466,7 @@ export default async function PaymentPage({
               rooms={rooms}
               roomBased={roomBased}
               pkg={pkg}
+              modify={isModify ? { alreadyPaid, balanceDue } : undefined}
             />
           </div>
         </div>

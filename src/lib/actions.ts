@@ -893,13 +893,17 @@ export async function cancelBookingAction(
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in.");
 
+  // A booking can't be cancelled once its start date has passed — cancellation
+  // stays open only up to and including the check-in day.
+  const today = new Date().toISOString().slice(0, 10);
   const res = await getDb()
     .prepare(
       `UPDATE bookings SET status = 'cancelled'
-       WHERE id = ? AND guest_id = ? AND status = 'accepted'`,
+       WHERE id = ? AND guest_id = ? AND status = 'accepted' AND check_in >= ?`,
     )
-    .run(bookingId, user.id);
-  if (res.changes === 0) return fail("Booking not found.");
+    .run(bookingId, user.id, today);
+  if (res.changes === 0)
+    return fail("This booking can no longer be cancelled.");
 
   revalidatePath("/profile/bookings");
   revalidatePath("/profile/requests");
@@ -1031,6 +1035,133 @@ export async function updateBookingAction(
         checkOut,
         formatRange(input.checkIn, checkOut),
         effGuests,
+        bookingId,
+        user.id,
+      );
+      return true;
+    });
+  } catch {
+    return fail("Something went wrong updating your booking. Please try again.");
+  }
+  if (!ok)
+    return fail("Those dates are already booked. Please choose different dates.");
+
+  revalidatePath("/profile/bookings");
+  revalidatePath("/place");
+  revalidatePath("/search");
+  revalidatePath("/");
+  return { ok: true };
+}
+
+/**
+ * Fully modify a nightly booking — new dates (any length), rooms, guests, and
+ * paid add-ons — re-checking availability with this booking excluded so its own
+ * dates never self-clash. The price difference is reconciled by the caller (the
+ * guest pays a top-up on the payment page when it's higher, or is refunded when
+ * it's lower); this action only rewrites the reservation once that's settled.
+ * Packages are fixed length/occupancy/price and can't be modified here.
+ */
+export async function modifyBookingAction(
+  bookingId: number,
+  input: {
+    checkIn: string;
+    checkOut: string;
+    guests: number;
+    rooms: number;
+    serviceIdx: number[];
+  },
+): Promise<ActionResult> {
+  const user = await getCurrentUser();
+  if (!user) return fail("You must be signed in.");
+
+  if (!parseDay(input.checkIn) || !parseDay(input.checkOut))
+    return fail("Please pick valid check-in and check-out dates.");
+  if (nightsBetween(input.checkIn, input.checkOut) < 1)
+    return fail("Check-out must be after check-in.");
+  if (input.checkIn < new Date().toISOString().slice(0, 10))
+    return fail("Check-in cannot be in the past.");
+
+  const db = getDb();
+  const booking = (await db
+    .prepare(
+      `SELECT b.id, b.villa_id, b.status, b.package,
+              v.kind, v.max_guests, v.people_per_room, v.rooms AS total_rooms, v.services
+       FROM bookings b JOIN villas v ON v.id = b.villa_id
+       WHERE b.id = ? AND b.guest_id = ?`,
+    )
+    .get(bookingId, user.id)) as
+    | {
+        id: number;
+        villa_id: number;
+        status: string;
+        package: string;
+        kind: string;
+        max_guests: number;
+        people_per_room: number;
+        total_rooms: number;
+        services: string;
+      }
+    | undefined;
+  if (!booking) return fail("Booking not found.");
+  if (booking.status !== "accepted")
+    return fail("Only active bookings can be changed.");
+  // Packages fix their length, occupancy and price, so there's nothing to
+  // reconcile — they use the start-date-only manage flow instead.
+  if (parsePackage(booking.package))
+    return fail("Package stays can't be modified here.");
+
+  const roomBased = isRoomBased(booking.kind);
+  const roomsHeld = roomBased ? Math.max(1, Math.trunc(input.rooms) || 1) : 1;
+  if (roomBased && roomsHeld > Math.max(1, booking.total_rooms))
+    return fail("That's more rooms than this property has.");
+
+  const guests = Math.trunc(input.guests);
+  if (!(guests >= 1)) return fail("Guests must be at least 1.");
+  const guestCap = roomBased
+    ? roomsHeld * Math.max(1, booking.people_per_room)
+    : Math.max(1, booking.max_guests);
+  if (guests > guestCap)
+    return fail(
+      `This selection sleeps up to ${guestCap} guest${guestCap === 1 ? "" : "s"}.`,
+    );
+
+  // Paid add-ons resolved server-side from the villa's services by index, with
+  // prices read from the DB (never trusted from the client).
+  const villaServices = parseServiceList(booking.services);
+  const extras = [
+    ...new Set(
+      (input.serviceIdx ?? []).filter(
+        (i) => Number.isInteger(i) && i >= 0 && i < villaServices.length,
+      ),
+    ),
+  ]
+    .map((i) => villaServices[i])
+    .filter((s) => s.price > 0);
+
+  let ok = false;
+  try {
+    ok = await tx(async () => {
+      // Exclude THIS booking so its own current dates never count as a clash.
+      if (
+        !(await isVillaAvailable(
+          booking.villa_id,
+          input.checkIn,
+          input.checkOut,
+          roomsHeld,
+          booking.id,
+        ))
+      )
+        return false;
+      await db.prepare(
+        `UPDATE bookings SET check_in = ?, check_out = ?, dates = ?, guests = ?, rooms = ?, extras = ?
+         WHERE id = ? AND guest_id = ? AND status = 'accepted'`,
+      ).run(
+        input.checkIn,
+        input.checkOut,
+        formatRange(input.checkIn, input.checkOut),
+        guests,
+        roomsHeld,
+        JSON.stringify(extras),
         bookingId,
         user.id,
       );

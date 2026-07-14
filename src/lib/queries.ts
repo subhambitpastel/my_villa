@@ -1,8 +1,10 @@
 // Read-side queries mapping DB rows to the display shapes the UI renders.
 import { getDb, timeAgo, type BookingStatus, type VillaRow } from "./db";
 import { FACILITY_CHIPS, type VillaService } from "@/components/host/draft";
-import { roomCapacity, roomsFreeForRange, type RoomBooking } from "./rooms";
+import { isRoomBased, roomCapacity, roomsFreeForRange, type RoomBooking } from "./rooms";
 import { parsePackageType, type PackageType } from "./packageTypes";
+import { quote } from "./pricing";
+import { nightsBetween } from "./dates";
 
 export type PropertyItem = {
   id: number;
@@ -49,10 +51,22 @@ export type BookingItem = {
    *  label on each booking. */
   kind: string;
   posted: string;
+  /** Absolute date + time the booking was made (paid), e.g. "30 Jul 2026, 14:15". */
+  bookedAt: string;
   dates: string;
+  /** Nights in the stay (0 on legacy rows without stored dates). */
+  nights: number;
+  /** Rooms this reservation holds (1 for whole-villa stays). */
+  rooms: number;
   guests: string;
   status: BookingStatus;
+  /** True while the stay hasn't started (check-in today or later). A booking can
+   *  only be cancelled while it's still upcoming. */
+  upcoming: boolean;
   createdAt: string;
+  /** Total charged at checkout — the stay (nightly quote or package price) plus
+   *  any paid add-ons; recomputed the same way the payment page did. */
+  amountPaid: number;
   /** Stars the guest gave this stay, or null while unrated. */
   myRating: number | null;
   /** Paid add-ons the guest chose at checkout (free ones aren't stored). */
@@ -615,9 +629,23 @@ function villaSearchWhere(
   const params: (string | number)[] = [];
 
   if (filters.q) {
-    where.push("(name ILIKE ? OR city ILIKE ? OR address ILIKE ?)");
-    const like = `%${filters.q}%`;
-    params.push(like, like, like);
+    const q = filters.q.trim();
+    const comma = q.indexOf(",");
+    const placePart = comma >= 0 ? q.slice(comma + 1).trim() : "";
+    if (comma > 0 && placePart) {
+      // "Name, Place" (e.g. "The Bund, Shanghai") — match the property name AND
+      // the place, so the two parts narrow to one listing instead of matching
+      // the whole string against a single column (which nothing contains).
+      where.push("(name ILIKE ?) AND (city ILIKE ? OR address ILIKE ?)");
+      const namePart = `%${q.slice(0, comma).trim()}%`;
+      const place = `%${placePart}%`;
+      params.push(namePart, place, place);
+    } else {
+      // Plain query — match anywhere across name, city or address.
+      where.push("(name ILIKE ? OR city ILIKE ? OR address ILIKE ?)");
+      const like = `%${q}%`;
+      params.push(like, like, like);
+    }
   }
   if (filters.min != null) {
     where.push("price >= ?");
@@ -808,6 +836,8 @@ export type ManageBooking = {
   peoplePerRoom: number;
   /** Rooms this reservation holds (1 for whole-villa stays). */
   bookingRooms: number;
+  /** Paid add-ons chosen at booking, as a {name, price} snapshot. */
+  extras: VillaService[];
   /** Set when this booking is a package — its length/occupancy are fixed, so the
    *  manage view lets the guest move the start date but not change duration. */
   package: PackageSnapshot | null;
@@ -822,7 +852,7 @@ export async function getBookingForManage(
   const row = (await getDb()
     .prepare(
       `SELECT b.id, b.villa_id, b.check_in, b.check_out, b.guests, b.rooms AS booking_rooms,
-              b.status, b.package,
+              b.status, b.package, b.extras,
               v.name AS villa_name, v.city AS villa_city, v.image AS villa_image,
               v.price, v.max_guests, v.rooms, v.bathrooms, v.kind, v.people_per_room
        FROM bookings b JOIN villas v ON v.id = b.villa_id
@@ -838,6 +868,7 @@ export async function getBookingForManage(
         booking_rooms: number;
         status: BookingStatus;
         package: string;
+        extras: string;
         villa_name: string;
         villa_city: string;
         villa_image: string;
@@ -867,6 +898,7 @@ export async function getBookingForManage(
     kind: row.kind,
     peoplePerRoom: row.people_per_room,
     bookingRooms: Math.max(1, row.booking_rooms),
+    extras: parseServiceList(row.extras),
     package: parsePackage(row.package),
   };
 }
@@ -990,12 +1022,29 @@ export async function getFavoriteVillaIds(userId: number): Promise<Set<number>> 
 
 const guestsLabel = (n: number) => `${n} ${n === 1 ? "guest" : "guests"}`;
 
+/** Stored UTC "YYYY-MM-DD HH:MM:SS" → "30 Jul 2026, 14:15" (kept in UTC so the
+ *  server-rendered string is deterministic and never mismatches on hydration). */
+function formatBookedAt(utc: string): string {
+  const d = new Date(utc.replace(" ", "T") + "Z");
+  if (Number.isNaN(d.getTime())) return utc;
+  return d.toLocaleString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "UTC",
+  });
+}
+
 export async function getBookingsForGuest(guestId: number): Promise<BookingItem[]> {
   const rows = (await getDb()
     .prepare(
-      `SELECT b.id, b.dates, b.check_out, b.guests, b.status, b.created_at, b.extras,
-              b.package,
+      `SELECT b.id, b.dates, b.check_in, b.check_out, b.guests, b.rooms, b.status,
+              b.created_at, b.extras, b.package,
               v.name AS villa_name, v.city AS villa_city, v.kind AS villa_kind,
+              v.price AS villa_price, v.discount AS villa_discount,
               rv.stars AS my_rating
        FROM bookings b
        JOIN villas v ON v.id = b.villa_id
@@ -1006,8 +1055,10 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
     .all(guestId)) as Array<{
     id: number;
     dates: string;
+    check_in: string;
     check_out: string;
     guests: number;
+    rooms: number;
     status: BookingStatus;
     created_at: string;
     extras: string;
@@ -1015,26 +1066,49 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
     villa_name: string;
     villa_city: string;
     villa_kind: string;
+    villa_price: number;
+    villa_discount: number;
     my_rating: number | null;
   }>;
   const today = new Date().toISOString().slice(0, 10);
-  return rows.map((r) => ({
-    id: r.id,
-    villa: `${r.villa_name}, ${r.villa_city}`,
-    kind: r.villa_kind,
-    posted: timeAgo(r.created_at),
-    dates: r.dates,
-    guests: guestsLabel(r.guests),
-    // Accepted stays whose checkout has passed read as completed.
-    status:
-      r.status === "accepted" && r.check_out !== "" && r.check_out < today
-        ? "completed"
-        : r.status,
-    createdAt: r.created_at,
-    myRating: r.my_rating,
-    extras: parseServiceList(r.extras).filter((s) => s.price > 0),
-    package: parsePackage(r.package),
-  }));
+  return rows.map((r) => {
+    const roomBased = isRoomBased(r.villa_kind);
+    const rooms = Math.max(1, r.rooms);
+    const nights =
+      r.check_in && r.check_out ? nightsBetween(r.check_in, r.check_out) : 0;
+    const pkg = parsePackage(r.package);
+    const extras = parseServiceList(r.extras).filter((s) => s.price > 0);
+    const extrasTotal = extras.reduce((sum, s) => sum + s.price, 0);
+    // Recompute the checkout total: a package's all-inclusive price, or the
+    // nightly quote (price × rooms × nights, less discount, plus fee) — then any
+    // paid add-ons. Mirrors what the payment page charged.
+    const amountPaid = pkg
+      ? pkg.price
+      : quote(r.villa_price * (roomBased ? rooms : 1), nights, r.villa_discount)
+          .total + extrasTotal;
+    return {
+      id: r.id,
+      villa: `${r.villa_name}, ${r.villa_city}`,
+      kind: r.villa_kind,
+      posted: timeAgo(r.created_at),
+      bookedAt: formatBookedAt(r.created_at),
+      dates: r.dates,
+      nights,
+      rooms,
+      guests: guestsLabel(r.guests),
+      // Accepted stays whose checkout has passed read as completed.
+      status:
+        r.status === "accepted" && r.check_out !== "" && r.check_out < today
+          ? "completed"
+          : r.status,
+      upcoming: r.check_in !== "" && r.check_in >= today,
+      createdAt: r.created_at,
+      amountPaid,
+      myRating: r.my_rating,
+      extras,
+      package: pkg,
+    };
+  });
 }
 
 export type ReviewItem = {

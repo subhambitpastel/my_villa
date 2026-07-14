@@ -23,9 +23,19 @@ export const metadata: Metadata = {
 export default async function BookingConfirmedPage({
   searchParams,
 }: {
-  searchParams: Promise<{ ref?: string }>;
+  searchParams: Promise<{
+    ref?: string;
+    /** "modified" when this confirms a booking change (vs a fresh booking). */
+    mode?: string;
+    /** Amount refunded (change lowered the total) or paid (change raised it). */
+    refund?: string;
+    paid?: string;
+  }>;
 }) {
-  const { ref } = await searchParams;
+  const { ref, mode, refund, paid } = await searchParams;
+  const isModified = mode === "modified";
+  const refundAmt = Math.max(0, Number(refund) || 0);
+  const paidAmt = Math.max(0, Number(paid) || 0);
 
   const user = await getCurrentUser();
   if (!user) redirect(loginHref(`/booking/confirmed${ref ? `?ref=${ref}` : ""}`));
@@ -54,12 +64,25 @@ export default async function BookingConfirmedPage({
               </svg>
             </span>
             <h1 className="mt-6 text-[30px] font-semibold leading-[1.3] text-[#121212]">
-              Booking confirmed
+              {isModified ? "Booking updated" : "Booking confirmed"}
             </h1>
             <p className="mt-2 text-[16px] leading-[1.5] text-[#4a4a4a]">
-              Your stay is booked and the host has been notified.
+              {isModified
+                ? "Your booking has been updated and the host has been notified."
+                : "Your stay is booked and the host has been notified."}
             </p>
-            <p className="mt-1 text-[15px] text-[#4a4a4a]">
+            {isModified && refundAmt > 0 && (
+              <p className="mt-3 inline-block rounded-[8px] bg-emerald-50 px-4 py-2 text-[15px] font-medium text-emerald-700">
+                We&apos;ll refund ${refundAmt.toFixed(2)} to your original payment
+                method.
+              </p>
+            )}
+            {isModified && paidAmt > 0 && (
+              <p className="mt-3 inline-block rounded-[8px] bg-brand/10 px-4 py-2 text-[15px] font-medium text-brand-dark">
+                You paid an additional ${paidAmt.toFixed(2)} for the changes.
+              </p>
+            )}
+            <p className="mt-3 text-[15px] text-[#4a4a4a]">
               Reference{" "}
               <span className="font-semibold text-[#121212]">
                 {bookingReference(booking.id)}
@@ -99,12 +122,6 @@ export default async function BookingConfirmedPage({
                 className="rounded-[8px] bg-brand px-6 py-2.5 text-[14px] font-semibold text-white transition-colors hover:bg-brand-dark"
               >
                 View in My Bookings
-              </Link>
-              <Link
-                href={`/place?id=${booking.villaId}`}
-                className="rounded-[8px] border border-brand px-6 py-2.5 text-[14px] font-semibold text-brand transition-colors hover:bg-brand/5"
-              >
-                View property
               </Link>
               <Link
                 href="/"

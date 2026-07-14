@@ -13,8 +13,9 @@ import {
   postalIsNumeric,
   capPostalCode,
 } from "@/lib/countries";
-import { createBookingAction } from "@/lib/actions";
+import { createBookingAction, modifyBookingAction } from "@/lib/actions";
 import { addDays, formatDay, formatMonthDay, nightsBetween } from "@/lib/dates";
+import { bookingReference } from "@/lib/pricing";
 
 /* eslint-disable @next/next/no-img-element */
 
@@ -110,6 +111,7 @@ export default function PaymentForm({
   roomBased = false,
   services = [],
   packageId,
+  modify,
   profile,
 }: {
   villaId: number;
@@ -124,6 +126,9 @@ export default function PaymentForm({
   services?: number[];
   /** Set when booking a fixed package instead of a nightly stay. */
   packageId?: number;
+  /** Set when this checkout is the top-up for modifying an existing nightly
+   *  booking: submitting applies the change and charges only `amountDue`. */
+  modify?: { bookingId: number; amountDue: number };
   /** The signed-in guest's saved contact details. Email + phone prefill the
    *  Additional Information; the billing country is prefilled from their saved
    *  country (it drives the ZIP-code format) while the street address is left
@@ -166,11 +171,13 @@ export default function PaymentForm({
   // to the package page (start-date-only), never the villa's free date picker
   // where they could shorten a 7-night package. A nightly stay carries its
   // dates, guests, rooms and chosen services back so the card reopens as it was.
-  const editHref = isPackage
-    ? `/package?id=${packageId}&in=${checkIn}`
-    : `/place?id=${villaId}&in=${checkIn}&out=${checkOut}&guests=${guests}` +
-      `&rooms=${rooms}` +
-      (services.length > 0 ? `&svc=${services.join(",")}` : "");
+  const editHref = modify
+    ? `/booking?id=${modify.bookingId}`
+    : isPackage
+      ? `/package?id=${packageId}&in=${checkIn}`
+      : `/place?id=${villaId}&in=${checkIn}&out=${checkOut}&guests=${guests}` +
+        `&rooms=${rooms}` +
+        (services.length > 0 ? `&svc=${services.join(",")}` : "");
   // Cancellation windows, both at 12:00 PM: a full free cancellation up to 2
   // days before check-in, then a partial refund (minus first night + service
   // fee) up to 1 day before. Dates are derived from the actual check-in.
@@ -229,6 +236,29 @@ export default function PaymentForm({
 
     setSubmitting(true);
     // Card details stay in the browser — only the booking itself is stored.
+
+    // Modify mode: apply the edit to the existing booking (this checkout was the
+    // top-up for the higher total) instead of creating a new one.
+    if (modify) {
+      const result = await modifyBookingAction(modify.bookingId, {
+        checkIn,
+        checkOut,
+        guests,
+        rooms,
+        serviceIdx: services,
+      });
+      if (!result.ok) {
+        setSubmitting(false);
+        setFormError(result.error);
+        return;
+      }
+      router.push(
+        `/booking/confirmed?ref=${encodeURIComponent(bookingReference(modify.bookingId))}` +
+          `&mode=modified&paid=${modify.amountDue.toFixed(2)}`,
+      );
+      return;
+    }
+
     const result = await createBookingAction({
       villaId,
       checkIn,
@@ -292,7 +322,6 @@ export default function PaymentForm({
             <h3 className="text-[28px] font-medium leading-[1.3] text-black">Guests</h3>
             <p className="mt-[14px] flex items-center gap-[14px] text-[20px] leading-[1.3] text-[#121212]">
               {guests} guest{guests === 1 ? "" : "s"}
-              <span className="text-[16px] text-[#4a4a4a]">({guests} Adults)</span>
             </p>
           </div>
           {/* Package occupancy is fixed; only nightly stays let guests change it. */}
@@ -601,7 +630,11 @@ export default function PaymentForm({
         disabled={submitting}
         className="mt-[39px] flex h-16 w-[282px] items-center justify-center rounded-[10px] bg-brand px-[10px] py-[15px] text-[20px] font-medium leading-[1.2] text-white transition-colors hover:bg-brand-dark disabled:cursor-not-allowed disabled:opacity-60"
       >
-        {submitting ? "Processing…" : "Confirm and Pay"}
+        {submitting
+          ? "Processing…"
+          : modify
+            ? `Pay $${modify.amountDue.toFixed(2)}`
+            : "Confirm and Pay"}
       </button>
     </form>
   );
