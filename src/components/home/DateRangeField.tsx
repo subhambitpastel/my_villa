@@ -325,7 +325,12 @@ export default function DateRangeField({
               // out in the morning before this booking checks in the afternoon),
               // just never START here. That makes it different from a fully-booked
               // middle night, which is blocked outright — so it isn't crossed out.
-              const checkoutOnly = booked && !isBooked(prevDayKey(key));
+              // This only holds for FUTURE turnover days, though: checking out on a
+              // day needs a check-in before it, and you can't book a past check-in —
+              // so a booked TODAY can be neither started nor ended, and is simply
+              // unavailable (crossed out) like any fully-booked night.
+              const checkoutOnly =
+                booked && !isBooked(prevDayKey(key)) && key > today;
               // While picking check-out, allow a booked day when the whole span up
               // to it is free (e.g. book 17→18 in the gap between a 14–17 and an
               // 18–22 stay). The already-picked check-out edge stays enabled too.

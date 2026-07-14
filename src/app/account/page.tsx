@@ -87,18 +87,19 @@ export default async function AccountPage() {
                 </div>
               </div>
               <div className="mt-[30px] flex flex-wrap items-center gap-10 text-[20px] leading-[1.3] text-[#121212]">
-                <span className="flex items-center gap-[11px]">
-                  <img src="/icons/place/star-vector.svg" alt="" width={27} height={26} className="h-[26px] w-[27px]" />
-                  {reviewSummary.count} Review{reviewSummary.count === 1 ? "" : "s"}
-                </span>
+                {/* Review count is a host stat — guests (no villas) don't see it. */}
+                {isHost && (
+                  <span className="flex items-center gap-[11px]">
+                    <img src="/icons/place/star-vector.svg" alt="" width={27} height={26} className="h-[26px] w-[27px]" />
+                    {reviewSummary.count} Review{reviewSummary.count === 1 ? "" : "s"}
+                  </span>
+                )}
                 <span className="flex items-center gap-[7px]">
                   <img src="/icons/place/verified.svg" alt="" width={32} height={32} className="h-8 w-8" />
                   Identity Verified
                 </span>
               </div>
               <div className="mt-[25px] text-[20px] leading-[1.5] text-[#121212]">
-                <p>Response rate: 100%</p>
-                <p>Response time: within an hour</p>
                 <p>Email: {user.email}</p>
                 {(user.phone_code || user.phone_number) && (
                   <p>
@@ -158,7 +159,8 @@ export default async function AccountPage() {
             )}
           </div>
 
-          {/* Reviews */}
+          {/* Reviews — hosts only; a guest with no villas has no reviews to show. */}
+          {isHost && (
           <section className="mt-[70px] flex flex-col gap-10 lg:flex-row lg:justify-between">
             <div className="max-w-[839px]">
               <h2 className="text-[24px] font-semibold leading-[1.3] text-brand">Reviews</h2>
@@ -226,6 +228,7 @@ export default async function AccountPage() {
               )}
             </div>
           </section>
+          )}
         </div>
       </main>
       <Footer />

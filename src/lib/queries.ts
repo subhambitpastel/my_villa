@@ -60,8 +60,8 @@ export type BookingItem = {
   rooms: number;
   guests: string;
   status: BookingStatus;
-  /** True while the stay hasn't started (check-in today or later). A booking can
-   *  only be cancelled while it's still upcoming. */
+  /** True while the whole stay is still ahead (check-in strictly after today).
+   *  A booking can only be cancelled before its start date. */
   upcoming: boolean;
   createdAt: string;
   /** Total charged at checkout — the stay (nightly quote or package price) plus
@@ -1101,7 +1101,9 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
         r.status === "accepted" && r.check_out !== "" && r.check_out < today
           ? "completed"
           : r.status,
-      upcoming: r.check_in !== "" && r.check_in >= today,
+      // Strictly after today — a stay starting today has already begun, so it's
+      // no longer cancellable (cancellation is only allowed before the start date).
+      upcoming: r.check_in !== "" && r.check_in > today,
       createdAt: r.created_at,
       amountPaid,
       myRating: r.my_rating,

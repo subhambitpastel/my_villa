@@ -14,7 +14,7 @@ import {
   capPostalCode,
 } from "@/lib/countries";
 import { createBookingAction, modifyBookingAction } from "@/lib/actions";
-import { addDays, formatDay, formatMonthDay, nightsBetween } from "@/lib/dates";
+import { formatDay, nightsBetween } from "@/lib/dates";
 import { bookingReference } from "@/lib/pricing";
 
 /* eslint-disable @next/next/no-img-element */
@@ -178,11 +178,6 @@ export default function PaymentForm({
       : `/place?id=${villaId}&in=${checkIn}&out=${checkOut}&guests=${guests}` +
         `&rooms=${rooms}` +
         (services.length > 0 ? `&svc=${services.join(",")}` : "");
-  // Cancellation windows, both at 12:00 PM: a full free cancellation up to 2
-  // days before check-in, then a partial refund (minus first night + service
-  // fee) up to 1 day before. Dates are derived from the actual check-in.
-  const freeCancelBy = formatMonthDay(addDays(checkIn, -2));
-  const partialCancelBy = formatMonthDay(addDays(checkIn, -1));
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -597,9 +592,9 @@ export default function PaymentForm({
           Cancellation Policy
         </h2>
         <p className="mt-[15px] text-[20px] leading-[1.42] text-black">
-          Free cancellation before 12:00 PM on {freeCancelBy}. After that, cancel
-          before 12:00 PM on {partialCancelBy} and get a full refund, minus the
-          first night and service fee.
+          You can cancel this booking any time before your check-in date and get
+          a 50% refund of your booking total. Once your stay begins, the booking
+          can no longer be cancelled.
         </p>
         <p className="mt-[15px] text-[20px] leading-[1.42] text-black">
           Our Extenuating Circumstances policy does not cover travel disruptions

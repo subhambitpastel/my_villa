@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { addDays, nightsBetween, formatRange, formatMonthDay } from "@/lib/dates";
+import { addDays, nightsBetween, formatRange } from "@/lib/dates";
 import { quote, bookingReference } from "@/lib/pricing";
 import {
   updateBookingAction,
@@ -101,20 +101,16 @@ export default function ManageBookingCard({
     });
   }
 
-  // Refund-policy windows for the cancel warning — the same ones checkout showed:
-  // free cancellation up to 2 days before check-in (12:00 PM), then a partial
-  // refund (minus the first night + service fee) up to 1 day before.
-  const freeCancelBy = formatMonthDay(addDays(checkIn, -2));
-  const partialCancelBy = formatMonthDay(addDays(checkIn, -1));
-
-  // Once the check-in date has passed, the stay has begun and can no longer be
-  // cancelled — so the cancel option is dropped for it.
-  const startPassed = checkIn < today;
+  // Cancellation is only allowed while the whole stay is still ahead — strictly
+  // before the check-in (start) date. On or after check-in the stay has begun,
+  // so the cancel option is dropped. (Check-out is always later than check-in,
+  // so this also guarantees both dates are in the future.)
+  const canCancel = checkIn > today;
 
   // Shared footer: cancel + back + message. Rendered by whichever sub-card runs.
   const footer = (
     <>
-      {!startPassed && (
+      {canCancel && (
         <button
           type="button"
           onClick={() => {
@@ -177,13 +173,11 @@ export default function ManageBookingCard({
                   Cancel this booking?
                 </h3>
                 <p className="mt-2 text-[14px] leading-relaxed text-[#4a4a4a]">
-                  Free cancellation before 12:00 PM on{" "}
-                  <span className="font-semibold text-[#121212]">{freeCancelBy}</span>.
-                  After that, cancel before 12:00 PM on{" "}
-                  <span className="font-semibold text-[#121212]">
-                    {partialCancelBy}
-                  </span>{" "}
-                  and get a full refund, minus the first night and service fee.
+                  A booking can only be cancelled before its check-in date.
+                  Cancel now and you&apos;ll get a{" "}
+                  <span className="font-semibold text-[#121212]">50% refund</span>{" "}
+                  of your booking total. Once your stay begins it can no longer be
+                  cancelled.
                 </p>
                 <p className="mt-2 text-[13px] font-medium text-[#c0392b]">
                   This can&apos;t be undone.
