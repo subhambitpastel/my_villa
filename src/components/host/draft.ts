@@ -46,7 +46,6 @@ export type Draft = {
     address: string;
     city: string;
     rooms: string;
-    bathrooms: string;
     maxGuests: string;
     /** Hotels/resorts: max occupancy of one room (empty for whole-villa kinds). */
     peoplePerRoom: string;
@@ -88,7 +87,6 @@ export const DEFAULT_DRAFT: Draft = {
     address: "",
     city: "",
     rooms: "",
-    bathrooms: "",
     maxGuests: "",
     peoplePerRoom: "",
     facilities: [],

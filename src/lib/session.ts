@@ -41,8 +41,8 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 
   const row = (await getDb()
     .prepare(
-      `SELECT u.id, u.email, u.full_name, u.gender, u.dob, u.address, u.emergency,
-              u.phone_code, u.phone_number, u.country, u.avatar,
+      `SELECT u.id, u.email, u.customer_id, u.full_name, u.gender, u.dob, u.address,
+              u.emergency, u.phone_code, u.phone_number, u.country, u.avatar,
               u.pay_methods, u.pay_account_type, u.card_number, u.hosting_enabled,
               u.created_at
        FROM sessions s JOIN users u ON u.id = s.user_id

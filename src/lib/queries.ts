@@ -1,7 +1,17 @@
 // Read-side queries mapping DB rows to the display shapes the UI renders.
 import { getDb, timeAgo, type BookingStatus, type VillaRow } from "./db";
 import { FACILITY_CHIPS, type VillaService } from "@/components/host/draft";
-import { isRoomBased, roomCapacity, roomsFreeForRange, type RoomBooking } from "./rooms";
+import {
+  isRoomBased,
+  MAX_ROOMS_PER_GUEST,
+  parseRoomPlan,
+  roomCapacity,
+  roomPlanFor,
+  roomsFreeForRange,
+  type RoomBooking,
+  type RoomSegment,
+} from "./rooms";
+import { GUEST_SEARCH_MIN, type GuestOption } from "./guests";
 import { parsePackageType, type PackageType } from "./packageTypes";
 import { quote } from "./pricing";
 import { nightsBetween } from "./dates";
@@ -26,6 +36,9 @@ export type PropertyItem = {
   featured: boolean;
   /** Host-set % off the nightly price (0 = none). */
   discount: number;
+  /** Owner archived this listing: no new bookings and hidden from guests, while
+   *  bookings already made still stand. */
+  archived: boolean;
 };
 
 export type CatalogVilla = {
@@ -67,6 +80,9 @@ export type BookingItem = {
   /** Total charged at checkout — the stay (nightly quote or package price) plus
    *  any paid add-ons; recomputed the same way the payment page did. */
   amountPaid: number;
+  /** The owner made this booking for the guest and nobody has paid yet — the
+   *  guest owes `amountPaid` and is shown a payment request. */
+  paymentDue: boolean;
   /** Stars the guest gave this stay, or null while unrated. */
   myRating: number | null;
   /** Paid add-ons the guest chose at checkout (free ones aren't stored). */
@@ -107,6 +123,12 @@ export type PackageItem = {
   price: number; // all-inclusive total for the N-night stay
   /** Included experiences — all mandatory, guests can't unbundle them. */
   inclusions: string[];
+  /** Owner archived this package: no new bookings, hidden from guests. Always
+   *  false on guest-facing listings, which filter archived rows out entirely. */
+  archived: boolean;
+  /** The villa itself is archived, which suppresses this package regardless of
+   *  `archived`. Only meaningful on the owner's own listing. */
+  villaArchived: boolean;
 };
 
 /** Snapshot of a booked package, stored on the booking so history survives the
@@ -133,6 +155,9 @@ export type PackageForBooking = {
   maxGuests: number;
   price: number;
   inclusions: string[];
+  /** True when this package OR its villa is archived — either way it takes no
+   *  new bookings. Collapsed to one flag because callers only need the verdict. */
+  archived: boolean;
 };
 
 export type VillaDetail = VillaRow & {
@@ -210,6 +235,7 @@ function toProperty(v: VillaRow): PropertyItem {
     freeServices: freeServicesOf(v),
     featured: v.featured === 1,
     discount: v.discount,
+    archived: v.archived_at !== null,
   };
 }
 
@@ -244,8 +270,14 @@ export async function getVillasByOwner(ownerId: number): Promise<PropertyItem[]>
 
 // Shared column list + row mapper for the three package-listing queries.
 const PKG_COLS = `p.id, p.villa_id, p.name, p.description, p.type, p.nights, p.max_guests,
-  p.discount, p.price, p.inclusions, v.name AS villa_name, v.city AS villa_city,
-  v.kind AS villa_kind, v.image AS villa_image`;
+  p.discount, p.price, p.inclusions, p.archived_at, v.name AS villa_name, v.city AS villa_city,
+  v.kind AS villa_kind, v.image AS villa_image, v.archived_at AS villa_archived_at`;
+
+/** A package is bookable only when neither it nor its villa is archived —
+ *  archiving a villa takes its packages down with it. Guest-facing package
+ *  listings all filter on this; the owner's own listing deliberately doesn't,
+ *  so they can still see and unarchive them. */
+const LIVE_PACKAGE = "p.archived_at IS NULL AND v.archived_at IS NULL";
 
 type PackageJoinRow = {
   id: number;
@@ -258,10 +290,12 @@ type PackageJoinRow = {
   discount: number;
   price: number;
   inclusions: string;
+  archived_at: string | null;
   villa_name: string;
   villa_city: string;
   villa_kind: string;
   villa_image: string;
+  villa_archived_at: string | null;
 };
 
 function toPackageItem(r: PackageJoinRow): PackageItem {
@@ -280,6 +314,8 @@ function toPackageItem(r: PackageJoinRow): PackageItem {
     discount: Number(r.discount),
     price: Number(r.price),
     inclusions: parseJsonList(r.inclusions),
+    archived: r.archived_at !== null,
+    villaArchived: r.villa_archived_at !== null,
   };
 }
 
@@ -298,6 +334,65 @@ export async function getPackagesForOwner(
   return rows.map(toPackageItem);
 }
 
+/** Which of an owner's villas have live bookings riding on them, keyed by villa
+ *  id (absent = none, i.e. freely editable). Drives the disabled Edit link in
+ *  My Properties; updateVillaAction is what actually enforces the lock. */
+export async function getVillaLocksForOwner(
+  ownerId: number,
+): Promise<Record<number, BookingLock>> {
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = (await getDb()
+    .prepare(
+      `SELECT v.id AS villa_id,
+              COUNT(b.id) AS n,
+              COALESCE(MAX(b.check_out), '') AS last_out
+         FROM villas v
+         JOIN bookings b ON b.villa_id = v.id
+          AND b.check_out >= ? AND b.status IN ('pending', 'accepted')
+        WHERE v.owner_id = ?
+        GROUP BY v.id`,
+    )
+    .all(today, ownerId)) as { villa_id: number; n: number; last_out: string }[];
+  return Object.fromEntries(
+    rows.map((r) => [
+      r.villa_id,
+      { active: Number(r.n), lastCheckOut: r.last_out },
+    ]),
+  );
+}
+
+/** Which of an owner's packages have live bookings riding on them, keyed by
+ *  package id (absent = none). Drives the frozen guest-count field in the
+ *  package editor. Kept out of the shared package columns so the guest-facing
+ *  listings don't pay for a join only the owner's own page needs. */
+export async function getPackageLocksForOwner(
+  ownerId: number,
+): Promise<Record<number, BookingLock>> {
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = (await getDb()
+    .prepare(
+      `SELECT p.id AS package_id,
+              COUNT(b.id) AS n,
+              COALESCE(MAX(b.check_out), '') AS last_out
+         FROM packages p
+         JOIN bookings b ON b.package_id = p.id
+          AND b.check_out >= ? AND b.status IN ('pending', 'accepted')
+        WHERE p.owner_id = ?
+        GROUP BY p.id`,
+    )
+    .all(today, ownerId)) as {
+    package_id: number;
+    n: number;
+    last_out: string;
+  }[];
+  return Object.fromEntries(
+    rows.map((r) => [
+      r.package_id,
+      { active: Number(r.n), lastCheckOut: r.last_out },
+    ]),
+  );
+}
+
 /** Packages offered on one villa (guest-facing villa page). */
 export async function getPackagesForVilla(
   villaId: number,
@@ -306,7 +401,7 @@ export async function getPackagesForVilla(
     .prepare(
       `SELECT ${PKG_COLS}
        FROM packages p JOIN villas v ON v.id = p.villa_id
-       WHERE p.villa_id = ?
+       WHERE p.villa_id = ? AND ${LIVE_PACKAGE}
        ORDER BY p.created_at DESC, p.id DESC`,
     )
     .all(villaId)) as PackageJoinRow[];
@@ -318,7 +413,10 @@ export async function getPackagesForVilla(
 export async function getPublicPackages(
   excludeOwnerId?: number,
 ): Promise<PackageItem[]> {
-  const where = excludeOwnerId != null ? "WHERE p.owner_id != ?" : "";
+  const where =
+    excludeOwnerId != null
+      ? `WHERE ${LIVE_PACKAGE} AND p.owner_id != ?`
+      : `WHERE ${LIVE_PACKAGE}`;
   const params = excludeOwnerId != null ? [excludeOwnerId] : [];
   const rows = (await getDb()
     .prepare(
@@ -339,8 +437,9 @@ export async function getPackageById(
   const row = (await getDb()
     .prepare(
       `SELECT p.id, p.villa_id, p.owner_id, p.name, p.nights, p.max_guests,
-              p.price, p.inclusions, v.kind AS villa_kind, v.rooms AS villa_rooms,
-              v.people_per_room AS people_per_room, v.max_guests AS villa_max_guests
+              p.price, p.inclusions, p.archived_at, v.kind AS villa_kind,
+              v.rooms AS villa_rooms, v.people_per_room AS people_per_room,
+              v.max_guests AS villa_max_guests, v.archived_at AS villa_archived_at
        FROM packages p JOIN villas v ON v.id = p.villa_id
        WHERE p.id = ?`,
     )
@@ -354,10 +453,12 @@ export async function getPackageById(
         max_guests: number;
         price: number;
         inclusions: string;
+        archived_at: string | null;
         villa_kind: string;
         villa_rooms: number;
         people_per_room: number;
         villa_max_guests: number;
+        villa_archived_at: string | null;
       }
     | undefined;
   if (!row) return null;
@@ -374,6 +475,8 @@ export async function getPackageById(
     maxGuests: Number(row.max_guests),
     price: Number(row.price),
     inclusions: parseJsonList(row.inclusions),
+    // Either flag makes the package unbookable — the booking action refuses it.
+    archived: row.archived_at !== null || row.villa_archived_at !== null,
   };
 }
 
@@ -401,6 +504,9 @@ export type PackageDetail = {
   ownerId: number;
   rating: number;
   reviews: number;
+  /** True when this package OR its villa is archived — the page still renders
+   *  (guests with a booking may follow a link here) but can't be booked. */
+  archived: boolean;
 };
 
 export async function getPackageDetail(
@@ -409,9 +515,10 @@ export async function getPackageDetail(
   const row = (await getDb()
     .prepare(
       `SELECT p.id, p.name, p.description, p.nights, p.max_guests, p.discount, p.price, p.inclusions,
+              p.archived_at,
               v.id AS villa_id, v.name AS villa_name, v.city AS villa_city,
               v.kind AS villa_kind, v.image AS villa_image, v.images AS villa_images,
-              v.description AS villa_description,
+              v.description AS villa_description, v.archived_at AS villa_archived_at,
               v.rooms AS villa_rooms, v.people_per_room AS people_per_room, v.owner_id AS owner_id,
               ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
        FROM packages p JOIN villas v ON v.id = p.villa_id
@@ -427,6 +534,7 @@ export async function getPackageDetail(
         discount: number;
         price: number;
         inclusions: string;
+        archived_at: string | null;
         villa_id: number;
         villa_name: string;
         villa_city: string;
@@ -434,6 +542,7 @@ export async function getPackageDetail(
         villa_image: string;
         villa_images: string;
         villa_description: string;
+        villa_archived_at: string | null;
         villa_rooms: number;
         people_per_room: number;
         owner_id: number;
@@ -464,6 +573,7 @@ export async function getPackageDetail(
     ownerId: row.owner_id,
     rating: Number(row.rvw_rating),
     reviews: Number(row.rvw_count),
+    archived: row.archived_at !== null || row.villa_archived_at !== null,
   };
 }
 
@@ -476,13 +586,17 @@ export async function getCatalogVillas(
       ? await getDb()
           .prepare(
             `SELECT v.*, ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
-             FROM villas v WHERE v.owner_id != ? ORDER BY v.created_at DESC, v.id DESC LIMIT ?`,
+             FROM villas v
+             WHERE v.archived_at IS NULL AND v.owner_id != ?
+             ORDER BY v.created_at DESC, v.id DESC LIMIT ?`,
           )
           .all(excludeOwnerId, limit)
       : await getDb()
           .prepare(
             `SELECT v.*, ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
-             FROM villas v ORDER BY v.created_at DESC, v.id DESC LIMIT ?`,
+             FROM villas v
+             WHERE v.archived_at IS NULL
+             ORDER BY v.created_at DESC, v.id DESC LIMIT ?`,
           )
           .all(limit)
   ) as VillaWithReviews[];
@@ -501,14 +615,16 @@ export async function getFeaturedVillas(
       ? await getDb()
           .prepare(
             `SELECT v.*, ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
-             FROM villas v WHERE v.featured = 1 AND v.owner_id != ?
+             FROM villas v
+             WHERE v.featured = 1 AND v.archived_at IS NULL AND v.owner_id != ?
              ORDER BY v.created_at DESC, v.id DESC LIMIT ?`,
           )
           .all(excludeOwnerId, limit)
       : await getDb()
           .prepare(
             `SELECT v.*, ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
-             FROM villas v WHERE v.featured = 1
+             FROM villas v
+             WHERE v.featured = 1 AND v.archived_at IS NULL
              ORDER BY v.created_at DESC, v.id DESC LIMIT ?`,
           )
           .all(limit)
@@ -625,7 +741,10 @@ function villaSearchWhere(
   filters: SearchFilterInput,
   opts: { amenities: boolean } = { amenities: true },
 ): { where: string[]; params: (string | number)[] } {
-  const where: string[] = [];
+  // An archived listing is never a search result — it takes no new bookings, so
+  // surfacing it would only lead to a dead end. Unarchiving brings it straight
+  // back. This sits here so /search and the amenity chips agree automatically.
+  const where: string[] = ["archived_at IS NULL"];
   const params: (string | number)[] = [];
 
   if (filters.q) {
@@ -716,6 +835,86 @@ export async function searchVillas(
 
 export type BookedRange = { checkIn: string; checkOut: string };
 
+/** The columns the availability engine needs off a booking row. */
+type RoomBookingRow = {
+  check_in: string;
+  check_out: string;
+  rooms: number;
+  room_plan: string;
+};
+
+/** A booking row as the availability engine sees it. A stay whose room count
+ *  changes mid-way (a room plan) contributes one entry per segment, so
+ *  per-night occupancy stays a plain sum; a flat stay contributes one entry,
+ *  exactly as before. */
+const expandRoomBooking = (r: RoomBookingRow): RoomBooking[] =>
+  parseRoomPlan(r.room_plan) ?? [
+    { checkIn: r.check_in, checkOut: r.check_out, rooms: Math.max(1, r.rooms) },
+  ];
+
+/** Confirmed stays overlapping [checkIn, checkOut), expanded to room segments. */
+async function overlappingRoomBookings(
+  villaId: number,
+  checkIn: string,
+  checkOut: string,
+  excludeBookingId: number,
+): Promise<RoomBooking[]> {
+  // A room plan never extends past its booking's own check_in/check_out, so
+  // the row-level overlap filter is still safe with plans in play.
+  const rows = (await getDb()
+    .prepare(
+      `SELECT check_in, check_out, rooms, room_plan FROM bookings
+       WHERE villa_id = ? AND status = 'accepted'
+         AND check_in != '' AND check_out != ''
+         AND check_in < ? AND check_out > ? AND id != ?`,
+    )
+    .all(villaId, checkOut, checkIn, excludeBookingId)) as RoomBookingRow[];
+  return rows.flatMap(expandRoomBooking);
+}
+
+/** How many bookings still have a claim on a villa (or one package), and when
+ *  the last of them checks out. `active` is 0 once every stay is completed. */
+export type BookingLock = { active: number; lastCheckOut: string };
+
+/** A booking still has a claim while it's a confirmed upcoming stay or a pending
+ *  request — a checked-out stay is done, and a cancelled one never held anything.
+ *  This is THE definition of "active booking"; every guard reuses it so the villa
+ *  delete guard and the capacity-edit guard can never drift apart. */
+async function bookingLockWhere(
+  column: "villa_id" | "package_id",
+  id: number,
+): Promise<BookingLock> {
+  const today = new Date().toISOString().slice(0, 10);
+  const row = (await getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n, COALESCE(MAX(check_out), '') AS last_out
+         FROM bookings
+        WHERE ${column} = ? AND check_out >= ?
+          AND status IN ('pending', 'accepted')`,
+    )
+    .get(id, today)) as { n: number; last_out: string };
+  return { active: Number(row?.n ?? 0), lastCheckOut: row?.last_out ?? "" };
+}
+
+/** Bookings still riding on a villa — blocks deleting it or changing its capacity. */
+export const getVillaBookingLock = (villaId: number): Promise<BookingLock> =>
+  bookingLockWhere("villa_id", villaId);
+
+/** Bookings still riding on one package — blocks changing its guest count. */
+export const getPackageBookingLock = (packageId: number): Promise<BookingLock> =>
+  bookingLockWhere("package_id", packageId);
+
+/** Concurrent stays a villa allows per night: its rooms, or 1 whole-villa unit. */
+async function villaCapacity(villaId: number): Promise<number | null> {
+  const villa = (await getDb()
+    .prepare("SELECT kind, rooms FROM villas WHERE id = ?")
+    .get(villaId)) as { kind: string; rooms: number } | undefined;
+  if (!villa) return null;
+  // Whole-villa kinds have capacity 1, so any overlap blocks (as before);
+  // hotels/resorts allow concurrent stays up to their room count.
+  return roomCapacity(villa.kind, villa.rooms);
+}
+
 /** True when no confirmed stay overlaps the given range. `excludeBookingId`
  *  ignores one booking (used when editing it, so its own dates don't clash). */
 export async function isVillaAvailable(
@@ -725,32 +924,74 @@ export async function isVillaAvailable(
   roomsNeeded = 1,
   excludeBookingId = 0,
 ): Promise<boolean> {
-  const villa = (await getDb()
-    .prepare("SELECT kind, rooms FROM villas WHERE id = ?")
-    .get(villaId)) as { kind: string; rooms: number } | undefined;
-  if (!villa) return false;
-  // Whole-villa kinds have capacity 1, so any overlap blocks (as before);
-  // hotels/resorts allow concurrent stays up to their room count.
-  const capacity = roomCapacity(villa.kind, villa.rooms);
-  const rows = (await getDb()
-    .prepare(
-      `SELECT check_in, check_out, rooms FROM bookings
-       WHERE villa_id = ? AND status = 'accepted'
-         AND check_in != '' AND check_out != ''
-         AND check_in < ? AND check_out > ? AND id != ?`,
-    )
-    .all(villaId, checkOut, checkIn, excludeBookingId)) as {
-    check_in: string;
-    check_out: string;
-    rooms: number;
-  }[];
-  const bookings: RoomBooking[] = rows.map((r) => ({
-    checkIn: r.check_in,
-    checkOut: r.check_out,
-    rooms: Math.max(1, r.rooms),
-  }));
+  const capacity = await villaCapacity(villaId);
+  if (capacity === null) return false;
+  const bookings = await overlappingRoomBookings(
+    villaId,
+    checkIn,
+    checkOut,
+    excludeBookingId,
+  );
   const need = Math.max(1, Math.trunc(roomsNeeded) || 1);
   return roomsFreeForRange(checkIn, checkOut, bookings, capacity) >= need;
+}
+
+/** True when every leg of a room plan still has its rooms free — the
+ *  availability guard for an adjusted stay, where a single bottleneck figure
+ *  would wrongly reject the legs that ask for more. */
+export async function isPlanAvailable(
+  villaId: number,
+  plan: RoomSegment[],
+  excludeBookingId = 0,
+): Promise<boolean> {
+  if (plan.length === 0) return false;
+  const capacity = await villaCapacity(villaId);
+  if (capacity === null) return false;
+  const span = { checkIn: plan[0].checkIn, checkOut: plan[plan.length - 1].checkOut };
+  const bookings = await overlappingRoomBookings(
+    villaId,
+    span.checkIn,
+    span.checkOut,
+    excludeBookingId,
+  );
+  return plan.every(
+    (s) => roomsFreeForRange(s.checkIn, s.checkOut, bookings, capacity) >= s.rooms,
+  );
+}
+
+/** The rooms a guest can hold on each leg of [checkIn, checkOut) when they want
+ *  `wanted` rooms — the offer behind the "adjusted stay" flow. [] when the range
+ *  can't be covered at all. */
+export async function getRoomPlan(
+  villaId: number,
+  checkIn: string,
+  checkOut: string,
+  wanted: number,
+  excludeBookingId = 0,
+  /** When given, the plan also respects THIS guest's per-night allowance — the
+   *  same plan the booking card showed them. Omit for an inventory-only plan. */
+  guestId = 0,
+): Promise<RoomSegment[]> {
+  const capacity = await villaCapacity(villaId);
+  if (capacity === null) return [];
+  const bookings = await overlappingRoomBookings(
+    villaId,
+    checkIn,
+    checkOut,
+    excludeBookingId,
+  );
+  const held = guestId
+    ? await getGuestRoomBookings(villaId, guestId, excludeBookingId)
+    : [];
+  return roomPlanFor(
+    checkIn,
+    checkOut,
+    bookings,
+    capacity,
+    wanted,
+    held,
+    guestId ? MAX_ROOMS_PER_GUEST : Infinity,
+  );
 }
 
 /** Date ranges that block new bookings for a villa (confirmed stays).
@@ -778,20 +1019,135 @@ export async function getRoomBookings(
 ): Promise<RoomBooking[]> {
   const rows = (await getDb()
     .prepare(
-      `SELECT check_in, check_out, rooms FROM bookings
+      `SELECT check_in, check_out, rooms, room_plan FROM bookings
        WHERE villa_id = ? AND status = 'accepted'
          AND check_in != '' AND check_out != '' AND id != ?`,
     )
-    .all(villaId, excludeBookingId)) as {
+    .all(villaId, excludeBookingId)) as RoomBookingRow[];
+  return rows.flatMap(expandRoomBooking);
+}
+
+/** A guest waiting on a call from the host about a booking the self-serve flow
+ *  wouldn't take (a room block over the per-guest cap). */
+export type CallRequestItem = {
+  id: number;
+  /** The listing and the person asking — what "fulfil this" needs to open the
+   *  owner's booking form already filled in. */
+  villaId: number;
+  guestId: number;
+  villaName: string;
+  guestName: string;
+  guestEmail: string;
+  /** The guest's public customer ID — what they'd quote on the phone. */
+  guestCustomerId: string;
+  /** Dialable number ("+44 7700 900123"), or "" if the guest never added one. */
+  guestPhone: string;
+  guestAvatar: string;
+  /** The stay they wanted; "" when they hadn't picked dates. */
+  checkIn: string;
+  checkOut: string;
+  rooms: number;
+  /** Party size they'd picked (0 = never stated). */
+  guests: number;
+  /** The guest's own note to the host ("" = they didn't leave one). */
+  message: string;
+  /** Paid add-ons they'd ticked when they asked, as stored. Shown to the host so
+   *  the call (or the booking) already knows what they wanted. */
+  services: VillaService[];
+  /** The same add-ons as indices into the villa's CURRENT service list — what
+   *  the booking form needs to re-tick them. Anything the host has since
+   *  removed or renamed simply drops out, rather than prefilling a stale index
+   *  that now points at a different service. */
+  serviceIdx: number[];
+  requested: string;
+};
+
+/** Open call requests across all of an owner's properties, newest first. */
+export async function getCallRequestsForOwner(
+  ownerId: number,
+): Promise<CallRequestItem[]> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT c.id, c.villa_id, c.guest_id, c.check_in, c.check_out, c.rooms,
+              c.guests, c.message, c.services, c.created_at,
+              v.name AS villa_name, v.services AS villa_services,
+              u.full_name, u.email, u.customer_id, u.phone_code, u.phone_number,
+              u.avatar
+       FROM call_requests c
+       JOIN villas v ON v.id = c.villa_id
+       JOIN users u ON u.id = c.guest_id
+       WHERE v.owner_id = ? AND c.status = 'open'
+       ORDER BY c.created_at DESC, c.id DESC`,
+    )
+    .all(ownerId)) as {
+    id: number;
+    villa_id: number;
+    guest_id: number;
     check_in: string;
     check_out: string;
     rooms: number;
+    guests: number;
+    message: string;
+    services: string;
+    created_at: string;
+    villa_name: string;
+    villa_services: string;
+    full_name: string;
+    email: string;
+    customer_id: string | null;
+    phone_code: string;
+    phone_number: string;
+    avatar: string;
   }[];
-  return rows.map((r) => ({
+  return rows.map((r) => {
+    // Map the snapshotted add-ons back onto the villa's current list by name:
+    // an index stored months ago could now point at a different service, but a
+    // name either still exists or the guest can't have it any more.
+    const asked = parseServiceList(r.services);
+    const current = parseServiceList(r.villa_services);
+    const serviceIdx = asked
+      .map((s) => current.findIndex((cur) => cur.name === s.name))
+      .filter((i) => i >= 0);
+    return {
+    id: r.id,
+    villaId: r.villa_id,
+    guestId: r.guest_id,
+    services: asked,
+    serviceIdx,
+    villaName: r.villa_name,
+    guestName: r.full_name || r.email,
+    guestEmail: r.email,
+    guestCustomerId: r.customer_id ?? "",
+    guestPhone: r.phone_number ? `${r.phone_code} ${r.phone_number}`.trim() : "",
+    guestAvatar: r.avatar,
     checkIn: r.check_in,
     checkOut: r.check_out,
-    rooms: Math.max(1, r.rooms),
-  }));
+    rooms: Number(r.rooms),
+    guests: Number(r.guests ?? 0),
+    message: r.message ?? "",
+    requested: timeAgo(r.created_at, "Requested"),
+    };
+  });
+}
+
+/** The rooms ONE guest already holds at a villa (their own confirmed stays,
+ *  room-plan expanded like getRoomBookings). This is what the per-guest room cap
+ *  counts against, so booking a big block in several goes still hits the limit.
+ *  `excludeBookingId` drops the booking being edited, so re-saving it doesn't
+ *  count its own rooms twice. */
+export async function getGuestRoomBookings(
+  villaId: number,
+  guestId: number,
+  excludeBookingId = 0,
+): Promise<RoomBooking[]> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT check_in, check_out, rooms, room_plan FROM bookings
+       WHERE villa_id = ? AND guest_id = ? AND status = 'accepted'
+         AND check_in != '' AND check_out != '' AND id != ?`,
+    )
+    .all(villaId, guestId, excludeBookingId)) as RoomBookingRow[];
+  return rows.flatMap(expandRoomBooking);
 }
 
 /** The signed-in guest's own confirmed booking overlapping a range, if any.
@@ -830,7 +1186,6 @@ export type ManageBooking = {
   price: number;
   maxGuests: number;
   rooms: number;
-  bathrooms: number;
   kind: string;
   /** Hotels/resorts: max occupancy of one room (0 for whole-villa kinds). */
   peoplePerRoom: number;
@@ -841,6 +1196,10 @@ export type ManageBooking = {
   /** Set when this booking is a package — its length/occupancy are fixed, so the
    *  manage view lets the guest move the start date but not change duration. */
   package: PackageSnapshot | null;
+  /** The villa (or this stay's package) has been archived. The stay still goes
+   *  ahead and its rooms/guests stay editable — only its DATES are frozen, since
+   *  the place has stopped taking new ones. */
+  archived: boolean;
 };
 
 /** A single booking (owned by the guest) with the villa fields the manage page
@@ -854,8 +1213,11 @@ export async function getBookingForManage(
       `SELECT b.id, b.villa_id, b.check_in, b.check_out, b.guests, b.rooms AS booking_rooms,
               b.status, b.package, b.extras,
               v.name AS villa_name, v.city AS villa_city, v.image AS villa_image,
-              v.price, v.max_guests, v.rooms, v.bathrooms, v.kind, v.people_per_room
-       FROM bookings b JOIN villas v ON v.id = b.villa_id
+              v.price, v.max_guests, v.rooms, v.kind, v.people_per_room,
+              v.archived_at, pk.archived_at AS package_archived_at
+       FROM bookings b
+       JOIN villas v ON v.id = b.villa_id
+       LEFT JOIN packages pk ON pk.id = b.package_id
        WHERE b.id = ? AND b.guest_id = ?`,
     )
     .get(bookingId, guestId)) as
@@ -875,9 +1237,10 @@ export async function getBookingForManage(
         price: number;
         max_guests: number;
         rooms: number;
-        bathrooms: number;
         kind: string;
         people_per_room: number;
+        archived_at: string | null;
+        package_archived_at: string | null;
       }
     | undefined;
   if (!row) return null;
@@ -894,12 +1257,12 @@ export async function getBookingForManage(
     price: row.price,
     maxGuests: row.max_guests,
     rooms: row.rooms,
-    bathrooms: row.bathrooms,
     kind: row.kind,
     peoplePerRoom: row.people_per_room,
     bookingRooms: Math.max(1, row.booking_rooms),
     extras: parseServiceList(row.extras),
     package: parsePackage(row.package),
+    archived: row.archived_at !== null || row.package_archived_at !== null,
   };
 }
 
@@ -961,7 +1324,8 @@ export async function getAvailableAmenities(
 export async function getVillaCities(): Promise<string[]> {
   const rows = (await getDb()
     .prepare(
-      "SELECT DISTINCT city FROM villas WHERE city != '' ORDER BY city ASC",
+      `SELECT DISTINCT city FROM villas
+       WHERE city != '' AND archived_at IS NULL ORDER BY city ASC`,
     )
     .all()) as { city: string }[];
   return rows.map((r) => r.city);
@@ -972,7 +1336,9 @@ export async function getVillaCities(): Promise<string[]> {
  *  reaches the biggest place currently listed. */
 export async function getMaxVillaGuests(): Promise<number> {
   const row = (await getDb()
-    .prepare("SELECT COALESCE(MAX(max_guests), 0) AS n FROM villas")
+    .prepare(
+      "SELECT COALESCE(MAX(max_guests), 0) AS n FROM villas WHERE archived_at IS NULL",
+    )
     .get()) as { n: number };
   return Math.max(1, row.n);
 }
@@ -989,7 +1355,8 @@ export async function getMaxGuestsByType(): Promise<MaxGuestsByType> {
          COALESCE(MAX(max_guests) FILTER (WHERE kind = 'Resort'), 0) AS resort,
          COALESCE(MAX(max_guests) FILTER (WHERE kind = 'Hotel'), 0) AS hotel,
          COALESCE(MAX(max_guests) FILTER (WHERE kind NOT IN ('Resort','Hotel')), 0) AS rent
-       FROM villas`,
+       FROM villas
+       WHERE archived_at IS NULL`,
     )
     .get()) as { resort: number; hotel: number; rent: number };
   return {
@@ -999,14 +1366,16 @@ export async function getMaxGuestsByType(): Promise<MaxGuestsByType> {
   };
 }
 
-/** Villas the user has hearted, most recently saved first. */
+/** Villas the user has hearted, most recently saved first. Archived listings drop
+ *  out — the card is a booking entry point, so leaving one up is a dead end. The
+ *  favorite row itself is untouched, so unarchiving brings the card back. */
 export async function getFavoriteVillas(userId: number): Promise<CatalogVilla[]> {
   const rows = (await getDb()
     .prepare(
       `SELECT v.*, ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
        FROM favorites f
        JOIN villas v ON v.id = f.villa_id
-       WHERE f.user_id = ?
+       WHERE f.user_id = ? AND v.archived_at IS NULL
        ORDER BY f.created_at DESC, v.id DESC`,
     )
     .all(userId)) as VillaWithReviews[];
@@ -1042,7 +1411,7 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
   const rows = (await getDb()
     .prepare(
       `SELECT b.id, b.dates, b.check_in, b.check_out, b.guests, b.rooms, b.status,
-              b.created_at, b.extras, b.package,
+              b.created_at, b.extras, b.package, b.payment_due,
               v.name AS villa_name, v.city AS villa_city, v.kind AS villa_kind,
               v.price AS villa_price, v.discount AS villa_discount,
               rv.stars AS my_rating
@@ -1061,6 +1430,7 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
     rooms: number;
     status: BookingStatus;
     created_at: string;
+    payment_due: number;
     extras: string;
     package: string;
     villa_name: string;
@@ -1106,6 +1476,7 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
       upcoming: r.check_in !== "" && r.check_in > today,
       createdAt: r.created_at,
       amountPaid,
+      paymentDue: r.payment_due === 1,
       myRating: r.my_rating,
       extras,
       package: pkg,
@@ -1231,7 +1602,7 @@ export async function getRequestsForOwner(ownerId: number): Promise<RequestItem[
        FROM bookings b
        JOIN villas v ON v.id = b.villa_id
        JOIN users u ON u.id = b.guest_id
-       WHERE v.owner_id = ? AND b.status IN ('accepted','declined','cancelled')
+       WHERE v.owner_id = ? AND b.status IN ('accepted','pending','declined','cancelled','completed')
        ORDER BY b.created_at DESC, b.id DESC`,
     )
     .all(ownerId)) as Array<{
@@ -1260,4 +1631,178 @@ export async function getRequestsForOwner(ownerId: number): Promise<RequestItem[
     createdAt: r.created_at,
     package: parsePackage(r.package),
   }));
+}
+
+/* ------------------------ owner-made bookings ------------------------ */
+
+// Shared with the client picker from a dependency-free module — see guests.ts.
+export { GUEST_SEARCH_MIN, type GuestOption } from "./guests";
+
+/** Users matching `query` by name, email or customer ID, for an owner booking on
+ *  their behalf. Customer ID is searchable because it's the one identifier a
+ *  guest can quote unambiguously — names collide and emails get mistyped.
+ *  `excludeUserId` drops the owner themselves — nobody books their own villa
+ *  for themselves. */
+export async function searchGuests(
+  query: string,
+  excludeUserId: number,
+): Promise<GuestOption[]> {
+  const trimmed = query.trim();
+  if (trimmed.length < GUEST_SEARCH_MIN) return [];
+  // LIKE metacharacters are escaped so a customer ID or email typed verbatim
+  // matches literally — an unescaped "_" is LIKE's single-char wildcard, so
+  // "a_b" would otherwise quietly match "axb" too.
+  const escaped = trimmed.toLowerCase().replace(/([\\%_])/g, "\\$1");
+  const like = `%${escaped}%`;
+  const rows = (await getDb()
+    .prepare(
+      `SELECT id, full_name, email, customer_id, avatar FROM users
+       WHERE id != ?
+         AND (LOWER(full_name) LIKE ? ESCAPE '\\'
+              OR LOWER(email) LIKE ? ESCAPE '\\'
+              OR LOWER(COALESCE(customer_id, '')) LIKE ? ESCAPE '\\')
+       ORDER BY full_name, email LIMIT 8`,
+    )
+    .all(excludeUserId, like, like, like)) as {
+    id: number;
+    full_name: string;
+    email: string;
+    customer_id: string | null;
+    avatar: string;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.full_name,
+    email: r.email,
+    customerId: r.customer_id ?? "",
+    avatar: r.avatar,
+  }));
+}
+
+/** One user by id, for re-showing a picked guest server-side. */
+export async function getGuestOption(id: number): Promise<GuestOption | null> {
+  const r = (await getDb()
+    .prepare(
+      "SELECT id, full_name, email, customer_id, avatar FROM users WHERE id = ?",
+    )
+    .get(id)) as
+    | {
+        id: number;
+        full_name: string;
+        email: string;
+        customer_id: string | null;
+        avatar: string;
+      }
+    | undefined;
+  return r
+    ? {
+        id: r.id,
+        name: r.full_name,
+        email: r.email,
+        customerId: r.customer_id ?? "",
+        avatar: r.avatar,
+      }
+    : null;
+}
+
+/* ------------------------ paying an owner's booking ------------------------ */
+
+/** How many stays this guest has been asked to pay for — host-arranged bookings
+ *  that hold nothing until settled. Drives the Payment Pending tab's badge, so
+ *  a request is visible from anywhere in the profile rather than only once
+ *  you open the page. */
+export async function getPendingPaymentCount(guestId: number): Promise<number> {
+  const r = (await getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM bookings
+       WHERE guest_id = ? AND status = 'pending' AND payment_due = 1`,
+    )
+    .get(guestId)) as { n: number };
+  return Number(r?.n) || 0;
+}
+
+/** An owner-made booking the guest still owes for, with everything the payment
+ *  page needs. Unlike a normal checkout, none of this comes from the URL — the
+ *  stay already exists, so its terms are read straight off the row. */
+export type BookingToPay = {
+  id: number;
+  villaId: number;
+  checkIn: string;
+  checkOut: string;
+  nights: number;
+  guests: number;
+  rooms: number;
+  roomBased: boolean;
+  extras: VillaService[];
+  /** What the guest owes: the same total the stay would have cost at checkout. */
+  amount: number;
+  /** Who arranged it, for "your host booked this for you". */
+  hostName: string;
+};
+
+/** The booking `bookingId` if it's this guest's, still active, and awaiting
+ *  their payment. Null otherwise — which is what stops one guest paying (or
+ *  peeking at) another's booking, or paying the same stay twice. */
+export async function getBookingToPay(
+  bookingId: number,
+  guestId: number,
+): Promise<BookingToPay | null> {
+  const r = (await getDb()
+    .prepare(
+      `SELECT b.id, b.villa_id, b.check_in, b.check_out, b.guests, b.rooms,
+              b.extras, b.status, b.payment_due,
+              v.kind, v.price, v.discount,
+              u.full_name AS host_name, u.email AS host_email
+       FROM bookings b
+       JOIN villas v ON v.id = b.villa_id
+       JOIN users u ON u.id = v.owner_id
+       WHERE b.id = ? AND b.guest_id = ?`,
+    )
+    .get(bookingId, guestId)) as
+    | {
+        id: number;
+        villa_id: number;
+        check_in: string;
+        check_out: string;
+        guests: number;
+        rooms: number;
+        extras: string;
+        status: BookingStatus;
+        payment_due: number;
+        kind: string;
+        price: number;
+        discount: number;
+        host_name: string;
+        host_email: string;
+      }
+    | undefined;
+  if (!r) return null;
+  // 'pending' is the unpaid state: the owner arranged it, it holds no rooms, and
+  // paying is what turns it into a real reservation.
+  if (r.payment_due !== 1 || r.status !== "pending") return null;
+
+  const roomBased = isRoomBased(r.kind);
+  const rooms = Math.max(1, r.rooms);
+  const nights = Math.max(1, nightsBetween(r.check_in, r.check_out));
+  const extras = parseServiceList(r.extras);
+  const extrasTotal = extras.reduce((sum, s) => sum + s.price, 0);
+  // Priced exactly like the guest's own checkout would have — same quote, same
+  // automatic length-of-stay discount.
+  const amount =
+    quote(r.price * (roomBased ? rooms : 1), nights, r.discount).total +
+    extrasTotal;
+
+  return {
+    id: r.id,
+    villaId: r.villa_id,
+    checkIn: r.check_in,
+    checkOut: r.check_out,
+    nights,
+    guests: r.guests,
+    rooms,
+    roomBased,
+    extras,
+    amount: Math.round(amount * 100) / 100,
+    hostName: r.host_name || r.host_email,
+  };
 }

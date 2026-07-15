@@ -13,7 +13,7 @@ import {
   postalIsNumeric,
   capPostalCode,
 } from "@/lib/countries";
-import { createBookingAction, modifyBookingAction } from "@/lib/actions";
+import { createBookingAction, modifyBookingAction, payBookingAction } from "@/lib/actions";
 import { formatDay, nightsBetween } from "@/lib/dates";
 import { bookingReference } from "@/lib/pricing";
 
@@ -106,22 +106,31 @@ export default function PaymentForm({
   villaId,
   checkIn,
   checkOut,
+  startsToday = false,
   guests,
   rooms = 1,
   roomBased = false,
+  flex = false,
   services = [],
   packageId,
   modify,
+  pay,
   profile,
 }: {
   villaId: number;
   checkIn: string;
   checkOut: string;
+  /** The stay (or package) starts today, so it can never be cancelled — a
+   *  booking is only cancellable strictly before its check-in date. */
+  startsToday?: boolean;
   guests: number;
-  /** Rooms to reserve — hotels/resorts only; ignored elsewhere. */
+  /** Rooms to reserve — hotels/resorts only; ignored elsewhere. For an adjusted
+   *  stay this is the peak; the server re-derives the per-night split. */
   rooms?: number;
   /** Hotels/resorts book rooms — show the room count in the trip summary. */
   roomBased?: boolean;
+  /** The guest opted into an adjusted stay (rooms vary night to night). */
+  flex?: boolean;
   /** Chosen paid add-ons, as indices into the villa's service list. */
   services?: number[];
   /** Set when booking a fixed package instead of a nightly stay. */
@@ -129,6 +138,9 @@ export default function PaymentForm({
   /** Set when this checkout is the top-up for modifying an existing nightly
    *  booking: submitting applies the change and charges only `amountDue`. */
   modify?: { bookingId: number; amountDue: number };
+  /** Set when settling an owner-made booking: the stay already exists, so
+   *  submitting only clears the balance — it books nothing. */
+  pay?: { bookingId: number; amountDue: number };
   /** The signed-in guest's saved contact details. Email + phone prefill the
    *  Additional Information; the billing country is prefilled from their saved
    *  country (it drives the ZIP-code format) while the street address is left
@@ -232,6 +244,22 @@ export default function PaymentForm({
     setSubmitting(true);
     // Card details stay in the browser — only the booking itself is stored.
 
+    // Pay mode: the owner already made this booking — settle what's owed on it.
+    // Nothing about the reservation changes, so there's no booking input to send.
+    if (pay) {
+      const result = await payBookingAction(pay.bookingId);
+      if (!result.ok) {
+        setSubmitting(false);
+        setFormError(result.error);
+        return;
+      }
+      router.push(
+        `/booking/confirmed?ref=${encodeURIComponent(bookingReference(pay.bookingId))}` +
+          `&mode=paid&paid=${pay.amountDue.toFixed(2)}`,
+      );
+      return;
+    }
+
     // Modify mode: apply the edit to the existing booking (this checkout was the
     // top-up for the higher total) instead of creating a new one.
     if (modify) {
@@ -254,7 +282,10 @@ export default function PaymentForm({
       return;
     }
 
+    // `flex` only asks for the adjustment — the server derives the actual
+    // per-night split from live availability and prices it from that.
     const result = await createBookingAction({
+      flex,
       villaId,
       checkIn,
       checkOut,
@@ -290,7 +321,7 @@ export default function PaymentForm({
               </span>
             </p>
           </div>
-          <Link href={editHref} className="text-[20px] leading-[2] text-[#121212] underline">
+          <Link href={editHref} hidden={!!pay} className="text-[20px] leading-[2] text-[#121212] underline">
             Edit
           </Link>
         </div>
@@ -305,7 +336,7 @@ export default function PaymentForm({
             </div>
             {/* A package fixes room count with its occupancy — nothing to edit. */}
             {!isPackage && (
-              <Link href={editHref} className="text-[20px] leading-[2] text-[#121212] underline">
+              <Link href={editHref} hidden={!!pay} className="text-[20px] leading-[2] text-[#121212] underline">
                 Edit
               </Link>
             )}
@@ -321,7 +352,7 @@ export default function PaymentForm({
           </div>
           {/* Package occupancy is fixed; only nightly stays let guests change it. */}
           {!isPackage && (
-            <Link href={editHref} className="text-[20px] leading-[2] text-[#121212] underline">
+            <Link href={editHref} hidden={!!pay} className="text-[20px] leading-[2] text-[#121212] underline">
               Edit
             </Link>
           )}
@@ -591,11 +622,42 @@ export default function PaymentForm({
         <h2 className="text-[28px] font-medium leading-[1.3] text-black">
           Cancellation Policy
         </h2>
-        <p className="mt-[15px] text-[20px] leading-[1.42] text-black">
-          You can cancel this booking any time before your check-in date and get
-          a 50% refund of your booking total. Once your stay begins, the booking
-          can no longer be cancelled.
-        </p>
+        {/* A stay that starts today has already begun, so the 50% refund can
+            never apply to it — say so plainly instead of printing a policy this
+            booking won't get. */}
+        {startsToday ? (
+          <div className="mt-[15px] flex max-w-[760px] items-start gap-3.5 rounded-[10px] border border-[#eb5757]/35 bg-[#fdecec] px-5 py-4">
+            <svg
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+              className="mt-0.5 shrink-0 text-[#eb5757]"
+            >
+              <path
+                d="M12 9v4.5M12 17h.01M10.3 3.9L2.4 17.5A2 2 0 004.1 20.5h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <p className="text-[18px] leading-[1.45] text-[#8a2b2b]">
+              <span className="font-semibold">
+                Your stay starts today, so this booking can&rsquo;t be
+                cancelled.
+              </span>{" "}
+              A booking can only be cancelled before its check-in date.
+            </p>
+          </div>
+        ) : (
+          <p className="mt-[15px] text-[20px] leading-[1.42] text-black">
+            You can cancel this booking any time before your check-in date and
+            get a 50% refund of your booking total. Once your stay begins, the
+            booking can no longer be cancelled.
+          </p>
+        )}
         <p className="mt-[15px] text-[20px] leading-[1.42] text-black">
           Our Extenuating Circumstances policy does not cover travel disruptions
           caused by COVID-19.

@@ -51,7 +51,7 @@ const label = "mb-2 block text-[16px] text-brand";
 const input =
   "block w-full rounded-[8px] border border-[#d9d9d9] bg-white px-4 py-2.5 text-[15px] text-ink placeholder:text-[#9d9da6] focus:outline-none focus:border-brand focus:ring-2 focus:ring-brand/20";
 
-// Numeric-only fields (area, rooms, bathrooms, guests): strip anything that
+// Numeric-only fields (area, rooms, guests): strip anything that
 // isn't a digit as the guest types, so letters can never be entered. Works on
 // uncontrolled inputs (defaultValue + FormData) by correcting the DOM value.
 function onlyDigits(e: React.FormEvent<HTMLInputElement>) {
@@ -393,7 +393,6 @@ function StepVilla({
       address: get("address"),
       city: get("city"),
       rooms,
-      bathrooms: get("bathrooms"),
       // For hotels/resorts total capacity is rooms × people-per-room.
       maxGuests: roomBased
         ? String((Number(rooms) || 0) * (Number(peoplePerRoom) || 0))
@@ -409,7 +408,6 @@ function StepVilla({
     if (!villa.address) next.address = "Villa address is required.";
     if (!villa.city) next.city = "City is required.";
     if (!villa.rooms || !/^\d+$/.test(villa.rooms)) next.rooms = "Enter the number of rooms.";
-    if (!villa.bathrooms || !/^\d+$/.test(villa.bathrooms)) next.bathrooms = "Enter the number of bathrooms.";
     if (roomBased) {
       if (!peoplePerRoom || !/^\d+$/.test(peoplePerRoom) || Number(peoplePerRoom) < 1)
         next.peoplePerRoom = "Enter how many guests each room sleeps (at least 1).";
@@ -524,21 +522,6 @@ function StepVilla({
             className={input}
           />
           {errors.rooms && <ErrorText>{errors.rooms}</ErrorText>}
-        </div>
-        <div>
-          <label htmlFor="v-bathrooms" className={label}>Number of Bathrooms</label>
-          <input
-            id="v-bathrooms"
-            name="bathrooms"
-            defaultValue={draft.villa.bathrooms}
-            inputMode="numeric"
-            pattern="[0-9]*"
-            onChange={onlyDigits}
-            placeholder="e.g. 2"
-            aria-invalid={!!errors.bathrooms}
-            className={input}
-          />
-          {errors.bathrooms && <ErrorText>{errors.bathrooms}</ErrorText>}
         </div>
         {roomBased ? (
           <div>
@@ -1304,7 +1287,6 @@ export default function HostWizard({
     address: m.villa.address,
     city: m.villa.city,
     rooms: parseInt(m.villa.rooms, 10) || 1,
-    bathrooms: parseInt(m.villa.bathrooms, 10) || 1,
     maxGuests: parseInt(m.villa.maxGuests, 10) || 1,
     peoplePerRoom: parseInt(m.villa.peoplePerRoom, 10) || 0,
     facilities: m.villa.facilities,
@@ -1541,7 +1523,9 @@ export default function HostWizard({
               {step === 0 && (
                 <StepPersonal draft={draft} avatarUrl={avatarUrl} onNext={advance} />
               )}
-              {step === 1 && <StepVilla draft={draft} onNext={onStep} submitLabel={saveLabel} />}
+              {step === 1 && (
+                <StepVilla draft={draft} onNext={onStep} submitLabel={saveLabel} />
+              )}
               {step === 2 && <StepImages draft={draft} onNext={onStep} submitLabel={saveLabel} />}
               {step === 3 && <StepServices draft={draft} onNext={onStep} submitLabel={saveLabel} />}
               {step === 4 && <StepPricing draft={draft} onNext={onStep} submitLabel={saveLabel} />}

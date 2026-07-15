@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import Logo from "./Logo";
 import Avatar from "@/components/ui/Avatar";
 import { logoutAction } from "@/lib/actions";
+import { accountSectionsFor, type AccountSection } from "@/lib/accountNav";
 
 const NAV_LINKS = [
   { label: "Home", href: "/" },
@@ -16,14 +17,14 @@ const NAV_LINKS = [
   { label: "Blog", href: "/blog" },
 ];
 
-// Account links shown in the signed-in avatar dropdown. hostOnly entries are
-// hidden from guests whose hosting mode is off (same rule as the profile
-// sidebar's host tabs).
-const ACCOUNT_LINKS: { label: string; href: string; hostOnly?: boolean }[] = [
+/** Links for the signed-in avatar dropdown. This is a shortcut layer, not a copy
+ *  of the profile sidebar: it carries the frequent destinations (the sidebar
+ *  only exists under /profile, so this is the one global way to reach them) in
+ *  the same order, framed by the two entries that only live in the header — the
+ *  account overview above and Settings below. Sidebar-only sections are skipped. */
+const accountLinksFor = (isHost: boolean): AccountSection[] => [
   { label: "My Account", href: "/account" },
-  { label: "My Bookings", href: "/profile/bookings" },
-  { label: "My Property", href: "/profile/properties", hostOnly: true },
-  { label: "My Favorites", href: "/profile/favorites" },
+  ...accountSectionsFor(isHost).filter((section) => !section.sidebarOnly),
   { label: "Settings", href: "/profile/settings" },
 ];
 
@@ -38,7 +39,7 @@ function UserMenu({
   avatar: string;
   name: string;
   email: string;
-  links: typeof ACCOUNT_LINKS;
+  links: AccountSection[];
   onSignOut: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -173,7 +174,7 @@ export default function HeaderClient({
   const router = useRouter();
   const pathname = usePathname();
   const [, startTransition] = useTransition();
-  const accountLinks = ACCOUNT_LINKS.filter((it) => !it.hostOnly || isHost);
+  const accountLinks = accountLinksFor(isHost);
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);

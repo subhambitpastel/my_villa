@@ -8,7 +8,9 @@ import type { MaxGuestsByType, PropertyType } from "@/lib/queries";
 
 export type ShowcaseVilla = Villa & { kind: string };
 
-const EMPTY_LABELS: Record<PropertyType, string> = {
+/** What each hero tab is showing, in prose — used by the section headings and
+ *  the empty-state copy so they always name the same thing. */
+const TAB_LABELS: Record<PropertyType, string> = {
   resort: "resorts",
   hotel: "hotels",
   rent: "villas for rent",
@@ -30,7 +32,8 @@ export default function HomeShowcase({
   authed,
 }: {
   villas: ShowcaseVilla[];
-  /** Owner-promoted "featured" listings — a fixed curated set, not tab-filtered. */
+  /** Owner-promoted "featured" listings, filtered by the hero tab like the rest
+   *  of the page — picking Hotels shows the featured hotels, and so on. */
   featured: ShowcaseVilla[];
   cities: string[];
   /** Largest capacity per hero tab — caps the hero's guest picker per tab. */
@@ -40,6 +43,11 @@ export default function HomeShowcase({
   const [tab, setTab] = useState<PropertyType>("rent");
   const filtered = villas.filter((v) => matchesTab(v.kind, tab));
   const topPicks = filtered.slice(0, 4);
+  // The featured row follows the tab too, so the whole page reflects the kind
+  // of place the guest picked. Two rows of the 4-up grid, as before.
+  const featuredForTab = featured
+    .filter((v) => matchesTab(v.kind, tab))
+    .slice(0, 8);
   const searchHref = `/search?type=${tab}`;
 
   return (
@@ -58,7 +66,7 @@ export default function HomeShowcase({
             <VillaRow villas={topPicks} authed={authed} />
           ) : (
             <p className="text-[16px] text-gray">
-              No {EMPTY_LABELS[tab]} listed yet — try another tab above.
+              No {TAB_LABELS[tab]} listed yet — try another tab above.
             </p>
           )}
         </section>
@@ -67,10 +75,15 @@ export default function HomeShowcase({
           <PromoGrid />
         </div>
 
-        {featured.length > 0 && (
+        {/* Featured is a paid promotion row: when this tab has none, the row is
+            dropped rather than showing an empty placeholder (same rule as
+            before, just now per-tab instead of overall). */}
+        {featuredForTab.length > 0 && (
           <section className="mt-[100px]">
-            <SectionHeading href="/search">Featured villas</SectionHeading>
-            <VillaRow villas={featured} authed={authed} />
+            <SectionHeading href={searchHref}>
+              Featured {TAB_LABELS[tab]}
+            </SectionHeading>
+            <VillaRow villas={featuredForTab} authed={authed} />
           </section>
         )}
       </div>

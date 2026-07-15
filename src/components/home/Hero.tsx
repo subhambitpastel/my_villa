@@ -5,6 +5,8 @@ import Image from "next/image";
 import { useRouter } from "next/navigation";
 import LocationField from "./LocationField";
 import DateRangeField from "./DateRangeField";
+import Dropdown from "@/components/ui/Dropdown";
+import { BOOKING_WINDOW_MONTHS, MAX_STAY_NIGHTS } from "@/lib/dates";
 import type { PropertyType } from "@/lib/queries";
 
 const TABS = [
@@ -198,19 +200,16 @@ export default function Hero({
               <div className="flex items-center">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src="/icons/user.svg" alt="" width={24} height={24} className="h-6 w-6 shrink-0" />
-                <select
-                  name="guests"
-                  aria-label="Guest"
-                  value={guests}
-                  onChange={(e) => setGuestSel(Number(e.target.value))}
-                  className="w-[150px] cursor-pointer appearance-none bg-transparent pl-2 pr-8 text-[18px] font-bold text-ink focus:outline-none"
-                >
-                  {guestOptions.map((n) => (
-                    <option key={n} value={n}>
-                      {n} Guest{n === 1 ? "" : "s"}
-                    </option>
-                  ))}
-                </select>
+                <Dropdown
+                  ariaLabel="Guest"
+                  value={String(guests)}
+                  onChange={(v) => setGuestSel(Number(v))}
+                  options={guestOptions.map((n) => ({
+                    value: String(n),
+                    label: `${n} Guest${n === 1 ? "" : "s"}`,
+                  }))}
+                  buttonClassName="flex w-[150px] cursor-pointer items-center justify-between bg-transparent pl-2 text-[18px] font-bold text-ink focus:outline-none"
+                />
                 <FieldChevron />
               </div>
             </div>
@@ -218,6 +217,8 @@ export default function Hero({
             <span className="hidden h-[60px] w-px bg-line lg:block" aria-hidden />
 
             <DateRangeField
+              windowMonths={BOOKING_WINDOW_MONTHS}
+              maxNights={MAX_STAY_NIGHTS}
               checkIn={checkIn}
               checkOut={checkOut}
               onChange={(nextIn, nextOut) => {

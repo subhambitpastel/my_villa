@@ -8,16 +8,36 @@ import { redirect } from "next/navigation";
 import {
   getVillaById,
   getPackageById,
+  getGuestRoomBookings,
+  getRoomPlan,
+  isPlanAvailable,
   isVillaAvailable,
   getOwnBookingForRange,
   getBookingForManage,
+  getBookingToPay,
   parseServiceList,
   type PackageForBooking,
 } from "@/lib/queries";
 import type { VillaService } from "@/components/host/draft";
 import { getCurrentUser } from "@/lib/session";
-import { isRoomBased, roomsForGuests } from "@/lib/rooms";
-import { addDays, dayFromNow, formatDay, nightsBetween, parseDay } from "@/lib/dates";
+import {
+  isGraduated,
+  isRoomBased,
+  MAX_ROOMS_PER_GUEST,
+  neededSpan,
+  planMaxRooms,
+  planRoomNights,
+  roomsForGuests,
+  type RoomSegment,
+} from "@/lib/rooms";
+import {
+  addDays,
+  dayFromNow,
+  formatDay,
+  nightsBetween,
+  parseDay,
+  MAX_STAY_NIGHTS,
+} from "@/lib/dates";
 import { quote } from "@/lib/pricing";
 import { dialValueFor } from "@/lib/countries";
 import { loginHref } from "@/lib/returnTo";
@@ -36,6 +56,8 @@ function BookingSummary({
   extras,
   rooms = 1,
   roomBased = false,
+  roomNights,
+  plan = [],
   pkg = null,
   modify,
 }: {
@@ -46,14 +68,26 @@ function BookingSummary({
   /** Rooms reserved (hotels/resorts) — price scales per room per night. */
   rooms?: number;
   roomBased?: boolean;
+  /** Room-nights held across the stay (rooms × nights for a flat stay). */
+  roomNights: number;
+  /** Per-leg room counts when the stay's rooms change mid-way; [] otherwise. */
+  plan?: RoomSegment[];
   /** Set for a package booking — one all-inclusive price, no nightly breakdown. */
   pkg?: PackageForBooking | null;
   /** Set when this is a booking modification: shows the amount already paid and
    *  the balance due now (the top-up) instead of a single total. */
   modify?: { alreadyPaid: number; balanceDue: number };
 }) {
-  const q = quote(villa.price * (roomBased ? rooms : 1), nights, villa.discount);
+  // Charge the room-nights actually held. With a constant room count this is
+  // identical to the old price × rooms, while the length-of-stay discount keeps
+  // keying off real nights rather than room-nights.
+  const q = quote(
+    nights > 0 ? (villa.price * roomNights) / nights : 0,
+    nights,
+    villa.discount,
+  );
   const extrasTotal = extras.reduce((sum, s) => sum + s.price, 0);
+  const adjusted = plan.length > 0;
   return (
     <aside className="h-fit w-full min-w-0 max-w-[758px] rounded-[10px] bg-white pb-12 shadow-[0px_15px_50px_0px_rgba(0,0,0,0.18)]">
       <div className="flex flex-col gap-6 p-6 sm:flex-row sm:gap-[22px]">
@@ -109,11 +143,47 @@ function BookingSummary({
         </div>
       ) : (
         <dl className="mt-8 space-y-[31px] pl-[39px] pr-[70px] text-[26px] leading-[1.3] text-[#121212]">
+          {/* An adjusted stay holds different rooms on different nights — spell
+              out each leg so the total is never a surprise. */}
+          {adjusted && (
+            <div className="rounded-[10px] border border-[#e8d5a3] bg-[#fdf9f0] p-4 text-[16px] leading-[1.35]">
+              <p className="font-semibold text-[#8a6a1f]">
+                Your rooms change during this stay
+              </p>
+              <ul className="mt-2 space-y-1">
+                {plan.map((seg) => (
+                  <li
+                    key={seg.checkIn}
+                    className="flex items-center justify-between gap-3"
+                  >
+                    <span className="text-[#121212]">
+                      {formatDay(seg.checkIn)} – {formatDay(seg.checkOut)}
+                    </span>
+                    <span className="shrink-0 font-semibold text-[#121212]">
+                      {seg.rooms} {seg.rooms === 1 ? "room" : "rooms"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 text-[14px] text-[#7a6a45]">
+                You&apos;re only charged for the rooms you have each night.
+              </p>
+            </div>
+          )}
           <div className="flex items-center justify-between">
             <dt>
-              ${villa.price.toFixed(2)}
-              {roomBased ? ` x ${rooms} room${rooms === 1 ? "" : "s"}` : ""} x{" "}
-              {nights} night{nights === 1 ? "" : "s"}
+              {adjusted ? (
+                <>
+                  ${villa.price.toFixed(2)} x {roomNights} room-night
+                  {roomNights === 1 ? "" : "s"}
+                </>
+              ) : (
+                <>
+                  ${villa.price.toFixed(2)}
+                  {roomBased ? ` x ${rooms} room${rooms === 1 ? "" : "s"}` : ""} x{" "}
+                  {nights} night{nights === 1 ? "" : "s"}
+                </>
+              )}
             </dt>
             <dd>${q.subtotal.toFixed(2)}</dd>
           </div>
@@ -170,10 +240,14 @@ export default async function PaymentPage({
     out?: string;
     guests?: string;
     rooms?: string;
+    /** "1" when the guest opted into an adjusted stay (rooms vary per night). */
+    flex?: string;
     svc?: string;
     pkg?: string;
     /** Set when this checkout is the top-up for modifying an existing booking. */
     modify?: string;
+    /** Set when settling an owner-made booking the guest still owes for. */
+    pay?: string;
   }>;
 }) {
   const params = await searchParams;
@@ -183,7 +257,7 @@ export default async function PaymentPage({
   const user = await getCurrentUser();
   if (!user) {
     const qs = new URLSearchParams();
-    for (const key of ["villa", "in", "out", "guests", "rooms", "svc", "pkg", "modify"] as const) {
+    for (const key of ["villa", "in", "out", "guests", "rooms", "flex", "svc", "pkg", "modify", "pay"] as const) {
       if (params[key]) qs.set(key, params[key]!);
     }
     redirect(loginHref(`/payment${qs.size ? "?" + qs.toString() : ""}`));
@@ -193,20 +267,45 @@ export default async function PaymentPage({
   // "default" villa — otherwise a param-less /payment would let someone pay for
   // a place they never selected (which is exactly how a wrong-villa booking
   // slipped through before).
-  const villaId = Number(params.villa);
+  // Pay mode: settling a booking the OWNER made for this guest. The stay already
+  // exists, so its villa, dates, rooms, guests, add-ons and price are all read
+  // off the row — nothing here comes from the URL. The query returns null unless
+  // the booking is this guest's own and genuinely still unpaid, which is what
+  // stops one guest paying (or reading) another's, or paying twice.
+  const payId = Number(params.pay);
+  const payBooking =
+    Number.isInteger(payId) && payId > 0
+      ? await getBookingToPay(payId, user.id)
+      : null;
+  if (params.pay && !payBooking) redirect("/profile/bookings");
+
+  const villaId = payBooking ? payBooking.villaId : Number(params.villa);
   const villa = Number.isInteger(villaId) ? await getVillaById(villaId) : null;
   if (!villa) redirect("/search");
 
   // Owners can't book their own villa — send them to its manage view.
   if (villa.owner_id === user.id) redirect(`/place?id=${villa.id}`);
 
+  // Archived: no NEW booking can be checked out here — back to the listing,
+  // which explains it isn't taking bookings. A `modify` top-up is deliberately
+  // still allowed through: on an archived stay the guest may add rooms/guests
+  // and owes the difference, and modifyBookingAction is what enforces that its
+  // dates don't move. Gating this on `modify` is what keeps that flow alive.
+  // Paying for a stay that already exists is exempt for the same reason modify
+  // is: the booking was made before (or despite) the archive, and the guest
+  // still owes for it.
+  if (villa.archived_at !== null && !params.modify && !payBooking)
+    redirect(`/place?id=${villa.id}`);
+
   const roomBased = isRoomBased(villa.kind);
 
   // Package mode: a package fixes the duration, occupancy and price server-side
   // (the guest only chose a start date). Load it and verify it's this villa's.
+  // An archived package can't start a new booking (packages have no top-up
+  // flow — their price is fixed — so there's no modify exception to make).
   const pkgId = Number(params.pkg);
   const pkg = Number.isInteger(pkgId) ? await getPackageById(pkgId) : null;
-  if (params.pkg && (!pkg || pkg.villaId !== villa.id))
+  if (params.pkg && (!pkg || pkg.villaId !== villa.id || pkg.archived))
     redirect(`/place?id=${villa.id}`);
 
   let checkIn: string;
@@ -215,8 +314,18 @@ export default async function PaymentPage({
   let rooms: number;
   let svcIndices: number[] = [];
   let extras: VillaService[] = [];
+  /** Set only for an adjusted stay — the per-leg room counts. Empty otherwise. */
+  let plan: RoomSegment[] = [];
 
-  if (pkg) {
+  if (payBooking) {
+    // Nothing to choose: the owner already set these terms and the guest is
+    // simply settling them.
+    checkIn = payBooking.checkIn;
+    checkOut = payBooking.checkOut;
+    guests = payBooking.guests;
+    rooms = payBooking.rooms;
+    extras = payBooking.extras;
+  } else if (pkg) {
     // Only the start date is the guest's; it must be real and not in the past.
     // Everything else is derived from the package.
     if (!parseDay(params.in) || params.in! < dayFromNow(0))
@@ -227,32 +336,77 @@ export default async function PaymentPage({
     rooms = roomsForGuests(villa.kind, guests, villa.people_per_room);
   } else {
     // Hotels/resorts reserve rooms (each sleeping people_per_room); other kinds
-    // book the whole place. Clamp rooms to inventory, then cap guests.
+    // book the whole place. Clamp the ask to the inventory AND to the per-guest
+    // cap — the same clamp createBookingAction applies, so the price quoted here
+    // is for exactly the rooms that end up booked.
     const roomsParam = Number(params.rooms);
-    rooms = roomBased
+    const roomsWanted = roomBased
       ? Math.min(
           Math.max(1, villa.rooms),
+          MAX_ROOMS_PER_GUEST,
           Number.isInteger(roomsParam) && roomsParam >= 1 ? roomsParam : 1,
         )
       : 1;
-    const cap = roomBased
-      ? Math.max(1, rooms * villa.people_per_room)
-      : Math.max(1, villa.max_guests);
     const guestsParam = Number(params.guests);
-    guests = Math.min(
-      cap,
-      Number.isInteger(guestsParam) && guestsParam >= 1 ? guestsParam : 2,
-    );
+    const guestsWanted =
+      Number.isInteger(guestsParam) && guestsParam >= 1 ? guestsParam : 2;
 
     // Dates must be real, in the future, and chosen by the guest.
     const datesValid =
       !!parseDay(params.in) &&
       !!parseDay(params.out) &&
       nightsBetween(params.in!, params.out!) >= 1 &&
+      nightsBetween(params.in!, params.out!) <= MAX_STAY_NIGHTS &&
       params.in! >= dayFromNow(0);
-    if (!datesValid) redirect(`/place?id=${villa.id}&guests=${guests}`);
+    if (!datesValid) redirect(`/place?id=${villa.id}&guests=${guestsWanted}`);
     checkIn = params.in!;
     checkOut = params.out!;
+
+    // Nights the guest already covers with rooms held here are trimmed off, the
+    // same way the booking card and createBookingAction trim them — so the price
+    // shown is for exactly the nights that end up booked. A range that's fully
+    // covered (or gapped) has nothing this checkout can charge for; send the
+    // guest back to the villa page, which explains why.
+    if (roomBased && !params.modify) {
+      const mine = await getGuestRoomBookings(villa.id, user.id);
+      const span = neededSpan(checkIn, checkOut, roomsWanted, mine);
+      if (!span || span.gap)
+        redirect(
+          `/place?id=${villa.id}&in=${checkIn}&out=${checkOut}&guests=${guestsWanted}`,
+        );
+      checkIn = span.checkIn;
+      checkOut = span.checkOut;
+    }
+
+    // Adjusted stay: the guest asked for more rooms than are free on every
+    // night and chose to take what each night can give instead. The URL carries
+    // only the ask and the opt-in — the actual split (and therefore the price)
+    // is re-derived here from live availability, never trusted from the client.
+    // Modifying an existing booking can't produce one, so it's excluded.
+    if (roomBased && params.flex === "1" && !params.modify) {
+      // Passing the guest applies their own per-night allowance too, so the
+      // split priced here is the one the booking card offered — and the one
+      // createBookingAction will re-derive on submit.
+      const derived = await getRoomPlan(
+        villa.id,
+        checkIn,
+        checkOut,
+        roomsWanted,
+        0,
+        user.id,
+      );
+      // If the count doesn't actually change, it's just a normal flat stay.
+      if (isGraduated(derived)) plan = derived;
+    }
+
+    rooms = plan.length > 0 ? planMaxRooms(plan) : roomsWanted;
+    // Occupancy follows the rooms the stay peaks at (`rooms`), matching the
+    // booking card and createBookingAction — an adjusted stay isn't held to its
+    // leanest night.
+    const cap = roomBased
+      ? Math.max(1, rooms * villa.people_per_room)
+      : Math.max(1, villa.max_guests);
+    guests = Math.min(cap, guestsWanted);
 
     // Extra services picked on the villa page, as indices into the villa's
     // service list — prices always come from the DB, never the URL. Only paid
@@ -271,6 +425,10 @@ export default async function PaymentPage({
   }
 
   const nights = nightsBetween(checkIn, checkOut);
+  // Room-nights the stay actually holds. For a flat stay this is just
+  // rooms × nights, so pricing is unchanged; an adjusted stay sums its legs.
+  const roomNights =
+    plan.length > 0 ? planRoomNights(plan) : (roomBased ? rooms : 1) * nights;
 
   // Modify mode: the guest edited an existing nightly booking and this checkout
   // is the top-up for a HIGHER total. Confirm the booking is theirs, still active
@@ -316,14 +474,31 @@ export default async function PaymentPage({
   }
 
   // The guest's own booking is excluded when modifying so its current dates never
-  // read as a clash against the (possibly overlapping) new range.
-  const available = await isVillaAvailable(
-    villa.id,
-    checkIn,
-    checkOut,
-    rooms,
-    isModify ? modifyId : 0,
-  );
+  // read as a clash against the (possibly overlapping) new range. An adjusted
+  // stay is checked leg by leg — a single bottleneck figure would reject the
+  // very legs that ask for more rooms.
+  // Paying IS the reservation for an owner-made booking — it's pending until
+  // then and holds nothing — so its availability is checked like any other
+  // checkout. Its own row is excluded, though a pending row is invisible to the
+  // engine anyway. If the rooms went in the meantime, the guest is told here
+  // rather than after being charged.
+  const available = payBooking
+    ? await isVillaAvailable(
+        villa.id,
+        checkIn,
+        checkOut,
+        rooms,
+        payBooking.id,
+      )
+    : plan.length > 0
+      ? await isPlanAvailable(villa.id, plan)
+      : await isVillaAvailable(
+          villa.id,
+          checkIn,
+          checkOut,
+          rooms,
+          isModify ? modifyId : 0,
+        );
   // If the dates are taken, is it the guest's OWN booking? (e.g. they just paid
   // and refreshed, or came back to checkout.) Then reassure them instead of
   // telling them the villa was snatched away.
@@ -361,28 +536,57 @@ export default async function PaymentPage({
             <div className="w-full lg:w-[48.26%] lg:shrink-0">
               {available ? (
                 <>
-                  <p
-                    role="status"
-                    className="mb-8 flex items-center gap-3 rounded-[10px] bg-brand/10 px-5 py-4 text-[16px] text-brand-dark"
-                  >
-                    <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true" className="shrink-0">
-                      <circle cx="11" cy="11" r="10" fill="#5D5FEF" />
-                      <path d="M6.5 11.5l3 3 6-6.5" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                    {villa.name} is available for {formatDay(checkIn)} –{" "}
-                    {formatDay(checkOut)} ({nights} night{nights === 1 ? "" : "s"}).
-                  </p>
+                  {payBooking ? (
+                    /* Not an offer to book — the stay is already held. Say who
+                       arranged it so the request isn't a surprise. */
+                    <p
+                      role="status"
+                      className="mb-8 flex items-start gap-3 rounded-[10px] bg-[#fdf9f0] px-5 py-4 text-[16px] leading-[1.5] text-[#8a6a1f]"
+                    >
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="mt-0.5 shrink-0">
+                        <path d="M12 8v5m0 3h.01M12 21a9 9 0 100-18 9 9 0 000 18Z" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      <span>
+                        <span className="font-semibold">{payBooking.hostName}</span>{" "}
+                        booked this stay for you at {villa.name} and is asking you
+                        to pay for it. Your room{payBooking.rooms === 1 ? " is" : "s are"}{" "}
+                        already held for {formatDay(checkIn)} – {formatDay(checkOut)}.
+                      </span>
+                    </p>
+                  ) : (
+                    <p
+                      role="status"
+                      className="mb-8 flex items-center gap-3 rounded-[10px] bg-brand/10 px-5 py-4 text-[16px] text-brand-dark"
+                    >
+                      <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true" className="shrink-0">
+                        <circle cx="11" cy="11" r="10" fill="#5D5FEF" />
+                        <path d="M6.5 11.5l3 3 6-6.5" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      {villa.name} is available for {formatDay(checkIn)} –{" "}
+                      {formatDay(checkOut)} ({nights} night{nights === 1 ? "" : "s"}).
+                    </p>
+                  )}
                   <PaymentForm
                     villaId={villa.id}
                     checkIn={checkIn}
                     checkOut={checkOut}
+                    /* A stay starting today has already begun, so it can never
+                       be cancelled — warn before they pay, not after. Derived
+                       here (server) so it can't drift from the guard. */
+                    startsToday={checkIn === dayFromNow(0)}
                     guests={guests}
                     rooms={rooms}
                     roomBased={roomBased}
+                    flex={plan.length > 0}
                     services={svcIndices}
                     packageId={pkg ? pkg.id : undefined}
                     modify={
                       isModify ? { bookingId: modifyId, amountDue: balanceDue } : undefined
+                    }
+                    pay={
+                      payBooking
+                        ? { bookingId: payBooking.id, amountDue: payBooking.amount }
+                        : undefined
                     }
                     profile={{
                       email: user.email,
@@ -465,6 +669,8 @@ export default async function PaymentPage({
               extras={extras}
               rooms={rooms}
               roomBased={roomBased}
+              roomNights={roomNights}
+              plan={plan}
               pkg={pkg}
               modify={isModify ? { alreadyPaid, balanceDue } : undefined}
             />

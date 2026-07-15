@@ -1,8 +1,20 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { addMonths, nightsBetween } from "@/lib/dates";
+import { MAX_ROOMS_PER_GUEST } from "@/lib/rooms";
 
 /* eslint-disable @next/next/no-img-element */
+
+/** How the per-night room count reads at a glance: 1 = last room (red), 2–3 =
+ *  going (amber), 4+ = comfortable (green). The NUMBER carries the meaning —
+ *  colour only reinforces it, so this never relies on colour alone. */
+const roomsTone = (free: number): string =>
+  free <= 1
+    ? "text-[#eb5757]"
+    : free < 4
+      ? "text-[#c98a00]"
+      : "text-[#1c7d5c]";
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
@@ -44,6 +56,9 @@ export default function DateRangeField({
   onChange,
   variant = "hero",
   bookedRanges = [],
+  windowMonths,
+  maxNights,
+  roomsFreeOn,
 }: {
   checkIn: string | null;
   checkOut: string | null;
@@ -53,6 +68,17 @@ export default function DateRangeField({
   variant?: "hero" | "compact" | "booking";
   /** Confirmed stays whose days should be blocked in the calendar. */
   bookedRanges?: { checkIn: string; checkOut: string }[];
+  /** When set, the calendar only shows dates from today through this many
+   *  calendar months out — later days are disabled and month nav stops there. */
+  windowMonths?: number;
+  /** When set, a stay can be at most this many nights — check-out days beyond
+   *  check-in + maxNights are disabled while picking check-out. */
+  maxNights?: number;
+  /** Rooms still free on a given night (room-based stays only). When set, each
+   *  bookable day shows that count under it, capped at MAX_ROOMS_PER_GUEST —
+   *  past the cap the exact number doesn't help, since it's the most one guest
+   *  can book online anyway. Omit for whole-villa stays, which have no rooms. */
+  roomsFreeOn?: (dateKey: string) => number;
 }) {
   const [active, setActive] = useState<Field | null>(null);
   const [view, setView] = useState({ year: 0, month: 0 });
@@ -84,21 +110,28 @@ export default function DateRangeField({
   // True if the stay [from, to) would overlap any confirmed booking.
   const spanCrossesBooked = (from: string, to: string) =>
     bookedRanges.some((r) => r.checkIn < to && r.checkOut > from);
+  // True if a stay [from, to) would exceed the maximum allowed nights.
+  const tooLong = (from: string, to: string) =>
+    maxNights != null && nightsBetween(from, to) > maxNights;
 
   function pick(day: string) {
     if (
       active === "checkout" &&
       checkIn &&
       day > checkIn &&
-      !spanCrossesBooked(checkIn, day)
+      !spanCrossesBooked(checkIn, day) &&
+      !tooLong(checkIn, day)
     ) {
       onChange(checkIn, day);
       setActive(null);
     } else {
       // Picking check-in, or a check-out on/before check-in, or a range that
-      // would cross a booked block: restart the range from this day.
+      // would cross a booked block or exceed the max stay: restart from this day.
       const keepOut =
-        checkOut && checkOut > day && !spanCrossesBooked(day, checkOut)
+        checkOut &&
+        checkOut > day &&
+        !spanCrossesBooked(day, checkOut) &&
+        !tooLong(day, checkOut)
           ? checkOut
           : null;
       onChange(day, keepOut);
@@ -107,11 +140,20 @@ export default function DateRangeField({
   }
 
   const today = todayKey();
+  // Furthest bookable day (inclusive) when a booking window is enforced.
+  const maxDate =
+    windowMonths != null ? addMonths(today, windowMonths) : null;
   const viewIndex = view.year * 12 + view.month;
   const nowIndex = (() => {
     const [y, m] = today.split("-").map(Number);
     return y * 12 + (m - 1);
   })();
+  const maxIndex = maxDate
+    ? (() => {
+        const [y, m] = maxDate.split("-").map(Number);
+        return y * 12 + (m - 1);
+      })()
+    : Infinity;
 
   const firstWeekday =
     (new Date(Date.UTC(view.year, view.month, 1)).getUTCDay() + 6) % 7;
@@ -137,7 +179,8 @@ export default function DateRangeField({
     checkIn &&
     hover &&
     hover > checkIn &&
-    !spanCrossesBooked(checkIn, hover)
+    !spanCrossesBooked(checkIn, hover) &&
+    !tooLong(checkIn, hover)
       ? hover
       : null);
 
@@ -295,8 +338,9 @@ export default function DateRangeField({
                     : { year, month: month + 1 },
                 );
               }}
+              disabled={viewIndex >= maxIndex}
               aria-label="Next month"
-              className="flex h-8 w-8 items-center justify-center rounded-full text-ink hover:bg-[rgba(123,97,255,0.12)]"
+              className="flex h-8 w-8 items-center justify-center rounded-full text-ink hover:bg-[rgba(123,97,255,0.12)] disabled:opacity-30 disabled:hover:bg-transparent"
             >
               <svg width="8" height="14" viewBox="0 0 8 14" fill="none" aria-hidden="true">
                 <path d="M1 1l6 6-6 6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -339,22 +383,49 @@ export default function DateRangeField({
                 checkIn !== null &&
                 key > checkIn &&
                 !spanCrossesBooked(checkIn, key);
+              // While picking check-out, a day past check-in + maxNights would
+              // make the stay too long — disable it (the edges stay clickable).
+              const exceedsMaxStay =
+                active === "checkout" &&
+                checkIn !== null &&
+                key > checkIn &&
+                !isEdge &&
+                tooLong(checkIn, key);
               const disabled =
-                key < today || (booked && !turnoverCheckout && !isEdge);
+                key < today ||
+                (maxDate !== null && key > maxDate) ||
+                exceedsMaxStay ||
+                (booked && !turnoverCheckout && !isEdge);
               const inRange =
                 !isEdge &&
                 checkIn !== null &&
                 previewEnd !== null &&
                 key >= checkIn &&
                 key <= previewEnd;
-              return (
+              // Rooms free on this night. Keyed off the DAY's own availability,
+              // not `disabled` — that also swings on the in-progress selection
+              // (max-stay, turnover), and counts blinking as you pick would read
+              // as the hotel filling up.
+              const outOfWindow =
+                key < today || (maxDate !== null && key > maxDate);
+              const roomsLeft =
+                roomsFreeOn && !outOfWindow
+                  ? Math.min(MAX_ROOMS_PER_GUEST, roomsFreeOn(key))
+                  : 0;
+              const dayButton = (
                 <button
                   key={key}
                   type="button"
                   disabled={disabled}
                   onClick={() => pick(key)}
                   onMouseEnter={() => setHover(key)}
-                  aria-label={`${day} ${MONTH_NAMES[view.month]} ${view.year}`}
+                  aria-label={
+                    // The count is rendered aria-hidden (a bare "3" says
+                    // nothing on its own), so it rides along here instead.
+                    roomsLeft > 0
+                      ? `${day} ${MONTH_NAMES[view.month]} ${view.year}, ${roomsLeft} room${roomsLeft === 1 ? "" : "s"} left`
+                      : `${day} ${MONTH_NAMES[view.month]} ${view.year}`
+                  }
                   aria-pressed={isEdge}
                   title={
                     !booked
@@ -381,6 +452,24 @@ export default function DateRangeField({
                 >
                   {day}
                 </button>
+              );
+              // Whole-villa stays have no rooms to count — keep the bare pill so
+              // their calendar is untouched.
+              if (!roomsFreeOn) return dayButton;
+              return (
+                <span key={key} className="flex flex-col items-center">
+                  {dayButton}
+                  {/* Fixed height whether or not there's a number, so rows don't
+                      jump between months. */}
+                  <span
+                    aria-hidden
+                    className={`mt-0.5 h-[12px] text-[10px] font-semibold leading-[12px] ${
+                      roomsLeft > 0 ? roomsTone(roomsLeft) : ""
+                    }`}
+                  >
+                    {roomsLeft > 0 ? roomsLeft : ""}
+                  </span>
+                </span>
               );
             })}
           </div>

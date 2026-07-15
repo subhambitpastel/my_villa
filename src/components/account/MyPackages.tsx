@@ -7,8 +7,11 @@ import {
   createPackageAction,
   updatePackageAction,
   deletePackageAction,
+  setPackageArchivedAction,
 } from "@/lib/actions";
-import type { PackageItem, PropertyItem } from "@/lib/queries";
+import type { BookingLock, PackageItem, PropertyItem } from "@/lib/queries";
+import AccountSearch, { matchesSearch } from "@/components/account/AccountSearch";
+import { formatDay } from "@/lib/dates";
 import { isRoomBased, roomsForGuests } from "@/lib/rooms";
 import { quote } from "@/lib/pricing";
 import {
@@ -103,9 +106,12 @@ function repriceFromDiscount(f: Form, villas: PropertyItem[]): Form {
 export default function MyPackages({
   villas,
   packages,
+  locks = {},
 }: {
   villas: PropertyItem[];
   packages: PackageItem[];
+  /** Packages with live bookings, keyed by id — their guest count is frozen. */
+  locks?: Record<number, BookingLock>;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -116,6 +122,24 @@ export default function MyPackages({
   const [newInclusion, setNewInclusion] = useState("");
   // Package awaiting a delete confirmation.
   const [confirming, setConfirming] = useState<PackageItem | null>(null);
+  const [query, setQuery] = useState("");
+
+  // Guests already booked onto a package are measured against its capacity, so
+  // the guest count is frozen while those stays are live. Creating a new package
+  // is never locked — only editing one that has bookings.
+  const editLock = editingId ? locks[editingId] : undefined;
+  const guestsLocked = (editLock?.active ?? 0) > 0;
+
+  const visiblePackages = packages.filter((p) =>
+    matchesSearch(
+      query,
+      p.name,
+      p.villaName,
+      p.villaCity,
+      packageTypeLabel(p.type),
+      p.inclusions.join(" "),
+    ),
+  );
 
   function resetForm() {
     setEditingId(null);
@@ -209,6 +233,15 @@ export default function MyPackages({
       await deletePackageAction(id);
       if (editingId === id) resetForm();
       setConfirming(null);
+      router.refresh();
+    });
+  }
+
+  // Archiving a package retires it without deleting it: no new bookings and it
+  // drops off the guest-facing pages, while stays already booked go ahead.
+  function toggleArchived(p: PackageItem) {
+    startTransition(async () => {
+      await setPackageArchivedAction(p.id, !p.archived);
       router.refresh();
     });
   }
@@ -422,6 +455,12 @@ export default function MyPackages({
                 <input
                   value={form.maxGuests}
                   inputMode="numeric"
+                  readOnly={guestsLocked}
+                  title={
+                    guestsLocked
+                      ? "Locked while this package has active bookings — it unlocks once those stays are completed."
+                      : undefined
+                  }
                   onChange={(e) =>
                     setForm((f) =>
                       repriceFromDiscount(
@@ -431,7 +470,9 @@ export default function MyPackages({
                     )
                   }
                   placeholder="e.g. 4"
-                  className={input}
+                  className={`${input} ${
+                    guestsLocked ? "cursor-not-allowed bg-[#f4f4f6] text-[#6f6f78]" : ""
+                  }`}
                 />
               </label>
               <label className="block">
@@ -483,6 +524,29 @@ export default function MyPackages({
                 </span>
               </label>
             </div>
+            {guestsLocked && editLock && (
+              <p className="mt-2 flex items-start gap-2 rounded-[8px] bg-[#fff3d6] px-3 py-2 text-[11px] leading-relaxed text-[#7a5200]">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="mt-0.5 shrink-0">
+                  <path d="M7 10V7a5 5 0 0110 0v3M5 10h14v11H5z" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <span>
+                  The guest count is locked — this package has{" "}
+                  <span className="font-semibold">
+                    {editLock.active} active booking
+                    {editLock.active === 1 ? "" : "s"}
+                  </span>
+                  {editLock.lastCheckOut ? (
+                    <>
+                      , the last checking out on{" "}
+                      <span className="font-semibold">
+                        {formatDay(editLock.lastCheckOut)}
+                      </span>
+                    </>
+                  ) : null}
+                  . Everything else here can still be edited.
+                </span>
+              </p>
+            )}
             {capacity && (
               <p
                 className={`mt-2 text-[11px] ${
@@ -605,13 +669,25 @@ export default function MyPackages({
           <h3 className="mt-8 text-[15px] font-semibold text-ink">
             Your packages ({packages.length})
           </h3>
+          {packages.length > 0 && (
+            <AccountSearch
+              value={query}
+              onChange={setQuery}
+              placeholder="Search your packages by name, villa or inclusion"
+              className="mt-3"
+            />
+          )}
           {packages.length === 0 ? (
             <p className="mt-3 rounded-[8px] border border-[#dfdfdf] px-4 py-6 text-center text-[13px] text-muted">
               No packages yet. Create one above.
             </p>
+          ) : visiblePackages.length === 0 ? (
+            <p className="mt-3 rounded-[8px] border border-[#dfdfdf] px-4 py-6 text-center text-[13px] text-muted">
+              No packages match &ldquo;{query}&rdquo;.
+            </p>
           ) : (
             <ul className="mt-3 space-y-3">
-              {packages.map((p) => (
+              {visiblePackages.map((p) => (
                 <li key={p.id} className="rounded-[8px] border border-[#dfdfdf] p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -625,6 +701,24 @@ export default function MyPackages({
                         {p.discount > 0 && (
                           <span className="rounded-[3px] bg-[#e6f7f1] px-1.5 py-0.5 text-[10px] font-medium text-accent">
                             {p.discount}% off
+                          </span>
+                        )}
+                        {p.archived && (
+                          <span
+                            title="Hidden from guests and taking no new bookings. Stays already booked still go ahead."
+                            className="rounded-[3px] bg-[#e9e9ef] px-1.5 py-0.5 text-[10px] font-semibold text-[#5f5f6b]"
+                          >
+                            Archived
+                          </span>
+                        )}
+                        {/* The villa's own archive overrides this package —
+                            restoring the package alone wouldn't bring it back. */}
+                        {p.villaArchived && (
+                          <span
+                            title="This package's villa is archived, so the package takes no bookings either. Restore the villa from My Property."
+                            className="rounded-[3px] bg-[#fff3d6] px-1.5 py-0.5 text-[10px] font-semibold text-[#a06a00]"
+                          >
+                            Villa archived
                           </span>
                         )}
                       </div>
@@ -662,6 +756,14 @@ export default function MyPackages({
                       className="text-[13px] font-medium text-[#121212] underline"
                     >
                       Edit
+                    </button>
+                    <button
+                      type="button"
+                      disabled={pending}
+                      onClick={() => toggleArchived(p)}
+                      className="text-[13px] font-medium text-[#121212] underline disabled:opacity-50"
+                    >
+                      {p.archived ? "Restore" : "Archive"}
                     </button>
                     <button
                       type="button"

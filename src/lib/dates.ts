@@ -52,6 +52,28 @@ export function addDays(date: string, days: number): string {
   return new Date(d.getTime() + days * 86_400_000).toISOString().slice(0, 10);
 }
 
+/** `date` + `months` calendar months as YYYY-MM-DD (UTC). The day-of-month is
+ *  clamped to the target month's length (e.g. Jan 31 + 1 month → Feb 28/29).
+ *  Returns `date` unchanged if unparseable. */
+export function addMonths(date: string, months: number): string {
+  const d = parseDay(date);
+  if (!d) return date;
+  const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, 1));
+  const daysInTarget = new Date(
+    Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0),
+  ).getUTCDate();
+  target.setUTCDate(Math.min(d.getUTCDate(), daysInTarget));
+  return target.toISOString().slice(0, 10);
+}
+
+/** How far ahead a guest may book/search: the calendars only show dates from
+ *  today through this many calendar months out. */
+export const BOOKING_WINDOW_MONTHS = 3;
+
+/** The longest stay a guest may book in the nightly flow — check-out can be at
+ *  most this many nights after check-in. Packages set their own fixed length. */
+export const MAX_STAY_NIGHTS = 30;
+
 /* -------------------------- date of birth --------------------------- */
 
 /** The latest date of birth (YYYY-MM-DD) that is still at least `minAge` years

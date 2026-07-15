@@ -2,7 +2,14 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { addDays, nightsBetween, formatRange } from "@/lib/dates";
+import {
+  addDays,
+  addMonths,
+  nightsBetween,
+  formatRange,
+  BOOKING_WINDOW_MONTHS,
+  MAX_STAY_NIGHTS,
+} from "@/lib/dates";
 import { quote, bookingReference } from "@/lib/pricing";
 import {
   updateBookingAction,
@@ -13,7 +20,13 @@ import StartDateField from "@/components/place/StartDateField";
 import DateRangeField from "@/components/home/DateRangeField";
 import type { BookedRange } from "@/lib/queries";
 import type { VillaService } from "@/components/host/draft";
-import { fullyBookedRanges, roomsFreeForRange, type RoomBooking } from "@/lib/rooms";
+import {
+  allowanceFree,
+  fullyBookedRanges,
+  MAX_ROOMS_PER_GUEST,
+  roomsFreeForRange,
+  type RoomBooking,
+} from "@/lib/rooms";
 
 /* eslint-disable @next/next/no-img-element */
 
@@ -29,7 +42,25 @@ type Shared = {
   setMessage: (m: Message) => void;
   router: ReturnType<typeof useRouter>;
   footer: React.ReactNode;
+  /** The listing has been archived: this stay still goes ahead, but its dates are
+   *  frozen (the server refuses a re-date). Rooms, guests and add-ons stay
+   *  editable, and cancelling is always allowed. */
+  archived: boolean;
 };
+
+/** Shown in place of the date picker on an archived listing. */
+function ArchivedDatesNotice({ packageStay }: { packageStay: boolean }) {
+  return (
+    <p className="mt-3 rounded-[10px] bg-[#fff6e5] px-4 py-3 text-[14px] leading-[1.5] text-[#a06a00]">
+      The host has stopped taking new bookings here, so these dates are fixed.
+      Your stay goes ahead exactly as booked
+      {packageStay
+        ? "."
+        : " — you can still change rooms, guests and add-ons below."}{" "}
+      If the dates no longer work, cancel the booking instead.
+    </p>
+  );
+}
 
 export default function ManageBookingCard({
   bookingId,
@@ -46,15 +77,20 @@ export default function ManageBookingCard({
   peoplePerRoom = 0,
   rooms = 1,
   roomBookings = [],
+  myRoomBookings = [],
   discount = 0,
   packageStay = null,
   services = [],
   originalExtras = [],
   originalTotal = 0,
+  archived = false,
 }: {
   bookingId: number;
   villaId: number;
   price: number;
+  /** The villa (or this stay's package) is archived — dates frozen, the rest of
+   *  the booking still editable. Mirrors the server-side guard. */
+  archived?: boolean;
   /** Host-set % off the nightly price (applied in the quote). */
   discount?: number;
   checkIn: string;
@@ -71,6 +107,10 @@ export default function ManageBookingCard({
   peoplePerRoom?: number;
   rooms?: number;
   roomBookings?: RoomBooking[];
+  /** This guest's OTHER rooms at the villa (this booking excluded). The per-guest
+   *  cap counts against them here exactly as it does when booking, so editing
+   *  can't offer rooms modifyBookingAction would refuse. */
+  myRoomBookings?: RoomBooking[];
   /** Set when this booking is a package: its length, occupancy and price are
    *  fixed, so the guest may only shift the start date. */
   packageStay?: { nights: number; price: number } | null;
@@ -208,7 +248,15 @@ export default function ManageBookingCard({
     </>
   );
 
-  const shared: Shared = { bookingId, pending, startTransition, setMessage, router, footer };
+  const shared: Shared = {
+    bookingId,
+    pending,
+    startTransition,
+    setMessage,
+    router,
+    footer,
+    archived,
+  };
 
   if (packageStay) {
     return (
@@ -244,6 +292,7 @@ export default function ManageBookingCard({
       peoplePerRoom={peoplePerRoom}
       rooms={rooms}
       roomBookings={roomBookings}
+      myRoomBookings={myRoomBookings}
       discount={discount}
       services={services}
       originalExtras={originalExtras}
@@ -271,6 +320,7 @@ function NightlyManageCard({
   peoplePerRoom,
   rooms: initialRooms,
   roomBookings,
+  myRoomBookings,
   discount,
   services,
   originalExtras,
@@ -280,6 +330,7 @@ function NightlyManageCard({
   setMessage,
   router,
   footer,
+  archived,
 }: Shared & {
   villaId: number;
   price: number;
@@ -294,6 +345,7 @@ function NightlyManageCard({
   peoplePerRoom: number;
   rooms: number;
   roomBookings: RoomBooking[];
+  myRoomBookings: RoomBooking[];
   discount: number;
   services: VillaService[];
   originalExtras: number[];
@@ -313,7 +365,7 @@ function NightlyManageCard({
   const [showUnavailable, setShowUnavailable] = useState(false);
 
   const nights = Math.max(0, nightsBetween(checkIn, checkOut));
-  const datesReady = nights >= 1 && checkIn >= today;
+  const datesReady = nights >= 1 && nights <= MAX_STAY_NIGHTS && checkIn >= today;
 
   // This booking's own rooms are already excluded from the ranges passed in.
   const calendarBlocked = roomBased
@@ -324,8 +376,25 @@ function NightlyManageCard({
       ? roomsFreeForRange(checkIn, checkOut, roomBookings, totalRooms)
       : totalRooms
     : 1;
-  const roomsMax = Math.max(1, roomsFree);
+  // What's left of this guest's per-night allowance, counting their OTHER stays
+  // here (this booking is excluded, so re-saving its own rooms never counts
+  // against itself — same exclusion modifyBookingAction uses).
+  const allowanceLeft = roomBased
+    ? datesReady
+      ? allowanceFree(checkIn, checkOut, myRoomBookings)
+      : MAX_ROOMS_PER_GUEST
+    : 1;
+  // The ceiling is the SAME here as when booking: the hotel's free inventory and
+  // the guest's own allowance, whichever is tighter. Offering the full inventory
+  // would let someone edit their way to 12 rooms when booking caps them at 6 —
+  // and modifyBookingAction would refuse it anyway.
+  const roomsMax = roomBased
+    ? Math.max(1, Math.min(roomsFree, allowanceLeft))
+    : 1;
   const rooms = roomBased ? Math.min(roomsSel, roomsMax) : 1;
+  // They're pinned below the inventory by their own rooms elsewhere — say so,
+  // rather than letting the picker just stop for no visible reason.
+  const cappedByAllowance = roomBased && datesReady && allowanceLeft < roomsFree;
   const soldOut = roomBased && datesReady && roomsFree === 0;
   const guestCap = roomBased
     ? Math.max(1, rooms * peoplePerRoom)
@@ -414,18 +483,40 @@ function NightlyManageCard({
         </span>
       </div>
 
+      {/* Archived: the dates are settled, so show them read-only rather than a
+          picker that would only be refused on save. Everything below stays
+          editable — that's the whole point of the narrower rule. */}
       <div className="mt-5">
-        <DateRangeField
-          variant="booking"
-          checkIn={checkIn || null}
-          checkOut={checkOut || null}
-          bookedRanges={calendarBlocked}
-          onChange={(nextIn, nextOut) => {
-            setCheckIn(nextIn ?? "");
-            setCheckOut(nextOut ?? "");
-            setShowUnavailable(false);
-          }}
-        />
+        {archived ? (
+          <>
+            <div className="rounded-[10px] border-[1.5px] border-[#ddd] p-[15px]">
+              <span className="block text-[18px] font-medium leading-[1.2] text-[#121212]">
+                Your dates
+              </span>
+              <span className="mt-0.5 block text-[16px] leading-[1.2] text-[#4a4a4a]">
+                {formatRange(checkIn, checkOut)} · {nights} night
+                {nights === 1 ? "" : "s"}
+              </span>
+            </div>
+            <ArchivedDatesNotice packageStay={false} />
+          </>
+        ) : (
+          /* No maxNights — same as the booking card: a longer stay is allowed
+             to be PICKED, and the note under the button explains it's arranged
+             through the host rather than leaving days mysteriously dead. */
+          <DateRangeField
+            variant="booking"
+            windowMonths={BOOKING_WINDOW_MONTHS}
+            checkIn={checkIn || null}
+            checkOut={checkOut || null}
+            bookedRanges={calendarBlocked}
+            onChange={(nextIn, nextOut) => {
+              setCheckIn(nextIn ?? "");
+              setCheckOut(nextOut ?? "");
+              setShowUnavailable(false);
+            }}
+          />
+        )}
       </div>
 
       {roomBased && (
@@ -449,6 +540,13 @@ function NightlyManageCard({
                   {rooms} {rooms === 1 ? "room" : "rooms"}
                   {datesReady && (
                     <span className="text-[#8a8a94]"> · {roomsFree} available</span>
+                  )}
+                  {/* Say WHY the picker stops short of the inventory. */}
+                  {cappedByAllowance && (
+                    <span className="text-[#8a6a1f]">
+                      {" "}
+                      · you can hold {allowanceLeft} more here
+                    </span>
                   )}
                 </span>
               )}
@@ -537,6 +635,20 @@ function NightlyManageCard({
             ))}
           </ul>
         </div>
+      )}
+
+      {/* Same line the booking card draws: online stays cap at MAX_STAY_NIGHTS.
+          A silent disabled button reads as broken — say why, and where a longer
+          stay CAN be arranged. */}
+      {nights > MAX_STAY_NIGHTS && (
+        <p className="mt-[22px] rounded-[10px] border border-[#e8d5a3] bg-[#fdf9f0] px-4 py-3 text-[14px] leading-[1.45] text-[#7a6a45]">
+          <span className="font-medium text-[#8a6a1f]">
+            {nights} nights is longer than the {MAX_STAY_NIGHTS}-night online
+            limit.
+          </span>{" "}
+          To stay longer, request a call from the host on the property&rsquo;s
+          page and they&rsquo;ll arrange it directly.
+        </p>
       )}
 
       <button
@@ -636,6 +748,7 @@ function PackageManageCard({
   setMessage,
   router,
   footer,
+  archived,
 }: Shared & {
   packageStay: { nights: number; price: number };
   checkIn: string;
@@ -655,9 +768,11 @@ function PackageManageCard({
   const calendarBlocked = roomBased
     ? fullyBookedRanges(roomBookings, totalRooms)
     : bookedRanges;
+  // Rebooking a package stay is capped to the same window as a fresh booking.
+  const maxDate = addMonths(today, BOOKING_WINDOW_MONTHS);
 
   function spanAvailable(day: string): boolean {
-    if (!day || day < today) return false;
+    if (!day || day < today || day > maxDate) return false;
     const co = addDays(day, stayNights);
     return roomBased
       ? roomsFreeForRange(day, co, roomBookings, totalRooms) >= rooms
@@ -696,18 +811,37 @@ function PackageManageCard({
         </span>
       </div>
 
+      {/* Archived package (or villa): the start date is frozen, and a package
+          fixes everything else already — so there's nothing left to edit here
+          beyond cancelling. */}
       <div className="mt-5">
-        <StartDateField
-          value={checkIn}
-          onChange={(day) => {
-            setCheckIn(day);
-            setCheckOut(addDays(day, stayNights));
-          }}
-          today={today}
-          nights={stayNights}
-          isUnavailable={(day) => !spanAvailable(day)}
-          hasBlockedDates={calendarBlocked.length > 0}
-        />
+        {archived ? (
+          <>
+            <div className="rounded-[10px] border-[1.5px] border-[#ddd] p-[15px]">
+              <span className="block text-[15px] font-medium leading-[1.2] text-[#121212]">
+                Your start date
+              </span>
+              <span className="mt-0.5 block text-[16px] leading-[1.2] text-[#4a4a4a]">
+                {formatRange(checkIn, checkOut)} · {stayNights} night
+                {stayNights === 1 ? "" : "s"}
+              </span>
+            </div>
+            <ArchivedDatesNotice packageStay />
+          </>
+        ) : (
+          <StartDateField
+            value={checkIn}
+            onChange={(day) => {
+              setCheckIn(day);
+              setCheckOut(addDays(day, stayNights));
+            }}
+            today={today}
+            maxDate={maxDate}
+            nights={stayNights}
+            isUnavailable={(day) => !spanAvailable(day)}
+            hasBlockedDates={calendarBlocked.length > 0}
+          />
+        )}
       </div>
 
       {roomBased && (

@@ -9,6 +9,7 @@ import { getCurrentUser } from "@/lib/session";
 import {
   getBookingForManage,
   getBookedRanges,
+  getGuestRoomBookings,
   getRoomBookings,
   getVillaDetail,
   getVillaReviews,
@@ -62,6 +63,14 @@ export default async function ManageBookingPage({
   const roomBookings = roomBased
     ? await getRoomBookings(booking.villaId, booking.id)
     : [];
+  // This guest's OTHER rooms here — the per-guest cap counts against them on the
+  // edit page exactly as it does when booking, so the picker can't offer rooms
+  // modifyBookingAction would then refuse. This booking is excluded, so
+  // re-saving its own rooms never counts against itself.
+  const myRoomBookings =
+    roomBased && user
+      ? await getGuestRoomBookings(booking.villaId, user.id, booking.id)
+      : [];
   const bookedRanges = roomBased
     ? []
     : await getBookedRanges(booking.villaId, booking.id);
@@ -124,10 +133,12 @@ export default async function ManageBookingPage({
               peoplePerRoom={villa.people_per_room}
               rooms={booking.bookingRooms}
               roomBookings={roomBookings}
+              myRoomBookings={myRoomBookings}
               discount={villa.discount}
               services={villa.serviceList}
               originalExtras={originalExtras}
               originalTotal={originalTotal}
+              archived={booking.archived}
               packageStay={
                 booking.package
                   ? { nights: booking.package.nights, price: booking.package.price }

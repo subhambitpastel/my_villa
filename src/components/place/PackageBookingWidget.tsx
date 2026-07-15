@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { loginHref } from "@/lib/returnTo";
-import { addDays, formatDay } from "@/lib/dates";
+import { addDays, addMonths, formatDay, BOOKING_WINDOW_MONTHS } from "@/lib/dates";
 import {
   roomsForGuests,
   roomsFreeForRange,
@@ -52,11 +52,14 @@ export default function PackageBookingWidget({
   const [start, setStart] = useState(defaultStart);
   const checkOut = start ? addDays(start, nights) : "";
   const roomsNeeded = roomsForGuests(villaKind, maxGuests, peoplePerRoom);
+  // Bookings can only start within the next few months — the calendar stops
+  // there and a start beyond it is treated as unbookable.
+  const maxDate = addMonths(today, BOOKING_WINDOW_MONTHS);
 
   // Can a fixed-length stay starting on `day` be booked? Drives both the chosen
   // date's validity and which start dates the calendar greys out.
   function spanAvailable(day: string): boolean {
-    if (!day || day < today) return false;
+    if (!day || day < today || day > maxDate) return false;
     const co = addDays(day, nights);
     return roomBased
       ? roomsFreeForRange(day, co, roomBookings, totalRooms) >= roomsNeeded
@@ -107,6 +110,7 @@ export default function PackageBookingWidget({
           value={start}
           onChange={setStart}
           today={today}
+          maxDate={maxDate}
           nights={nights}
           isUnavailable={(day) => !spanAvailable(day)}
           hasBlockedDates={bookedRanges.length > 0 || roomBookings.length > 0}

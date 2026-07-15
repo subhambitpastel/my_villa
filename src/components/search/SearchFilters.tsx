@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import DateRangeField from "@/components/home/DateRangeField";
+import Dropdown from "@/components/ui/Dropdown";
+import { BOOKING_WINDOW_MONTHS, MAX_STAY_NIGHTS } from "@/lib/dates";
 
 const SORTS = [
   { value: "newest", label: "Newest first" },
@@ -26,9 +28,31 @@ const PRICE_MIN = 0;
 const PRICE_MAX = 1000;
 const PRICE_STEP = 10;
 
+// What the price boxes accept. The slider only spans PRICE_MIN..PRICE_MAX (its
+// top thumb reads as "1,000+"), but a guest can type a figure past that — so
+// bound it here, otherwise the field takes any number at all.
+const PRICE_FIELD_MIN = 1;
+const PRICE_FIELD_MAX = 30_000;
+
 function digitsToNumber(v: string): number | null {
   const digits = v.replace(/[^\d]/g, "");
   return digits === "" ? null : Number(digits);
+}
+
+/** Digits only, held at or below the ceiling — run as the guest types so the box
+ *  can never show a runaway figure. The floor waits for blur: typing "1" on the
+ *  way to "10" shouldn't fight the guest mid-keystroke. */
+function capPriceInput(v: string): string {
+  const n = digitsToNumber(v);
+  return n === null ? "" : String(Math.min(n, PRICE_FIELD_MAX));
+}
+
+/** The figure to actually filter on: empty stays unbounded, anything else is
+ *  pinned inside [PRICE_FIELD_MIN, PRICE_FIELD_MAX]. */
+function boundPrice(v: string): string | null {
+  const n = digitsToNumber(v);
+  if (n === null) return null;
+  return String(Math.min(Math.max(n, PRICE_FIELD_MIN), PRICE_FIELD_MAX));
 }
 
 export default function SearchFilters({
@@ -45,8 +69,10 @@ export default function SearchFilters({
   const searchParams = useSearchParams();
 
   const [query, setQuery] = useState(searchParams.get("q") ?? "");
-  const [min, setMin] = useState(searchParams.get("min") ?? "");
-  const [max, setMax] = useState(searchParams.get("max") ?? "");
+  // Capped on the way in too, so a hand-typed ?max=999999 can't seed the box
+  // with a figure the guest could never have entered.
+  const [min, setMin] = useState(capPriceInput(searchParams.get("min") ?? ""));
+  const [max, setMax] = useState(capPriceInput(searchParams.get("max") ?? ""));
   const selected = (searchParams.get("amenities") ?? "")
     .split(",")
     .filter(Boolean);
@@ -143,8 +169,13 @@ export default function SearchFilters({
   }
 
   function applyPrices() {
-    const clean = (v: string) => v.replace(/[^\d]/g, "");
-    apply({ min: clean(min) || null, max: clean(max) || null });
+    const nextMin = boundPrice(min);
+    const nextMax = boundPrice(max);
+    // Show what's being filtered on: if a figure got pinned to the floor or the
+    // ceiling, the box updates to match rather than lying about the filter.
+    setMin(nextMin ?? "");
+    setMax(nextMax ?? "");
+    apply({ min: nextMin, max: nextMax });
   }
 
   const clampPrice = (n: number) =>
@@ -194,25 +225,15 @@ export default function SearchFilters({
               </button>
             )}
           </div>
-          <label className="flex items-center gap-1 rounded-[4px] border border-[#c6c6c6] px-2 py-1.5 text-[11px] text-[#121212]">
-            <span className="sr-only">Sort results</span>
-            <select
-              value={sort}
-              onChange={(e) =>
-                apply({ sort: e.target.value === "newest" ? null : e.target.value })
-              }
-              className="cursor-pointer appearance-none bg-transparent pr-4 focus:outline-none"
-            >
-              {SORTS.map((s) => (
-                <option key={s.value} value={s.value}>
-                  Sort: {s.label}
-                </option>
-              ))}
-            </select>
-            <svg width="9" height="6" viewBox="0 0 9 6" fill="none" aria-hidden="true" className="-ml-3 pointer-events-none">
-              <path d="M1 1l3.5 3.5L8 1" stroke="#4a4a4a" strokeWidth="1.2" strokeLinecap="round" />
-            </svg>
-          </label>
+          <Dropdown
+            ariaLabel="Sort results"
+            value={sort}
+            onChange={(v) => apply({ sort: v === "newest" ? null : v })}
+            options={SORTS}
+            formatLabel={(o) => `Sort: ${o.label}`}
+            align="right"
+            buttonClassName="flex items-center rounded-[4px] border border-[#c6c6c6] px-2 py-1.5 text-[11px] text-[#121212]"
+          />
         </div>
         <hr className="mt-4 border-t border-[#e3e3e8]" />
 
@@ -265,7 +286,7 @@ export default function SearchFilters({
               type="text"
               inputMode="numeric"
               value={min}
-              onChange={(e) => setMin(e.target.value)}
+              onChange={(e) => setMin(capPriceInput(e.target.value))}
               onBlur={applyPrices}
               placeholder="$ 10"
               aria-label="Minimum price"
@@ -279,7 +300,7 @@ export default function SearchFilters({
               type="text"
               inputMode="numeric"
               value={max}
-              onChange={(e) => setMax(e.target.value)}
+              onChange={(e) => setMax(capPriceInput(e.target.value))}
               onBlur={applyPrices}
               placeholder="$ 1,000+"
               aria-label="Maximum price"
@@ -306,6 +327,8 @@ export default function SearchFilters({
         <div className="mt-3">
           <DateRangeField
             variant="compact"
+            windowMonths={BOOKING_WINDOW_MONTHS}
+            maxNights={MAX_STAY_NIGHTS}
             checkIn={dateIn || null}
             checkOut={dateOut || null}
             onChange={changeDates}
@@ -316,30 +339,20 @@ export default function SearchFilters({
         </p>
 
         <h3 className="mt-6 text-[16px] font-medium text-[#121212]">Guests</h3>
-        <div className="relative mt-3">
-          <select
-            value={guests || ""}
-            onChange={(e) => apply({ guests: e.target.value || null })}
-            aria-label="Minimum number of guests"
-            className="w-full cursor-pointer appearance-none rounded-[6px] border border-[#c9c9d4] bg-white px-3 py-2 pr-8 text-[13px] text-[#121212] focus:border-brand focus:outline-none"
-          >
-            <option value="">Any number of guests</option>
-            {Array.from({ length: guestCap }, (_, i) => i + 1).map((n) => (
-              <option key={n} value={n}>
-                {n} guest{n === 1 ? "" : "s"} or more
-              </option>
-            ))}
-          </select>
-          <svg
-            width="9"
-            height="6"
-            viewBox="0 0 9 6"
-            fill="none"
-            aria-hidden="true"
-            className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2"
-          >
-            <path d="M1 1l3.5 3.5L8 1" stroke="#4a4a4a" strokeWidth="1.2" strokeLinecap="round" />
-          </svg>
+        <div className="mt-3">
+          <Dropdown
+            ariaLabel="Minimum number of guests"
+            value={guests ? String(guests) : ""}
+            onChange={(v) => apply({ guests: v || null })}
+            options={[
+              { value: "", label: "Any number of guests" },
+              ...Array.from({ length: guestCap }, (_, i) => i + 1).map((n) => ({
+                value: String(n),
+                label: `${n} guest${n === 1 ? "" : "s"} or more`,
+              })),
+            ]}
+            buttonClassName="flex w-full items-center justify-between rounded-[6px] border border-[#c9c9d4] bg-white px-3 py-2 text-[13px] text-[#121212] focus:border-brand focus:outline-none"
+          />
         </div>
 
         <h3 className="mt-6 text-[16px] font-medium text-[#121212]">Property type</h3>

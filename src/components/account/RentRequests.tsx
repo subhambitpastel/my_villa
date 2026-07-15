@@ -4,15 +4,24 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { ownerCancelBookingAction } from "@/lib/actions";
+import Dropdown from "@/components/ui/Dropdown";
 import type { RequestItem } from "@/lib/queries";
 
 const GRID = "grid grid-cols-[1.4fr_1.2fr_1fr_0.9fr_0.8fr] items-center gap-2";
 
 const STATUS_LABEL: Record<string, string> = {
   accepted: "Confirmed",
+  // A stay you arranged that the guest hasn't paid for. It holds no rooms and
+  // isn't confirmed until they do — so it must never read as "Confirmed".
+  pending: "Payment pending",
+  completed: "Completed",
   declined: "Declined",
   cancelled: "Cancelled",
 };
+
+/** Never guess "Confirmed" for an unknown status — that's how a pending,
+ *  room-holding-nothing booking came to read as confirmed. */
+const statusLabel = (status: string) => STATUS_LABEL[status] ?? status;
 
 export default function RentRequests({ requests }: { requests: RequestItem[] }) {
   const router = useRouter();
@@ -42,24 +51,22 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
 
   return (
     <div className="rounded-lg border border-line/60 bg-white p-6 sm:p-8">
+
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-[16px] font-semibold text-[#121212]">
           <span className="text-brand">{confirmed}</span> Confirmed Bookings
         </h2>
-        <label className="flex items-center gap-1 rounded-[4px] border border-[#c6c6c6] px-2 py-1.5 text-[11px] text-[#121212]">
-          <span className="sr-only">Sort requests</span>
-          <select
-            value={latestFirst ? "latest" : "oldest"}
-            onChange={(e) => setLatestFirst(e.target.value === "latest")}
-            className="cursor-pointer appearance-none bg-transparent pr-4 focus:outline-none"
-          >
-            <option value="latest">Sort: Latest to Oldest</option>
-            <option value="oldest">Sort: Oldest to Latest</option>
-          </select>
-          <svg width="9" height="6" viewBox="0 0 9 6" fill="none" aria-hidden="true" className="-ml-3 pointer-events-none">
-            <path d="M1 1l3.5 3.5L8 1" stroke="#4a4a4a" strokeWidth="1.2" strokeLinecap="round" />
-          </svg>
-        </label>
+        <Dropdown
+          ariaLabel="Sort requests"
+          value={latestFirst ? "latest" : "oldest"}
+          onChange={(v) => setLatestFirst(v === "latest")}
+          options={[
+            { value: "latest", label: "Sort: Latest to Oldest" },
+            { value: "oldest", label: "Sort: Oldest to Latest" },
+          ]}
+          align="right"
+          buttonClassName="flex items-center rounded-[4px] border border-[#c6c6c6] px-2 py-1.5 text-[11px] text-[#121212]"
+        />
       </div>
 
       <div className={`${GRID} mt-6 px-4 text-[13px] text-[#a1a1a2]`}>
@@ -94,12 +101,14 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
                 className={`text-[13px] font-semibold ${
                   r.status === "declined" || r.status === "cancelled"
                     ? "text-[#eb5757]"
-                    : "text-brand"
+                    : r.status === "pending"
+                      ? "text-[#a06a00]"
+                      : "text-brand"
                 }`}
               >
-                {STATUS_LABEL[r.status] ?? "Confirmed"}
+                {statusLabel(r.status)}
               </span>
-              {r.status === "accepted" && (
+              {(r.status === "accepted" || r.status === "pending") && (
                 <button
                   type="button"
                   disabled={pending}
@@ -168,12 +177,14 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
                       className={`text-[13px] font-semibold ${
                         r.status === "declined" || r.status === "cancelled"
                           ? "text-[#eb5757]"
-                          : "text-brand"
+                          : r.status === "pending"
+                            ? "text-[#a06a00]"
+                            : "text-brand"
                       }`}
                     >
-                      {STATUS_LABEL[r.status] ?? "Confirmed"}
+                      {statusLabel(r.status)}
                     </span>
-                    {r.status === "accepted" && (
+                    {(r.status === "accepted" || r.status === "pending") && (
                       <button
                         type="button"
                         disabled={pending}

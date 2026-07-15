@@ -34,6 +34,8 @@ export default async function BookingConfirmedPage({
 }) {
   const { ref, mode, refund, paid } = await searchParams;
   const isModified = mode === "modified";
+  // Settling a stay the host had already booked — nothing was reserved just now.
+  const isPaid = mode === "paid";
   const refundAmt = Math.max(0, Number(refund) || 0);
   const paidAmt = Math.max(0, Number(paid) || 0);
 
@@ -64,13 +66,24 @@ export default async function BookingConfirmedPage({
               </svg>
             </span>
             <h1 className="mt-6 text-[30px] font-semibold leading-[1.3] text-[#121212]">
-              {isModified ? "Booking updated" : "Booking confirmed"}
+              {isPaid
+                ? "Payment complete"
+                : isModified
+                  ? "Booking updated"
+                  : "Booking confirmed"}
             </h1>
             <p className="mt-2 text-[16px] leading-[1.5] text-[#4a4a4a]">
-              {isModified
-                ? "Your booking has been updated and the host has been notified."
-                : "Your stay is booked and the host has been notified."}
+              {isPaid
+                ? "Thanks — this stay is paid for and your host has been notified."
+                : isModified
+                  ? "Your booking has been updated and the host has been notified."
+                  : "Your stay is booked and the host has been notified."}
             </p>
+            {isPaid && paidAmt > 0 && (
+              <p className="mt-3 inline-block rounded-[8px] bg-brand/10 px-4 py-2 text-[15px] font-medium text-brand-dark">
+                You paid ${paidAmt.toFixed(2)}.
+              </p>
+            )}
             {isModified && refundAmt > 0 && (
               <p className="mt-3 inline-block rounded-[8px] bg-emerald-50 px-4 py-2 text-[15px] font-medium text-emerald-700">
                 We&apos;ll refund ${refundAmt.toFixed(2)} to your original payment

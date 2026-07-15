@@ -4,6 +4,8 @@ import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { rateStayAction } from "@/lib/actions";
+import Dropdown from "@/components/ui/Dropdown";
+import AccountSearch, { matchesSearch } from "@/components/account/AccountSearch";
 import type { BookingItem } from "@/lib/queries";
 import { bookingReference } from "@/lib/pricing";
 import { isRoomBased } from "@/lib/rooms";
@@ -74,6 +76,9 @@ const GRID = "grid grid-cols-[1.4fr_1fr_1.1fr_0.9fr_0.8fr] items-center gap-2";
 
 const STATUS_LABEL: Record<string, string> = {
   accepted: "Confirmed",
+  // A host-arranged stay the guest hasn't paid for. Not "awaiting the host" —
+  // the ball is with the guest, and nothing is held until they pay.
+  pending: "Payment pending",
   declined: "Declined",
   cancelled: "Cancelled",
   completed: "Completed",
@@ -89,20 +94,17 @@ function SortSelect({
   onChange: (latestFirst: boolean) => void;
 }) {
   return (
-    <label className="flex items-center gap-1 rounded-[4px] border border-[#c6c6c6] px-2 py-1.5 text-[11px] text-[#121212]">
-      <span className="sr-only">{label}</span>
-      <select
-        value={latestFirst ? "latest" : "oldest"}
-        onChange={(e) => onChange(e.target.value === "latest")}
-        className="cursor-pointer appearance-none bg-transparent pr-4 focus:outline-none"
-      >
-        <option value="latest">Sort: Latest to Oldest</option>
-        <option value="oldest">Sort: Oldest to Latest</option>
-      </select>
-      <svg width="9" height="6" viewBox="0 0 9 6" fill="none" aria-hidden="true" className="-ml-3 pointer-events-none">
-        <path d="M1 1l3.5 3.5L8 1" stroke="#4a4a4a" strokeWidth="1.2" strokeLinecap="round" />
-      </svg>
-    </label>
+    <Dropdown
+      ariaLabel={label}
+      value={latestFirst ? "latest" : "oldest"}
+      onChange={(v) => onChange(v === "latest")}
+      options={[
+        { value: "latest", label: "Sort: Latest to Oldest" },
+        { value: "oldest", label: "Sort: Oldest to Latest" },
+      ]}
+      align="right"
+      buttonClassName="flex items-center rounded-[4px] border border-[#c6c6c6] px-2 py-1.5 text-[11px] text-[#121212]"
+    />
   );
 }
 
@@ -192,7 +194,13 @@ function BookingDetails({ b }: { b: BookingItem }) {
   return (
     <div className="border-t border-[#ececf0] bg-[#faf9fc] px-4 py-4">
       <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
-        <Stat label="Amount paid" value={`$${b.amountPaid.toFixed(2)}`} accent />
+        {/* Same figure either way — but it's owed, not paid, until the guest
+            settles an owner-made booking. */}
+        <Stat
+          label={b.paymentDue ? "Amount due" : "Amount paid"}
+          value={`$${b.amountPaid.toFixed(2)}`}
+          accent
+        />
         <Stat label="Reference" value={bookingReference(b.id)} />
         {b.nights > 0 && (
           <Stat label="Stay length" value={`${b.nights} night${b.nights === 1 ? "" : "s"}`} />
@@ -268,19 +276,44 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
   const [pending, startTransition] = useTransition();
   const [activeLatest, setActiveLatest] = useState(true);
   const [historyLatest, setHistoryLatest] = useState(true);
+  const [query, setQuery] = useState("");
+
+  // Live search filters every section (active, history, package stays) at once,
+  // matching villa name, kind, package, dates, reference or status.
+  const filtered = bookings.filter((b) =>
+    matchesSearch(
+      query,
+      b.villa,
+      b.kind,
+      b.package?.name,
+      b.dates,
+      bookingReference(b.id),
+      STATUS_LABEL[b.status] ?? b.status,
+    ),
+  );
 
   // Package stays are shown in their own section, apart from nightly stays.
-  const nightly = bookings.filter((b) => !b.package);
+  const nightly = filtered.filter((b) => !b.package);
   const packageStays = sortByCreated(
-    bookings.filter((b) => b.package),
+    filtered.filter((b) => b.package),
     true,
   );
+  // A stay the host arranged that nobody has paid for yet. It holds no rooms
+  // until it's paid, so it's neither an active booking nor history — it's a bill
+  // to settle, and it gets its own section at the top where it can't be missed.
+  // Both conditions are required: a pending row that ISN'T due has no payment to
+  // ask for, and offering one would dead-end (only a due booking is payable).
+  const isAwaitingPayment = (b: BookingItem) =>
+    b.status === "pending" && b.paymentDue;
+  const awaitingPayment = sortByCreated(nightly.filter(isAwaitingPayment), activeLatest);
   const active = sortByCreated(
     nightly.filter((b) => b.status === "accepted"),
     activeLatest,
   );
+  // The exact complement of the two above, so no booking can fall through the
+  // gaps and vanish from the page entirely.
   const history = sortByCreated(
-    nightly.filter((b) => b.status !== "accepted"),
+    nightly.filter((b) => b.status !== "accepted" && !isAwaitingPayment(b)),
     historyLatest,
   );
 
@@ -307,6 +340,66 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
 
   return (
     <div className="rounded-lg border border-line/60 bg-white p-6 sm:p-8">
+      {bookings.length > 0 && (
+        <AccountSearch
+          value={query}
+          onChange={setQuery}
+          placeholder="Search your bookings by villa, dates, reference or status"
+          className="mb-6"
+        />
+      )}
+      {/* Payment due — only present when a host has arranged a stay the guest
+          hasn't paid for. Top of the page, because nothing is held until they
+          do: this is the one section with a deadline attached. */}
+      {awaitingPayment.length > 0 && (
+        <section className="mb-8 rounded-[10px] border border-[#e8d5a3] bg-[#fdf9f0] p-4 sm:p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-[16px] font-semibold text-[#8a6a1f]">
+              <span>{String(awaitingPayment.length).padStart(2, "0")}</span>{" "}
+              Payment Due
+            </h2>
+            <p className="text-[13px] font-semibold text-[#8a6a1f]">
+              $
+              {awaitingPayment
+                .reduce((sum, b) => sum + b.amountPaid, 0)
+                .toFixed(2)}{" "}
+              total
+            </p>
+          </div>
+          <p className="mt-1 text-[13px] leading-[1.5] text-[#7a6a45]">
+            Your host booked {awaitingPayment.length === 1 ? "this stay" : "these stays"}{" "}
+            for you.{" "}
+            <span className="font-semibold">
+              The room{awaitingPayment.length === 1 ? " isn't" : "s aren't"} held
+              until you pay
+            </span>{" "}
+            — someone else can still take{" "}
+            {awaitingPayment.length === 1 ? "it" : "them"} in the meantime.
+          </p>
+          <ul className="mt-4 space-y-3">
+            {awaitingPayment.map((b) => (
+              <BookingRow
+                key={b.id}
+                b={b}
+                actions={
+                  <>
+                    <span className="rounded-[3px] bg-[#fff3d6] px-2 py-0.5 text-[11px] font-semibold text-[#a06a00]">
+                      Payment pending
+                    </span>
+                    <Link
+                      href={`/payment?pay=${b.id}`}
+                      className="rounded-[6px] bg-brand px-3 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-brand-dark"
+                    >
+                      Pay ${b.amountPaid.toFixed(2)}
+                    </Link>
+                  </>
+                }
+              />
+            ))}
+          </ul>
+        </section>
+      )}
+
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-[16px] font-semibold text-[#121212]">
           <span className="text-brand">{String(active.length).padStart(2, "0")}</span>{" "}
@@ -334,9 +427,11 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
             b={b}
             actions={
               <>
+                {/* Active means paid: an unpaid host-made booking is 'pending'
+                    and lives in Payment Due above, so nothing here is unpaid. */}
                 <span
                   className="rounded-[3px] bg-[#e9e8fd] px-2 py-0.5 text-[11px] font-semibold text-brand"
-                  title="Paid at checkout — your stay is confirmed"
+                  title="Paid — your stay is confirmed"
                 >
                   Confirmed
                 </span>

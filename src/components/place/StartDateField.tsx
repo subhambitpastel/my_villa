@@ -31,6 +31,7 @@ export default function StartDateField({
   value,
   onChange,
   today,
+  maxDate,
   nights,
   isUnavailable,
   hasBlockedDates = false,
@@ -40,6 +41,9 @@ export default function StartDateField({
   onChange: (day: string) => void;
   /** Earliest selectable day "YYYY-MM-DD". */
   today: string;
+  /** Latest selectable start day "YYYY-MM-DD"; later days are disabled and month
+   *  nav stops there. When omitted, no upper bound is applied. */
+  maxDate?: string;
   /** Fixed package length — used to preview and highlight the stay span. */
   nights: number;
   /** True when a stay of `nights` starting on that day can't be booked. */
@@ -76,6 +80,12 @@ export default function StartDateField({
     const [y, m] = today.split("-").map(Number);
     return y * 12 + (m - 1);
   })();
+  const maxIndex = maxDate
+    ? (() => {
+        const [y, m] = maxDate.split("-").map(Number);
+        return y * 12 + (m - 1);
+      })()
+    : Infinity;
 
   const firstWeekday =
     (new Date(Date.UTC(view.year, view.month, 1)).getUTCDay() + 6) % 7;
@@ -158,8 +168,9 @@ export default function StartDateField({
                     : { year, month: month + 1 },
                 )
               }
+              disabled={viewIndex >= maxIndex}
               aria-label="Next month"
-              className="flex h-8 w-8 items-center justify-center rounded-full text-ink hover:bg-[rgba(123,97,255,0.12)]"
+              className="flex h-8 w-8 items-center justify-center rounded-full text-ink hover:bg-[rgba(123,97,255,0.12)] disabled:opacity-30 disabled:hover:bg-transparent"
             >
               <svg width="8" height="14" viewBox="0 0 8 14" fill="none" aria-hidden="true">
                 <path d="M1 1l6 6-6 6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -181,8 +192,11 @@ export default function StartDateField({
               if (day === null) return <span key={`empty-${i}`} />;
               const key = keyOf(view.year, view.month, day);
               const past = key < today;
-              const unavailable = !past && isUnavailable(key);
-              const disabled = past || unavailable;
+              // Beyond the booking window: greyed like a past day (not
+              // crossed-out — it's simply outside the bookable range).
+              const beyond = maxDate ? key > maxDate : false;
+              const unavailable = !past && !beyond && isUnavailable(key);
+              const disabled = past || beyond || unavailable;
               const isEdge = key === anchor || key === anchorEnd;
               const inRange =
                 !isEdge && !!anchor && key > anchor && key < anchorEnd;

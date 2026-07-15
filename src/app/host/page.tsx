@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import Header from "@/components/site/Header";
 import Footer from "@/components/site/Footer";
 import HostWizard from "@/components/host/HostWizard";
+import { formatDay } from "@/lib/dates";
 import {
   DEFAULT_DRAFT,
   FACILITY_CHIPS,
@@ -9,13 +11,87 @@ import {
   type Draft,
 } from "@/components/host/draft";
 import { getCurrentUser } from "@/lib/session";
-import { getVillaDetail } from "@/lib/queries";
+import { getVillaBookingLock, getVillaDetail, type BookingLock } from "@/lib/queries";
 
 export const metadata: Metadata = {
   title: "Add your Villa",
   description:
     "Register your villa for renting on MyVilla — add your details, photos, pricing and the account where you'll receive guest payments.",
 };
+
+/** Shown instead of the edit wizard when the villa still has live bookings.
+ *  Reached only by typing the URL — My Properties already hides the Edit link. */
+function LockedNotice({ villa, lock }: { villa: string; lock: BookingLock }) {
+  return (
+    <>
+      <Header />
+      <main className="bg-[#fafafa] pb-20">
+        <div className="mx-auto max-w-2xl px-6 pt-16">
+          <div className="rounded-[12px] border border-line/60 bg-white p-8 text-center">
+            <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#fff3d6] text-[#a06a00]">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M7 10V7a5 5 0 0110 0v3M5 10h14v11H5z" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
+            <h1 className="mt-4 text-[20px] font-semibold text-[#121212]">
+              This listing can&rsquo;t be edited yet
+            </h1>
+            <p className="mx-auto mt-2 max-w-md text-[14px] leading-relaxed text-[#4a4a4a]">
+              <span className="font-semibold">{villa}</span> has{" "}
+              <span className="font-semibold">
+                {lock.active} active booking{lock.active === 1 ? "" : "s"}
+              </span>
+              . Guests booked it exactly as it&rsquo;s listed, so its details
+              stay put until those stays are done
+              {lock.lastCheckOut ? (
+                <>
+                  {" "}
+                  — the last one checks out on{" "}
+                  <span className="font-semibold">{formatDay(lock.lastCheckOut)}</span>
+                </>
+              ) : null}
+              . You can wait for them to complete, or cancel them all in Rent
+              Requests to edit now.
+            </p>
+            {/* Archiving is never locked — it's the answer for an owner who
+                only wants the bookings to stop, without waiting out the
+                calendar or cancelling on guests who already booked. */}
+            <div className="mx-auto mt-5 max-w-md rounded-[8px] border border-[#e8d5a3] bg-[#fdf9f0] p-4 text-left">
+              <p className="text-[13px] font-semibold text-[#8a6a1f]">
+                Just want to stop taking further bookings?
+              </p>
+              <p className="mt-1 text-[13px] leading-relaxed text-[#7a6a45]">
+                Archive the listing from{" "}
+                <Link href="/profile/properties" className="underline">
+                  My Properties
+                </Link>{" "}
+                instead — archiving isn&rsquo;t locked. It won&rsquo;t affect the{" "}
+                {lock.active} booking{lock.active === 1 ? "" : "s"} already made
+                (those stays go ahead as planned), and no new bookings can come
+                in. You can restore it whenever you like.
+              </p>
+            </div>
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-4">
+              <Link
+                href="/profile/requests"
+                className="rounded-[8px] bg-brand px-5 py-2.5 text-[13px] font-semibold text-white transition-colors hover:bg-brand-dark"
+              >
+                Go to Rent Requests
+              </Link>
+              <Link
+                href="/profile/properties"
+                className="text-[13px] text-[#7a7a85] underline hover:opacity-80"
+              >
+                Back to My Properties
+              </Link>
+            </div>
+          </div>
+        </div>
+      </main>
+      <Footer />
+    </>
+  );
+}
 
 export default async function HostPage({
   searchParams,
@@ -48,9 +124,16 @@ export default async function HostPage({
   // Edit mode: prefill the wizard from the villa being edited (owner only).
   let editId: number | undefined;
   let editDraft: Draft | undefined;
+  // A villa with live bookings is frozen — guests booked it as it stands, so
+  // nothing about it may change until those stays finish. My Properties hides
+  // the Edit link, but the URL is guessable, so gate here too (and
+  // updateVillaAction is the final authority).
   if (edit && user) {
     const villa = await getVillaDetail(Number(edit));
     if (villa && villa.owner_id === user.id) {
+      const bookingLock = await getVillaBookingLock(villa.id);
+      if (bookingLock.active > 0)
+        return <LockedNotice villa={villa.name} lock={bookingLock} />;
       editId = villa.id;
       // Prefill the Payment step from the host's stored payout details, so
       // editing it round-trips instead of overwriting the card with a blank.
@@ -74,7 +157,6 @@ export default async function HostPage({
           // Old rows derived city from the address; don't prefill that junk.
           city: villa.city === villa.name ? "" : villa.city,
           rooms: String(villa.rooms),
-          bathrooms: String(villa.bathrooms),
           maxGuests: String(villa.max_guests),
           peoplePerRoom: villa.people_per_room ? String(villa.people_per_room) : "",
           facilities: villa.facilityList,

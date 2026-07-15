@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import Avatar from "@/components/ui/Avatar";
+import CustomerIdChip from "@/components/account/CustomerIdChip";
 import Header from "@/components/site/Header";
 import Footer from "@/components/site/Footer";
 import { redirect } from "next/navigation";
@@ -107,6 +108,9 @@ export default async function AccountPage() {
                   </p>
                 )}
               </div>
+              {/* Assigned at signup and fixed for life — the handle to quote at
+                  support. Read-only by design; there's nothing to edit. */}
+              {user.customer_id && <CustomerIdChip customerId={user.customer_id} />}
               <Link
                 href="/profile"
                 className="mt-[35px] inline-block rounded-[10px] border border-brand bg-white px-5 py-[10px] text-[16px] leading-[1.3] text-brand transition-colors hover:bg-brand/5"

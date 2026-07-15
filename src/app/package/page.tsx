@@ -170,6 +170,37 @@ export default async function PackagePage({ searchParams }: Search) {
                 >
                   Manage packages
                 </Link>
+                {pkg.archived && (
+                  <p className="mt-4 rounded-[10px] bg-[#fff6e5] px-4 py-3 text-[14px] leading-[1.5] text-[#a06a00]">
+                    This package is{" "}
+                    <span className="font-semibold">archived</span> — it&rsquo;s
+                    hidden from guests and takes no new bookings. Stays already
+                    booked still go ahead.
+                  </p>
+                )}
+              </aside>
+            ) : pkg.archived ? (
+              /* Archived package (or its villa is) — still viewable for guests
+                 who already booked it, but there's nothing to book. */
+              <aside className="h-fit w-full min-w-0 max-w-[576px] rounded-[20px] bg-white px-[41px] py-[40px] shadow-[0px_15px_50px_0px_rgba(0,0,0,0.18)] lg:mt-[60px]">
+                <p className="text-[24px] font-semibold text-black">
+                  Not taking bookings
+                </p>
+                <p className="mt-3 text-[16px] leading-[1.4] text-[#4a4a4a]">
+                  The host has stopped accepting new bookings for this package.
+                  If you already booked it, your stay goes ahead as normal —
+                  you&rsquo;ll find it under{" "}
+                  <Link href="/profile/bookings" className="underline">
+                    My Bookings
+                  </Link>
+                  .
+                </p>
+                <Link
+                  href="/packages"
+                  className="mt-[25px] flex h-16 items-center justify-center rounded-[10px] bg-brand text-[20px] font-medium text-white transition-colors hover:bg-brand-dark"
+                >
+                  Browse other packages
+                </Link>
               </aside>
             ) : (
               <PackageBookingWidget

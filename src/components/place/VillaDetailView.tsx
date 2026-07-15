@@ -115,7 +115,6 @@ export default function VillaDetailView({
             </h2>
             <p className="mt-[15px] flex flex-wrap items-center text-[20px] leading-[1.3] text-[#121212]">
               {villa.rooms} {villa.rooms === 1 ? "Room" : "Rooms"} <Dot />{" "}
-              {villa.bathrooms} {villa.bathrooms === 1 ? "Bathroom" : "Bathrooms"} <Dot />{" "}
               {villa.max_guests} {villa.max_guests === 1 ? "Guest" : "Guests"}
               {villa.area ? (
                 <>

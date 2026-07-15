@@ -3,7 +3,7 @@ import Footer from "@/components/site/Footer";
 import ProfileShell from "@/components/account/ProfileShell";
 import SignInGate from "@/components/account/SignInGate";
 import { getCurrentUser } from "@/lib/session";
-import { getVillasByOwner } from "@/lib/queries";
+import { getPendingPaymentCount, getVillasByOwner } from "@/lib/queries";
 
 export default async function ProfileLayout({
   children,
@@ -16,6 +16,9 @@ export default async function ProfileLayout({
     ? user.hosting_enabled === 1 ||
       (await getVillasByOwner(user.id)).length > 0
     : false;
+  // Badged on the Payment Pending tab from every profile page, so a request the
+  // host made can't be missed — nothing is held until it's paid.
+  const pendingPayments = user ? await getPendingPaymentCount(user.id) : 0;
 
   return (
     <>
@@ -23,7 +26,9 @@ export default async function ProfileLayout({
       <main className="bg-[#fafafa] pb-20">
         <div className="mx-auto max-w-6xl px-6 pt-10">
           {user ? (
-            <ProfileShell isHost={isHost}>{children}</ProfileShell>
+            <ProfileShell isHost={isHost} pendingPayments={pendingPayments}>
+              {children}
+            </ProfileShell>
           ) : (
             <SignInGate
               title="To view your profile you must be signed in first."

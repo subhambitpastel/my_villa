@@ -6,6 +6,7 @@
 import pg from "pg";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { hashPasswordSync } from "./password";
+import { allocateCustomerId } from "./customerId";
 import { dayFromNow, formatRange } from "./dates";
 import { quote } from "./pricing";
 
@@ -24,6 +25,9 @@ export type UserRow = {
   id: number;
   email: string;
   password_hash: string;
+  /** Public customer ID, e.g. "subhamdas@a9345ds" — minted at signup and never
+   *  changed. Null only on a row read mid-upgrade, before the backfill runs. */
+  customer_id: string | null;
   full_name: string;
   gender: string;
   dob: string;
@@ -50,7 +54,6 @@ export type VillaRow = {
   address: string;
   city: string;
   rooms: number;
-  bathrooms: number;
   max_guests: number; // max guests the owner allows this villa to sleep
   people_per_room: number; // hotels/resorts: max occupancy of one room (0 = n/a)
   featured: number; // 1 = paid promotion, shown in the home "Featured villas" row
@@ -62,6 +65,7 @@ export type VillaRow = {
   reviews: number;
   image: string;
   images: string; // JSON string[] — gallery, first entry doubles as cover
+  archived_at: string | null; // set = archived (no new bookings, hidden from browse)
   created_at: string;
 };
 
@@ -77,6 +81,7 @@ export type PackageRow = {
   discount: number; // advertised % off the nightly rate (0 = none)
   price: number; // all-inclusive total for the N-night stay
   inclusions: string; // JSON string[] — included experiences, all mandatory
+  archived_at: string | null; // set = archived; also implied by an archived villa
   created_at: string;
 };
 
@@ -106,9 +111,15 @@ export type BookingRow = {
   check_out: string; // YYYY-MM-DD ('' on legacy rows)
   guests: number;
   rooms: number; // rooms this reservation holds (1 for whole-villa stays)
+  room_plan: string; // JSON {checkIn, checkOut, rooms}[] when the stay's room
+  // count changes mid-way (see rooms.ts); '' for a flat stay, where `rooms`
+  // alone describes it. When set, `rooms` is the plan's peak.
   extras: string; // JSON {name, price}[] — paid add-ons chosen at checkout
   package_id: number | null; // soft ref to the booked package (null = nightly stay)
   package: string; // JSON snapshot {name, nights, guests, price, inclusions[]} or ''
+  // 1 = the guest still owes for this stay. Only owner-made bookings start this
+  // way: a guest booking their own stay pays at checkout, so it is never due.
+  payment_due: number;
   status: BookingStatus;
   created_at: string;
 };
@@ -121,6 +132,10 @@ CREATE TABLE IF NOT EXISTS users (
   id            SERIAL PRIMARY KEY,
   email         TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
+  -- Public customer ID ("subhamdas@a9345ds"). Nullable only so accounts created
+  -- before this column can be backfilled on the next start; every row has one
+  -- after init. See lib/customerId.ts.
+  customer_id   TEXT UNIQUE,
   full_name     TEXT NOT NULL DEFAULT '',
   gender        TEXT NOT NULL DEFAULT '',
   dob           TEXT NOT NULL DEFAULT '',
@@ -147,7 +162,6 @@ CREATE TABLE IF NOT EXISTS villas (
   address     TEXT NOT NULL DEFAULT '',
   city        TEXT NOT NULL DEFAULT '',
   rooms       INTEGER NOT NULL DEFAULT 1,
-  bathrooms   INTEGER NOT NULL DEFAULT 1,
   max_guests  INTEGER NOT NULL DEFAULT 8,
   people_per_room INTEGER NOT NULL DEFAULT 0,
   featured    INTEGER NOT NULL DEFAULT 0,
@@ -159,6 +173,10 @@ CREATE TABLE IF NOT EXISTS villas (
   reviews     INTEGER NOT NULL DEFAULT 0,
   image       TEXT NOT NULL DEFAULT '/images/host/photo-1.jpg',
   images      TEXT NOT NULL DEFAULT '[]',
+  -- When set, the owner has archived this listing: it stops taking new bookings
+  -- and drops out of search/browse, while bookings already made still stand.
+  -- NULL = live. Nullable rather than a boolean so we keep the "when".
+  archived_at TEXT,
   created_at  TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
@@ -181,9 +199,14 @@ CREATE TABLE IF NOT EXISTS bookings (
   check_out  TEXT NOT NULL DEFAULT '',
   guests     INTEGER NOT NULL DEFAULT 1,
   rooms      INTEGER NOT NULL DEFAULT 1,
+  room_plan  TEXT NOT NULL DEFAULT '',
   extras     TEXT NOT NULL DEFAULT '[]',
   package_id INTEGER,
   package    TEXT NOT NULL DEFAULT '',
+  -- 1 = awaiting the guest's payment (an owner made this booking on their
+  -- behalf). Guest-made bookings pay at checkout, so they default to 0 and
+  -- every pre-existing row stays settled.
+  payment_due INTEGER NOT NULL DEFAULT 0,
   status     TEXT NOT NULL DEFAULT 'accepted'
              CHECK (status IN ('pending','accepted','declined','cancelled','completed')),
   created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
@@ -232,7 +255,31 @@ CREATE TABLE IF NOT EXISTS packages (
   discount    INTEGER NOT NULL DEFAULT 0,
   price       REAL NOT NULL DEFAULT 0,
   inclusions  TEXT NOT NULL DEFAULT '[]',
+  -- Same as villas.archived_at, but for a single package. A package is also
+  -- unbookable when its villa is archived, whatever this column says.
+  archived_at TEXT,
   created_at  TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
+);
+
+-- A guest asking the host to ring them about a booking the self-serve flow
+-- won't take — in practice, a room block bigger than the per-guest cap (see
+-- MAX_ROOMS_PER_GUEST in rooms.ts). The dates and room count they wanted are
+-- kept so the host can act on the request without a back-and-forth.
+CREATE TABLE IF NOT EXISTS call_requests (
+  id         SERIAL PRIMARY KEY,
+  villa_id   INTEGER NOT NULL REFERENCES villas(id) ON DELETE CASCADE,
+  guest_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  check_in   TEXT NOT NULL DEFAULT '',
+  check_out  TEXT NOT NULL DEFAULT '',
+  rooms      INTEGER NOT NULL DEFAULT 0, -- rooms the guest wanted (0 = unstated)
+  guests     INTEGER NOT NULL DEFAULT 0, -- party size they picked (0 = unstated)
+  message    TEXT NOT NULL DEFAULT '', -- the guest's own note to the host
+  -- Paid add-ons the guest had ticked when they asked, as a {name, price}
+  -- snapshot (same shape as bookings.extras). Snapshotted rather than indexed
+  -- so it still reads correctly if the host later edits their service list.
+  services   TEXT NOT NULL DEFAULT '[]',
+  status     TEXT NOT NULL DEFAULT 'open', -- 'open' | 'done'
+  created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
 -- User-uploaded images (villa photos, profile avatars) stored as BYTEA blobs
@@ -255,6 +302,8 @@ ALTER TABLE villas ADD COLUMN IF NOT EXISTS people_per_room INTEGER NOT NULL DEF
 ALTER TABLE villas ADD COLUMN IF NOT EXISTS featured INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE villas ADD COLUMN IF NOT EXISTS discount INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rooms INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS room_plan TEXT NOT NULL DEFAULT '';
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_due INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS extras TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS package_id INTEGER;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS package TEXT NOT NULL DEFAULT '';
@@ -262,9 +311,19 @@ ALTER TABLE packages ADD COLUMN IF NOT EXISTS nights INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE packages ADD COLUMN IF NOT EXISTS max_guests INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE packages ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'curated';
 ALTER TABLE packages ADD COLUMN IF NOT EXISTS discount INTEGER NOT NULL DEFAULT 0;
+-- Nullable with no default, so every existing listing stays live on upgrade.
+ALTER TABLE villas   ADD COLUMN IF NOT EXISTS archived_at TEXT;
+ALTER TABLE packages ADD COLUMN IF NOT EXISTS archived_at TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS pay_methods      TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS pay_account_type TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS card_number      TEXT NOT NULL DEFAULT '';
+-- Nullable + no default: it can't be generated in DDL, so existing rows are
+-- backfilled by backfillCustomerIds() right after this schema runs.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS customer_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS users_customer_id_key ON users(customer_id);
+ALTER TABLE call_requests ADD COLUMN IF NOT EXISTS guests  INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE call_requests ADD COLUMN IF NOT EXISTS message TEXT NOT NULL DEFAULT '';
+ALTER TABLE call_requests ADD COLUMN IF NOT EXISTS services TEXT NOT NULL DEFAULT '[]';
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_villas_owner ON villas(owner_id);
@@ -273,6 +332,7 @@ CREATE INDEX IF NOT EXISTS idx_bookings_villa ON bookings(villa_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_villa ON reviews(villa_id);
 CREATE INDEX IF NOT EXISTS idx_packages_owner ON packages(owner_id);
 CREATE INDEX IF NOT EXISTS idx_packages_villa ON packages(villa_id);
+CREATE INDEX IF NOT EXISTS idx_call_requests_villa ON call_requests(villa_id);
 
 -- Keep each villa's denormalized rating/reviews true to the reviews table.
 -- rateStayAction maintains these on new reviews; this corrects any villa that
@@ -379,12 +439,12 @@ async function seed(pool: pg.Pool, force: boolean) {
   // so other kinds keep 0 (they book as one whole unit).
   const DIMS: Record<
     string,
-    { area: string; rooms: number; bathrooms: number; maxGuests: number; perRoom: number }
+    { area: string; rooms: number; maxGuests: number; perRoom: number }
   > = {
-    Resort: { area: "1450", rooms: 6, bathrooms: 5, maxGuests: 14, perRoom: 3 },
-    Hotel: { area: "820", rooms: 4, bathrooms: 4, maxGuests: 8, perRoom: 2 },
-    Bungalow: { area: "560", rooms: 2, bathrooms: 2, maxGuests: 4, perRoom: 0 },
-    "Villa Living": { area: "980", rooms: 4, bathrooms: 3, maxGuests: 8, perRoom: 0 },
+    Resort: { area: "1450", rooms: 6, maxGuests: 14, perRoom: 3 },
+    Hotel: { area: "820", rooms: 4, maxGuests: 8, perRoom: 2 },
+    Bungalow: { area: "560", rooms: 2, maxGuests: 4, perRoom: 0 },
+    "Villa Living": { area: "980", rooms: 4, maxGuests: 8, perRoom: 0 },
   };
   const KIND_NOUN: Record<string, string> = {
     "Villa Living": "villa",
@@ -418,11 +478,11 @@ async function seed(pool: pg.Pool, force: boolean) {
     return pool
       .query(
         `INSERT INTO villas
-           (owner_id, name, kind, description, area, city, address, rooms, bathrooms,
+           (owner_id, name, kind, description, area, city, address, rooms,
             max_guests, people_per_room, facilities, services, price, rating, reviews, image, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, ${TS("$18")}) RETURNING id`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, ${TS("$17")}) RETURNING id`,
         [
-          owner, name, kind, d.description, d.area, city, address, d.rooms, d.bathrooms,
+          owner, name, kind, d.description, d.area, city, address, d.rooms,
           d.maxGuests, d.perRoom, FACILITIES, JSON.stringify(d.services), price, rating,
           reviews, image, createdOffset,
         ],
@@ -597,11 +657,32 @@ function connectionConfig(): pg.PoolConfig {
   return { connectionString, ssl, max: 10 };
 }
 
+/** Give a customer ID to any account that predates the column. Generated here in
+ *  TS (not DDL) so signup and this backfill mint IDs through the same function —
+ *  one source of truth for the format. A no-op once every row has one. */
+async function backfillCustomerIds(pool: pg.Pool) {
+  const missing = await pool.query<{ id: number; email: string }>(
+    "SELECT id, email FROM users WHERE customer_id IS NULL OR customer_id = '' ORDER BY id",
+  );
+  if (missing.rowCount === 0) return;
+  const existing = await pool.query<{ customer_id: string }>(
+    "SELECT customer_id FROM users WHERE customer_id IS NOT NULL",
+  );
+  const taken = new Set(existing.rows.map((r) => r.customer_id));
+  for (const row of missing.rows) {
+    const id = allocateCustomerId(row.email, taken);
+    taken.add(id); // reserve within this batch too, not just against the DB
+    await pool.query("UPDATE users SET customer_id = $1 WHERE id = $2", [id, row.id]);
+  }
+}
+
 async function init(): Promise<pg.Pool> {
   const pool = new Pool(connectionConfig());
   await pool.query(SCHEMA);
   const mode = seedMode();
   if (mode !== "off") await seed(pool, mode === "force");
+  // After seeding: a wipe-and-reseed inserts fresh users that need IDs too.
+  await backfillCustomerIds(pool);
   // Sweep expired sessions / reset tokens so those tables don't grow forever.
   try {
     const now = new Date().toISOString();

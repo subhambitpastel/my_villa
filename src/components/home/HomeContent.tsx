@@ -34,7 +34,10 @@ export default async function HomeContent() {
   const villas = (await getCatalogVillas(24, user?.id)).map(toShowcase);
   // Owner-promoted "featured" listings power their own home-page row — but a
   // host never sees their own villas while browsing, so drop the viewer's.
-  const featured = (await getFeaturedVillas(8, user?.id)).map(toShowcase);
+  // Fetched deep (like the catalog above) because the row is filtered by the
+  // hero's tab: pulling only a row's worth would starve a tab whose featured
+  // villas happen to sort late.
+  const featured = (await getFeaturedVillas(24, user?.id)).map(toShowcase);
   return (
     <>
       <main className="bg-[#fafafa]">
