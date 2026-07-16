@@ -1,0 +1,20 @@
+# Line endings. Store all text as LF in the repo and check out LF on every
+# platform, overriding each machine's core.autocrlf. This stops Windows from
+# rewriting LF<->CRLF (the "LF will be replaced by CRLF" warning) and keeps the
+# working tree byte-for-byte consistent with the Linux deploy.
+* text=auto eol=lf
+
+# Binary assets: never run end-of-line normalization on these. (SVG is XML text
+# and is deliberately left to the rule above.)
+*.jpg   binary
+*.jpeg  binary
+*.png   binary
+*.gif   binary
+*.webp  binary
+*.avif  binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.pdf   binary

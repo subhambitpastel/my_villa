@@ -113,6 +113,7 @@ export default function PaymentForm({
   flex = false,
   services = [],
   packageId,
+  couponCode,
   modify,
   pay,
   profile,
@@ -135,6 +136,8 @@ export default function PaymentForm({
   services?: number[];
   /** Set when booking a fixed package instead of a nightly stay. */
   packageId?: number;
+  /** Server-validated coupon code to redeem on this booking. */
+  couponCode?: string;
   /** Set when this checkout is the top-up for modifying an existing nightly
    *  booking: submitting applies the change and charges only `amountDue`. */
   modify?: { bookingId: number; amountDue: number };
@@ -293,6 +296,7 @@ export default function PaymentForm({
       rooms,
       services,
       packageId,
+      couponCode,
     });
     if (!result.ok) {
       setSubmitting(false);

@@ -7,7 +7,9 @@ import { useRouter } from "next/navigation";
 import { resolveCallRequestAction } from "@/lib/actions";
 import type { CallRequestItem } from "@/lib/queries";
 import AccountSearch from "@/components/account/AccountSearch";
+import CallChat, { ChatButton } from "@/components/account/CallChat";
 import { matchesSearch } from "@/lib/textSearch";
+import { useChatSocket } from "@/lib/useChatSocket";
 import { formatRange, nightsBetween } from "@/lib/dates";
 
 /**
@@ -63,6 +65,17 @@ export default function CallRequests({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [query, setQuery] = useState("");
+  // Which thread is open, by request id. Held as an id rather than the request
+  // itself so a router.refresh() behind the dialog re-renders it with the new
+  // messages instead of freezing on a stale copy.
+  const [chatId, setChatId] = useState<number | null>(null);
+  const chatting = requests.find((c) => c.id === chatId) ?? null;
+
+  // Subscribed at the LIST, not inside the open thread: a message should also
+  // move the card's preview and its unread badge, whether or not the thread is
+  // open. refresh() re-renders this server component, and the dialog reads its
+  // messages from the same `requests` — so the open chat updates with it.
+  useChatSocket(() => router.refresh());
 
   function resolve(id: number) {
     startTransition(async () => {
@@ -157,6 +170,9 @@ export default function CallRequests({
                     >
                       Fulfil this request
                     </Link>
+                    {/* Not everything needs a phone call — and a guest who
+                        left a note has already started the conversation. */}
+                    <ChatButton unread={c.unread} onClick={() => setChatId(c.id)} />
                     {c.guestPhone ? (
                       <a
                         href={`tel:${c.guestPhone.replace(/\s+/g, "")}`}
@@ -245,6 +261,23 @@ export default function CallRequests({
             );
           })}
         </ul>
+      )}
+
+      {chatting && (
+        <CallChat
+          requestId={chatting.id}
+          withName={chatting.guestName}
+          withAvatar={chatting.guestAvatar}
+          subtitle={
+            chatting.checkIn && chatting.checkOut
+              ? `${chatting.villaName} · ${formatRange(chatting.checkIn, chatting.checkOut)}`
+              : chatting.villaName
+          }
+          messages={chatting.chat}
+          unread={chatting.unread}
+          onClose={() => setChatId(null)}
+          onSent={() => router.refresh()}
+        />
       )}
     </div>
   );

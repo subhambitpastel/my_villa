@@ -88,12 +88,23 @@ export default async function ManageBookingPage({
     (sum, i) => sum + (villa.serviceList[i]?.price ?? 0),
     0,
   );
-  const originalTotal =
+  const originalBase =
     quote(
       villa.price * (roomBased ? booking.bookingRooms : 1),
       oldNights,
       villa.discount,
     ).total + oldExtrasTotal;
+  // The booking's own discount (a coupon's, or the owner's) came off what the
+  // guest actually PAID — reconcile edits against that figure, not the list
+  // price, or every modification would look like a surcharge. A coupon's
+  // discount keeps its $1 floor.
+  const originalDiscount = Math.min(
+    booking.couponCode ? Math.max(0, originalBase - 1) : originalBase,
+    (originalBase * Math.max(0, booking.discPct)) / 100 +
+      Math.max(0, booking.discFixed),
+  );
+  const originalTotal =
+    Math.round((originalBase - originalDiscount) * 100) / 100;
 
   return (
     <>
@@ -140,7 +151,7 @@ export default async function ManageBookingPage({
                     </div>
                     {booking.pay.hostDiscount > 0 && (
                       <div className="flex items-center justify-between gap-4 text-brand">
-                        <dt>Host&rsquo;s discount</dt>
+                        <dt>{booking.couponCode ? `Coupon ${booking.couponCode}` : "Host’s discount"}</dt>
                         <dd>−${booking.pay.hostDiscount.toFixed(2)}</dd>
                       </div>
                     )}
@@ -186,6 +197,9 @@ export default async function ManageBookingPage({
               originalTotal={originalTotal}
               locked={booking.locked}
               roomPlan={booking.roomPlan}
+              couponCode={booking.couponCode}
+              discPct={booking.discPct}
+              discFixed={booking.discFixed}
               packageStay={
                 booking.package
                   ? { nights: booking.package.nights, price: booking.package.price }

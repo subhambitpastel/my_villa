@@ -122,9 +122,15 @@ export type BookingRow = {
   payment_due: number;
   // Owner-granted discount on an owner-arranged stay: a % of the total and/or a
   // fixed amount off. Stored so the guest sees at payment exactly what the
-  // owner promised on the phone. Zero on guest-made bookings.
+  // owner promised on the phone. Zero on guest-made bookings — unless a coupon
+  // was applied at checkout, which snapshots its discount into these same
+  // columns with the code below, so every receipt recomputes identically.
   disc_pct: number;
   disc_fixed: number;
+  // The coupon redeemed at checkout ('' = none). Besides labelling the receipt,
+  // a non-empty code switches the discount clamp: a coupon may never take the
+  // price to zero — the charge floors at $1.
+  coupon_code: string;
   // Value of an earlier PAID stay that was folded into this one when the owner
   // fulfilled a bigger request over the same dates — credited against what the
   // guest owes, since they already paid it once.
@@ -223,10 +229,28 @@ CREATE TABLE IF NOT EXISTS bookings (
   -- Value of an earlier paid stay folded into this one on fulfilment — credited
   -- against what the guest owes.
   paid_credit REAL NOT NULL DEFAULT 0,
+  -- Coupon redeemed at checkout ('' = none). Its discount is snapshotted into
+  -- disc_pct/disc_fixed above; a non-empty code floors the charge at $1.
+  coupon_code TEXT NOT NULL DEFAULT '',
   status     TEXT NOT NULL DEFAULT 'accepted'
              CHECK (status IN ('pending','accepted','declined','cancelled','completed')),
   created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
+
+-- Owner-created discount coupons, each tied to ONE property. The code is
+-- globally unique (case-insensitively) so a guest can quote it without
+-- ambiguity. Exactly one of pct/fixed is set: pct is 1–99 (never 0, never a
+-- free stay), fixed is > 0 — and at redemption a fixed discount can never take
+-- the price below $1.
+CREATE TABLE IF NOT EXISTS coupons (
+  id         SERIAL PRIMARY KEY,
+  villa_id   INTEGER NOT NULL REFERENCES villas(id) ON DELETE CASCADE,
+  code       TEXT NOT NULL,
+  pct        INTEGER NOT NULL DEFAULT 0,
+  fixed      REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS coupons_code_unique ON coupons (UPPER(code));
 
 CREATE TABLE IF NOT EXISTS password_resets (
   token      TEXT PRIMARY KEY,
@@ -281,6 +305,30 @@ CREATE TABLE IF NOT EXISTS packages (
 -- won't take — in practice, a room block bigger than the per-guest cap (see
 -- MAX_ROOMS_PER_GUEST in rooms.ts). The dates and room count they wanted are
 -- kept so the host can act on the request without a back-and-forth.
+-- Things that HAPPENED, addressed to one person: a stay booked, cancelled or
+-- changed, a review left, a call asked for, a payment requested.
+--
+-- A table rather than something derived from the other tables, because most of
+-- these leave no trace in current state — nothing about a booking row says it
+-- was edited, and a cancelled one that's later deleted takes its own news with
+-- it. Read/unread has to live somewhere too.
+--
+-- title/body are rendered when the event happens and stored as written (the
+-- same reason bookings snapshot their package and extras): the villa can be
+-- renamed or removed afterwards and the news still reads true. href is where
+-- clicking it goes — decided at write time by the code that knows why it fired.
+CREATE TABLE IF NOT EXISTS notifications (
+  id         SERIAL PRIMARY KEY,
+  -- Who it's FOR (not who caused it).
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type       TEXT NOT NULL,
+  title      TEXT NOT NULL,
+  body       TEXT NOT NULL DEFAULT '',
+  href       TEXT NOT NULL DEFAULT '',
+  read_at    TEXT, -- NULL = unread
+  created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
+);
+
 CREATE TABLE IF NOT EXISTS call_requests (
   id         SERIAL PRIMARY KEY,
   villa_id   INTEGER NOT NULL REFERENCES villas(id) ON DELETE CASCADE,
@@ -297,6 +345,27 @@ CREATE TABLE IF NOT EXISTS call_requests (
   status     TEXT NOT NULL DEFAULT 'open', -- 'open' | 'done'
   created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
+
+-- The back-and-forth between a guest and a host about one call request. The
+-- guest's note on the request itself is copied in as the first message when they
+-- ask, so a thread is a plain uniform list rather than "a note, then messages".
+--
+-- Deliberately tied to the request and nothing else: resolving a request wipes
+-- its messages (see resolveCallRequestAction), and deleting the request or
+-- either party cascades the rest away. There is no archive by design — the chat
+-- exists to arrange one booking, and stops mattering once it's arranged.
+CREATE TABLE IF NOT EXISTS call_messages (
+  id         SERIAL PRIMARY KEY,
+  request_id INTEGER NOT NULL REFERENCES call_requests(id) ON DELETE CASCADE,
+  -- Who wrote it. Always one of the two participants (the request's guest, or
+  -- the villa's owner) — enforced in sendCallMessageAction.
+  sender_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body       TEXT NOT NULL,
+  -- Set when the OTHER party has seen it. NULL = still unread by them.
+  read_at    TEXT,
+  created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
+);
+CREATE INDEX IF NOT EXISTS idx_call_messages_request ON call_messages(request_id);
 
 -- User-uploaded images (villa photos, profile avatars) stored as BYTEA blobs
 -- rather than files on disk. The host's filesystem is ephemeral (Railway/VM
@@ -322,6 +391,7 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS room_plan TEXT NOT NULL DEFAULT ''
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_due INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS disc_pct    INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS disc_fixed  REAL NOT NULL DEFAULT 0;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_code TEXT NOT NULL DEFAULT '';
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS paid_credit REAL NOT NULL DEFAULT 0;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS extras TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS package_id INTEGER;
@@ -364,10 +434,29 @@ ALTER TABLE call_requests ADD COLUMN IF NOT EXISTS guests  INTEGER NOT NULL DEFA
 ALTER TABLE call_requests ADD COLUMN IF NOT EXISTS message TEXT NOT NULL DEFAULT '';
 ALTER TABLE call_requests ADD COLUMN IF NOT EXISTS services TEXT NOT NULL DEFAULT '[]';
 
+-- Requests made before chat existed still have their note only on the request
+-- row; lift it into the thread so every open request opens as a real
+-- conversation instead of a blank one.
+--
+-- Scoped to open requests on purpose. Resolving a request DELETEs its messages,
+-- so an unscoped backfill would resurrect a deleted chat on the next boot. An
+-- open request always has its first message written at creation, so the
+-- NOT EXISTS only ever fires for pre-chat rows.
+INSERT INTO call_messages (request_id, sender_id, body, created_at)
+SELECT c.id, c.guest_id, c.message, c.created_at
+  FROM call_requests c
+ WHERE c.message <> ''
+   AND c.status = 'open'
+   AND NOT EXISTS (SELECT 1 FROM call_messages m WHERE m.request_id = c.id);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_villas_owner ON villas(owner_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_guest ON bookings(guest_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_villa ON bookings(villa_id);
+-- Every read is "this user's, newest first" — and the unread count runs on
+-- every page load, so it can't be a scan.
+CREATE INDEX IF NOT EXISTS idx_notifications_user
+  ON notifications(user_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_reviews_villa ON reviews(villa_id);
 CREATE INDEX IF NOT EXISTS idx_packages_owner ON packages(owner_id);
 CREATE INDEX IF NOT EXISTS idx_packages_villa ON packages(villa_id);

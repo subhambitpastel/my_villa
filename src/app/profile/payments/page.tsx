@@ -181,7 +181,7 @@ export default async function PaymentsPage() {
                     </div>
                     {b.pay.hostDiscount > 0 && (
                       <div className="flex justify-between gap-6 text-brand">
-                        <dt>Host&rsquo;s discount</dt>
+                        <dt>{b.couponCode ? `Coupon ${b.couponCode}` : "Host’s discount"}</dt>
                         <dd>−${b.pay.hostDiscount.toFixed(2)}</dd>
                       </div>
                     )}

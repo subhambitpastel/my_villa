@@ -2,6 +2,7 @@
 import { cache } from "react";
 import { getDb, timeAgo, type BookingStatus, type VillaRow } from "./db";
 import { NO_ACCOUNT_COUNTS, type AccountCounts } from "./accountNav";
+import type { ChatMessage } from "./callRequest";
 import { FACILITY_CHIPS, type VillaService } from "@/components/host/draft";
 import {
   isRoomBased,
@@ -15,6 +16,11 @@ import {
   type RoomSegment,
 } from "./rooms";
 import { GUEST_SEARCH_MIN, type GuestOption } from "./guests";
+import {
+  NOTIFICATION_LIMIT,
+  type NotificationItem,
+  type NotificationType,
+} from "./notifications";
 import { parsePackageType, type PackageType } from "./packageTypes";
 import { quote } from "./pricing";
 import { nightsBetween } from "./dates";
@@ -86,6 +92,8 @@ export type BookingItem = {
   /** The owner made this booking for the guest and nobody has paid yet — the
    *  guest owes `amountPaid` and is shown a payment request. */
   paymentDue: boolean;
+  /** Coupon redeemed at checkout ('' = none) — labels the receipt's discount row and floors the charge at $1. */
+  couponCode: string;
   /** The receipt behind a DUE `amountPaid`: full stay, the host's discount, and
    *  what the guest's earlier absorbed stay already paid — the same three rows
    *  the owner saw when arranging it. Null once nothing is owed. */
@@ -129,6 +137,8 @@ export type RequestItem = {
   bookedAt: string;
   /** What the stay is worth: paid already, or owed if `paymentDue`. */
   amount: number;
+  /** Coupon redeemed at checkout ('' = none) — labels the receipt's discount row and floors the charge at $1. */
+  couponCode: string;
   /** The receipt behind `amount` — full stay, the discount the owner gave, and
    *  any credit from a stay this one absorbed. */
   money: BookingMoney;
@@ -1090,8 +1100,13 @@ export type CallRequestItem = {
   rooms: number;
   /** Party size they'd picked (0 = never stated). */
   guests: number;
-  /** The guest's own note to the host ("" = they didn't leave one). */
+  /** The guest's own note to the host ("" = they didn't leave one). It is also
+   *  the thread's first message — this is the summary, `chat` is the record. */
   message: string;
+  /** The conversation with this guest, oldest first. */
+  chat: ChatMessage[];
+  /** Messages from the guest the host hasn't opened yet. */
+  unread: number;
   /** Paid add-ons they'd ticked when they asked, as stored. Shown to the host so
    *  the call (or the booking) already knows what they wanted. */
   services: VillaService[];
@@ -1140,11 +1155,21 @@ export async function getCallRequestsForOwner(
     phone_number: string;
     avatar: string;
   }[];
+
+  const [chats, unread] = await Promise.all([
+    chatsFor(
+      rows.map((r) => r.id),
+      ownerId,
+    ),
+    unreadMessageIds(ownerId),
+  ]);
+
   return rows.map((r) => {
     // Map the snapshotted add-ons back onto the villa's current list by name:
     // an index stored months ago could now point at a different service, but a
     // name either still exists or the guest can't have it any more.
     const asked = parseServiceList(r.services);
+    const chat = chats[r.id] ?? [];
     const current = parseServiceList(r.villa_services);
     const serviceIdx = asked
       .map((s) => current.findIndex((cur) => cur.name === s.name))
@@ -1166,7 +1191,193 @@ export async function getCallRequestsForOwner(
     rooms: Number(r.rooms),
     guests: Number(r.guests ?? 0),
     message: r.message ?? "",
+    chat,
+    unread: unreadIn(chat, unread),
     requested: timeAgo(r.created_at, "Requested"),
+    };
+  });
+}
+
+/* --------------------------- call-request chat ---------------------------- */
+
+/**
+ * Every thread for the given requests at once, keyed by request id.
+ *
+ * One query rather than one per request: these lists render a whole page of
+ * requests, and a per-request fetch would be an N+1 on the account's hottest
+ * page. Threads are short (they exist to arrange one booking), so loading them
+ * with the list costs little and lets the chat open with no round trip.
+ *
+ * `viewerId` decides `mine` here, server-side — the client is never handed the
+ * sender ids to compare, so it can't get the sides wrong.
+ */
+async function chatsFor(
+  requestIds: number[],
+  viewerId: number,
+): Promise<Record<number, ChatMessage[]>> {
+  const byRequest: Record<number, ChatMessage[]> = {};
+  if (requestIds.length === 0) return byRequest;
+
+  const rows = (await getDb()
+    .prepare(
+      `SELECT m.id, m.request_id, m.sender_id, m.body, m.created_at,
+              u.full_name, u.email, u.avatar
+         FROM call_messages m
+         JOIN users u ON u.id = m.sender_id
+        WHERE m.request_id = ANY(?)
+        ORDER BY m.created_at ASC, m.id ASC`,
+    )
+    .all(requestIds)) as {
+    id: number;
+    request_id: number;
+    sender_id: number;
+    body: string;
+    created_at: string;
+    full_name: string;
+    email: string;
+    avatar: string;
+  }[];
+
+  for (const r of rows) {
+    (byRequest[r.request_id] ??= []).push({
+      id: r.id,
+      mine: r.sender_id === viewerId,
+      senderName: r.full_name || r.email,
+      senderAvatar: r.avatar,
+      body: r.body,
+      when: timeAgo(r.created_at),
+    });
+  }
+  return byRequest;
+}
+
+/** Messages waiting on `viewerId` in one thread — written by the other party and
+ *  not yet seen. Counted from the rows already loaded rather than re-queried. */
+const unreadIn = (chat: ChatMessage[], unreadIds: Set<number>): number =>
+  chat.filter((m) => !m.mine && unreadIds.has(m.id)).length;
+
+/** Ids of messages this viewer hasn't read, across every request they're in.
+ *  Read state lives per message (read_at), so this is the one query that says
+ *  which of the loaded messages are still new to them. */
+async function unreadMessageIds(viewerId: number): Promise<Set<number>> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT m.id FROM call_messages m
+         WHERE m.sender_id <> ? AND m.read_at IS NULL
+           AND m.request_id IN (
+             SELECT c.id FROM call_requests c
+              LEFT JOIN villas v ON v.id = c.villa_id
+              WHERE c.status = 'open' AND (c.guest_id = ? OR v.owner_id = ?)
+           )`,
+    )
+    .all(viewerId, viewerId, viewerId)) as { id: number }[];
+  return new Set(rows.map((r) => r.id));
+}
+
+/** How many replies are sitting unread for this user, either side of the table.
+ *  Drives the My Requests badge — the guest has no other cue that the host
+ *  wrote back. */
+export async function getUnreadChatCount(userId: number): Promise<number> {
+  return (await unreadMessageIds(userId)).size;
+}
+
+/** Open requests this user has MADE (as a guest). Drives whether the My Requests
+ *  section exists at all — with none, there's nothing to show them. */
+export async function getMyCallRequestCount(guestId: number): Promise<number> {
+  const r = (await getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM call_requests
+        WHERE guest_id = ? AND status = 'open'`,
+    )
+    .get(guestId)) as { n: number };
+  return Number(r?.n) || 0;
+}
+
+/** A request from the guest's own side: who they asked, and the thread with
+ *  them. The mirror image of CallRequestItem — same request, other end. */
+export type GuestRequestItem = {
+  id: number;
+  villaId: number;
+  villaName: string;
+  villaCity: string;
+  villaImage: string;
+  /** The person who'll answer — a name, so the thread isn't with a listing. */
+  hostName: string;
+  hostAvatar: string;
+  checkIn: string;
+  checkOut: string;
+  rooms: number;
+  guests: number;
+  services: VillaService[];
+  requested: string;
+  chat: ChatMessage[];
+  unread: number;
+};
+
+/** The guest's own open call requests, newest first.
+ *
+ *  Open only, deliberately: the host closing a request wipes its chat, so a
+ *  closed one here would be a dead card with a dead button. Fulfilled requests
+ *  turn into a stay, which My Bookings already shows.
+ */
+export async function getCallRequestsForGuest(
+  guestId: number,
+): Promise<GuestRequestItem[]> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT c.id, c.villa_id, c.check_in, c.check_out, c.rooms, c.guests,
+              c.services, c.created_at,
+              v.name AS villa_name, v.city AS villa_city, v.image AS villa_image,
+              u.full_name AS host_name, u.email AS host_email, u.avatar AS host_avatar
+         FROM call_requests c
+         JOIN villas v ON v.id = c.villa_id
+         JOIN users u ON u.id = v.owner_id
+        WHERE c.guest_id = ? AND c.status = 'open'
+        ORDER BY c.created_at DESC, c.id DESC`,
+    )
+    .all(guestId)) as {
+    id: number;
+    villa_id: number;
+    check_in: string;
+    check_out: string;
+    rooms: number;
+    guests: number;
+    services: string;
+    created_at: string;
+    villa_name: string;
+    villa_city: string;
+    villa_image: string;
+    host_name: string;
+    host_email: string;
+    host_avatar: string;
+  }[];
+
+  const [chats, unread] = await Promise.all([
+    chatsFor(
+      rows.map((r) => r.id),
+      guestId,
+    ),
+    unreadMessageIds(guestId),
+  ]);
+
+  return rows.map((r) => {
+    const chat = chats[r.id] ?? [];
+    return {
+      id: r.id,
+      villaId: r.villa_id,
+      villaName: r.villa_name,
+      villaCity: r.villa_city,
+      villaImage: r.villa_image,
+      hostName: r.host_name || r.host_email,
+      hostAvatar: r.host_avatar,
+      checkIn: r.check_in,
+      checkOut: r.check_out,
+      rooms: Number(r.rooms),
+      guests: Number(r.guests ?? 0),
+      services: parseServiceList(r.services),
+      requested: timeAgo(r.created_at, "Requested"),
+      chat,
+      unread: unreadIn(chat, unread),
     };
   });
 }
@@ -1192,13 +1403,66 @@ export async function getCallRequestCount(ownerId: number): Promise<number> {
  */
 export const getAccountCounts = cache(
   async (userId: number, isHost: boolean): Promise<AccountCounts> => {
-    const [pendingPayments, callRequests] = await Promise.all([
-      getPendingPaymentCount(userId),
-      // Guests own no villas, so the query could only ever return 0 — skip it
-      // rather than pay for it on every page they load.
-      isHost ? getCallRequestCount(userId) : NO_ACCOUNT_COUNTS.callRequests,
-    ]);
-    return { pendingPayments, callRequests };
+    const [pendingPayments, callRequests, myRequests, unreadChat] =
+      await Promise.all([
+        getPendingPaymentCount(userId),
+        // Guests own no villas, so the query could only ever return 0 — skip it
+        // rather than pay for it on every page they load.
+        isHost ? getCallRequestCount(userId) : NO_ACCOUNT_COUNTS.callRequests,
+        // Not gated on isHost: a host can ask for a call on someone else's
+        // listing, so both roles can have requests of their own out.
+        getMyCallRequestCount(userId),
+        getUnreadChatCount(userId),
+      ]);
+    return { pendingPayments, callRequests, myRequests, unreadChat };
+  },
+);
+
+/* --------------------------- notifications --------------------------- */
+
+/** This user's newest notifications — what the bell drops down. Capped: it's a
+ *  glance at what just happened, and the pages behind each one are the record. */
+export const getNotifications = cache(
+  async (userId: number): Promise<NotificationItem[]> => {
+    const rows = (await getDb()
+      .prepare(
+        `SELECT id, type, title, body, href, read_at, created_at
+         FROM notifications
+         WHERE user_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(userId, NOTIFICATION_LIMIT)) as {
+      id: number;
+      type: string;
+      title: string;
+      body: string;
+      href: string;
+      read_at: string | null;
+      created_at: string;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      type: r.type as NotificationType,
+      title: r.title,
+      body: r.body,
+      href: r.href,
+      read: r.read_at !== null,
+      when: timeAgo(r.created_at),
+    }));
+  },
+);
+
+/** The number on the bell. Counts ALL unread, not just the ones the dropdown
+ *  can hold — "3" that lists 12 would be a lie the other way round. */
+export const getUnreadNotificationCount = cache(
+  async (userId: number): Promise<number> => {
+    const r = (await getDb()
+      .prepare(
+        "SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read_at IS NULL",
+      )
+      .get(userId)) as { n: number };
+    return Number(r?.n) || 0;
   },
 );
 
@@ -1277,6 +1541,13 @@ export type ManageBooking = {
    *  count — and the modify actions refuse these — so the manage view shows
    *  the legs read-only and routes changes through the host. */
   roomPlan: RoomSegment[] | null;
+  /** Coupon redeemed at checkout ('' = none) — labels the receipt's discount row and floors the charge at $1. */
+  couponCode: string;
+  /** The booking's own discount (a coupon's, or the owner's) — the manage flow
+   *  re-applies it to any RE-PRICED total, so editing a couponed stay keeps
+   *  the coupon. */
+  discPct: number;
+  discFixed: number;
   /** Money is still owed on this stay (owner-arranged or a merged upgrade). */
   paymentDue: boolean;
   /** What settling it costs, with the receipt behind the figure — mirrors the
@@ -1299,7 +1570,7 @@ export async function getBookingForManage(
     .prepare(
       `SELECT b.id, b.villa_id, b.check_in, b.check_out, b.guests, b.rooms AS booking_rooms,
               b.status, b.package, b.extras, b.payment_due, b.room_plan,
-              b.disc_pct, b.disc_fixed, b.paid_credit,
+              b.disc_pct, b.disc_fixed, b.paid_credit, b.coupon_code,
               v.name AS villa_name, v.city AS villa_city, v.image AS villa_image,
               v.price, v.discount, v.max_guests, v.rooms, v.kind, v.people_per_room,
               v.locked_at, pk.locked_at AS package_locked_at
@@ -1324,6 +1595,7 @@ export async function getBookingForManage(
         disc_pct: number;
         disc_fixed: number;
         paid_credit: number;
+        coupon_code: string;
         villa_name: string;
         villa_city: string;
         villa_image: string;
@@ -1358,6 +1630,7 @@ export async function getBookingForManage(
     discFixed: row.disc_fixed,
     paidCredit: row.paid_credit,
     paymentDue: row.payment_due === 1,
+    couponCode: row.coupon_code,
   });
   return {
     id: row.id,
@@ -1379,6 +1652,9 @@ export async function getBookingForManage(
     package: pkgSnap,
     locked: row.locked_at !== null || row.package_locked_at !== null,
     roomPlan: isRoomBased(row.kind) ? parseRoomPlan(row.room_plan) : null,
+    couponCode: row.coupon_code,
+    discPct: row.disc_pct,
+    discFixed: row.disc_fixed,
     paymentDue: row.payment_due === 1,
     pay:
       row.payment_due === 1
@@ -1547,6 +1823,10 @@ export function bookingMoney(input: {
   discFixed: number;
   paidCredit: number;
   paymentDue: boolean;
+  /** The coupon redeemed at checkout ('' = none). A coupon discount can never
+   *  take the price to zero — the charge floors at $1, so a $101 coupon on a
+   *  $100 stay leaves exactly $1 to pay. */
+  couponCode?: string;
 }): BookingMoney {
   const nights = Math.max(1, input.nights);
   const extrasTotal = input.extras.reduce((sum, s) => sum + s.price, 0);
@@ -1559,7 +1839,7 @@ export function bookingMoney(input: {
     : quote((input.villaPrice * roomNights) / nights, nights, input.villaDiscount)
         .total + extrasTotal;
   const hostDiscount = Math.min(
-    fullStay,
+    input.couponCode ? Math.max(0, fullStay - 1) : fullStay,
     (fullStay * Math.max(0, input.discPct)) / 100 + Math.max(0, input.discFixed),
   );
   const alreadyPaid = input.paymentDue
@@ -1597,7 +1877,7 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
     .prepare(
       `SELECT b.id, b.dates, b.check_in, b.check_out, b.guests, b.rooms, b.status,
               b.created_at, b.extras, b.package, b.payment_due, b.room_plan,
-              b.disc_pct, b.disc_fixed, b.paid_credit,
+              b.disc_pct, b.disc_fixed, b.paid_credit, b.coupon_code,
               v.name AS villa_name, v.city AS villa_city, v.kind AS villa_kind,
               v.price AS villa_price, v.discount AS villa_discount,
               rv.stars AS my_rating
@@ -1621,6 +1901,7 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
     disc_pct: number;
     disc_fixed: number;
     paid_credit: number;
+    coupon_code: string;
     extras: string;
     package: string;
     villa_name: string;
@@ -1658,6 +1939,7 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
       discFixed: r.disc_fixed,
       paidCredit: r.paid_credit,
       paymentDue: r.payment_due === 1,
+      couponCode: r.coupon_code,
     });
     const amountPaid = money.amount;
     return {
@@ -1681,14 +1963,17 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
       createdAt: r.created_at,
       amountPaid,
       paymentDue: r.payment_due === 1,
+      // Not only while DUE: a settled stay bought with a coupon (or an owner
+      // discount) keeps its receipt, so a $1.00 'Amount paid' explains itself.
       pay:
-        r.payment_due === 1
+        r.payment_due === 1 || money.hostDiscount > 0
           ? {
               fullStay: money.fullStay,
               hostDiscount: money.hostDiscount,
               alreadyPaid: money.alreadyPaid,
             }
           : null,
+      couponCode: r.coupon_code,
       myRating: r.my_rating,
       extras,
       package: pkg,
@@ -1811,7 +2096,7 @@ export async function getRequestsForOwner(ownerId: number): Promise<RequestItem[
     .prepare(
       `SELECT b.id, b.dates, b.guests, b.rooms, b.status, b.payment_due,
               b.created_at, b.package, b.check_in, b.check_out, b.extras,
-              b.room_plan, b.disc_pct, b.disc_fixed, b.paid_credit,
+              b.room_plan, b.disc_pct, b.disc_fixed, b.paid_credit, b.coupon_code,
               v.name AS villa_name, v.city AS villa_city, v.kind AS villa_kind,
               v.price AS villa_price, v.discount AS villa_discount,
               u.full_name AS tenant, u.email AS tenant_email, u.avatar AS avatar,
@@ -1838,6 +2123,7 @@ export async function getRequestsForOwner(ownerId: number): Promise<RequestItem[
     disc_pct: number;
     disc_fixed: number;
     paid_credit: number;
+    coupon_code: string;
     villa_name: string;
     villa_city: string;
     villa_kind: string;
@@ -1872,6 +2158,7 @@ export async function getRequestsForOwner(ownerId: number): Promise<RequestItem[
       discFixed: r.disc_fixed,
       paidCredit: r.paid_credit,
       paymentDue: r.payment_due === 1,
+      couponCode: r.coupon_code,
     });
     return {
       id: r.id,
@@ -1892,6 +2179,7 @@ export async function getRequestsForOwner(ownerId: number): Promise<RequestItem[
       money,
       guestEmail: r.tenant_email,
       guestCustomerId: r.customer_id ?? "",
+      couponCode: r.coupon_code,
       guestPhone: r.phone_number
         ? `${r.phone_code} ${r.phone_number}`.trim()
         : "",
@@ -2118,4 +2406,87 @@ export async function getBookingToPay(
     plan: payPlan,
     hostName: r.host_name || r.host_email,
   };
+}
+
+/* ------------------------------- coupons ------------------------------- */
+
+/** An owner's coupon as listed on their Coupons page. */
+export type CouponItem = {
+  id: number;
+  villaId: number;
+  villaName: string;
+  villaKind: string;
+  code: string;
+  /** Percent off (1–99) — 0 when the coupon is a fixed amount. */
+  pct: number;
+  /** Fixed amount off (> 0) — 0 when the coupon is a percentage. */
+  fixed: number;
+  createdAt: string;
+};
+
+export async function getCouponsForOwner(ownerId: number): Promise<CouponItem[]> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT c.id, c.villa_id, c.code, c.pct, c.fixed, c.created_at,
+              v.name AS villa_name, v.kind AS villa_kind
+       FROM coupons c JOIN villas v ON v.id = c.villa_id
+       WHERE v.owner_id = ?
+       ORDER BY c.created_at DESC, c.id DESC`,
+    )
+    .all(ownerId)) as {
+    id: number;
+    villa_id: number;
+    code: string;
+    pct: number;
+    fixed: number;
+    created_at: string;
+    villa_name: string;
+    villa_kind: string;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    villaId: r.villa_id,
+    villaName: r.villa_name,
+    villaKind: r.villa_kind,
+    code: r.code,
+    pct: r.pct,
+    fixed: r.fixed,
+    createdAt: r.created_at,
+  }));
+}
+
+export type Coupon = {
+  id: number;
+  villaId: number;
+  code: string;
+  pct: number;
+  fixed: number;
+};
+
+/** The coupon behind `code`, if any — codes are globally unique, so a bare
+ *  code identifies one coupon; whether it applies to a given property is the
+ *  caller's check (`coupon.villaId`). Case-insensitive. */
+export async function findCoupon(code: string): Promise<Coupon | null> {
+  const trimmed = code.trim();
+  if (!trimmed) return null;
+  const r = (await getDb()
+    .prepare(
+      `SELECT id, villa_id, code, pct, fixed FROM coupons
+       WHERE UPPER(code) = UPPER(?)`,
+    )
+    .get(trimmed)) as
+    | { id: number; villa_id: number; code: string; pct: number; fixed: number }
+    | undefined;
+  if (!r) return null;
+  return { id: r.id, villaId: r.villa_id, code: r.code, pct: r.pct, fixed: r.fixed };
+}
+
+/** Codes starting with `prefix` (case-insensitive) — feeds the "already taken,
+ *  try one of these" suggestions when an owner picks a code that exists. */
+export async function getCouponCodesLike(prefix: string): Promise<Set<string>> {
+  const escaped = prefix.trim().toUpperCase().replace(/([\%_])/g, "\$1");
+  const rows = (await getDb()
+    .prepare(`SELECT code FROM coupons WHERE UPPER(code) LIKE ? ESCAPE '\'`)
+    .all(`${escaped}%`)) as { code: string }[];
+  return new Set(rows.map((r) => r.code.toUpperCase()));
 }

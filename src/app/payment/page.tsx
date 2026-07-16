@@ -4,6 +4,7 @@ import Link from "next/link";
 import Header from "@/components/site/Header";
 import Footer from "@/components/site/Footer";
 import PaymentForm from "@/components/payment/PaymentForm";
+import CouponField from "@/components/payment/CouponField";
 import { redirect } from "next/navigation";
 import {
   getVillaById,
@@ -18,6 +19,7 @@ import {
   parseServiceList,
   type PackageForBooking,
 } from "@/lib/queries";
+import { findCoupon } from "@/lib/queries";
 import type { VillaService } from "@/components/host/draft";
 import { getCurrentUser } from "@/lib/session";
 import {
@@ -61,6 +63,8 @@ function BookingSummary({
   pkg = null,
   modify,
   pay,
+  coupon = null,
+  couponSlot = null,
 }: {
   villa: VillaRow;
   nights: number;
@@ -81,6 +85,11 @@ function BookingSummary({
   /** Set when settling an owner-arranged stay: the owner's discount, any credit
    *  from a merged (already-paid) stay, and the net amount due. */
   pay?: { hostDiscount: number; credit: number; amount: number };
+  /** Coupon applied to a NEW checkout (validated server-side). Its discount
+   *  can never take the total below $1 — the floor a coupon must respect. */
+  coupon?: { code: string; pct: number; fixed: number } | null;
+  /** The coupon input, rendered under the price rows (client component). */
+  couponSlot?: React.ReactNode;
 }) {
   // Charge the room-nights actually held. With a constant room count this is
   // identical to the old price × rooms, while the length-of-stay discount keeps
@@ -92,6 +101,18 @@ function BookingSummary({
   );
   const extrasTotal = extras.reduce((sum, s) => sum + s.price, 0);
   const adjusted = plan.length > 0;
+  // Coupon comes off the WHOLE checkout (stay + add-ons; a package: its
+  // price), and can never push it below $1 — a $101 coupon on a $100 stay
+  // leaves exactly $1 to pay.
+  const round2c = (n: number) => Math.round(n * 100) / 100;
+  const baseTotal = pkg ? pkg.price : q.total + extrasTotal;
+  const couponDiscount = coupon
+    ? Math.min(
+        coupon.pct > 0 ? round2c((baseTotal * coupon.pct) / 100) : round2c(coupon.fixed),
+        Math.max(0, round2c(baseTotal - 1)),
+      )
+    : 0;
+  const dueTotal = round2c(baseTotal - couponDiscount);
   return (
     <aside className="h-fit w-full min-w-0 max-w-[758px] rounded-[10px] bg-white pb-12 shadow-[0px_15px_50px_0px_rgba(0,0,0,0.18)]">
       <div className="flex flex-col gap-6 p-6 sm:flex-row sm:gap-[22px]">
@@ -140,9 +161,15 @@ function BookingSummary({
               </li>
             ))}
           </ul>
+          {coupon && (
+            <div className="mt-6 flex items-center justify-between text-[20px] leading-[1.3] text-[#1c7d5c]">
+              <span>{coupon.code ? `Coupon ${coupon.code}` : "Host’s discount"}</span>
+              <span>−${couponDiscount.toFixed(2)}</span>
+            </div>
+          )}
           <div className="mt-8 flex items-center justify-between border-t border-[#c6c6c6] pt-6 text-[26px] font-semibold leading-[1.3]">
             <span>Total (USD)</span>
-            <span>${pkg.price.toFixed(2)}</span>
+            <span>${dueTotal.toFixed(2)}</span>
           </div>
         </div>
       ) : (
@@ -213,9 +240,15 @@ function BookingSummary({
               </dd>
             </div>
           ))}
+          {coupon && (
+            <div className="flex items-center justify-between text-[#1c7d5c]">
+              <dt>{coupon.code ? `Coupon ${coupon.code}` : "Host’s discount"}</dt>
+              <dd>−${couponDiscount.toFixed(2)}</dd>
+            </div>
+          )}
           <div className="flex items-center justify-between pt-8 font-semibold">
             <dt>{modify || pay ? "New total (USD)" : "Total (USD)"}</dt>
-            <dd>${(q.total + extrasTotal).toFixed(2)}</dd>
+            <dd>${dueTotal.toFixed(2)}</dd>
           </div>
           {modify && (
             <>
@@ -254,6 +287,7 @@ function BookingSummary({
           )}
         </dl>
       )}
+      {couponSlot && <div className="px-[25px]">{couponSlot}</div>}
     </aside>
   );
 }
@@ -275,6 +309,8 @@ export default async function PaymentPage({
     modify?: string;
     /** Set when settling an owner-made booking the guest still owes for. */
     pay?: string;
+    /** Coupon code the guest applied at checkout. */
+    coupon?: string;
   }>;
 }) {
   const params = await searchParams;
@@ -476,6 +512,9 @@ export default async function PaymentPage({
   const isModify = Number.isInteger(modifyId) && modifyId > 0;
   let alreadyPaid = 0;
   let balanceDue = 0;
+  /** The modified booking's own discount (coupon or owner's) — re-applied to
+   *  the new total so an edit never silently drops it. */
+  let modifyDiscount: { code: string; pct: number; fixed: number } | null = null;
   if (isModify) {
     const today = dayFromNow(0);
     const mb = await getBookingForManage(modifyId, user.id);
@@ -493,20 +532,46 @@ export default async function PaymentPage({
       .map((e) => villaServices.findIndex((s) => s.name === e.name))
       .filter((i) => i >= 0)
       .reduce((sum, i) => sum + (villaServices[i]?.price ?? 0), 0);
-    alreadyPaid = round2(
-      quote(
-        villa.price * (roomBased ? mb.bookingRooms : 1),
-        Math.max(1, nightsBetween(mb.checkIn, mb.checkOut)),
-        villa.discount,
-      ).total + oldExtrasTotal,
+    // Both sides of the reconciliation carry the booking's own discount — the
+    // guest PAID the discounted figure, and their coupon (or the owner's
+    // promise) survives the edit. A coupon still can't take a total below $1.
+    const withBookingDiscount = (base: number) => {
+      const raw =
+        (base * Math.max(0, mb.discPct)) / 100 + Math.max(0, mb.discFixed);
+      const cap = mb.couponCode ? Math.max(0, base - 1) : base;
+      return round2(base - Math.min(cap, raw));
+    };
+    if (mb.discPct > 0 || mb.discFixed > 0)
+      modifyDiscount = { code: mb.couponCode, pct: mb.discPct, fixed: mb.discFixed };
+    alreadyPaid = withBookingDiscount(
+      round2(
+        quote(
+          villa.price * (roomBased ? mb.bookingRooms : 1),
+          Math.max(1, nightsBetween(mb.checkIn, mb.checkOut)),
+          villa.discount,
+        ).total + oldExtrasTotal,
+      ),
     );
-    const newTotal = round2(
-      quote(villa.price * (roomBased ? rooms : 1), nights, villa.discount).total +
-        extras.reduce((sum, e) => sum + e.price, 0),
+    const newTotal = withBookingDiscount(
+      round2(
+        quote(villa.price * (roomBased ? rooms : 1), nights, villa.discount).total +
+          extras.reduce((sum, e) => sum + e.price, 0),
+      ),
     );
     balanceDue = round2(newTotal - alreadyPaid);
     if (balanceDue <= 0) redirect(`/booking?id=${modifyId}`);
   }
+
+  /* Coupon (new checkouts only — settling or modifying an existing stay has
+     its own money story). Resolved server-side from the URL: it must exist
+     and belong to THIS property. The form carries the validated code to
+     createBookingAction, which re-validates and snapshots it. */
+  const couponParam = (params.coupon ?? "").trim();
+  const couponAllowed = !payBooking && !isModify;
+  const foundCoupon =
+    couponAllowed && couponParam ? await findCoupon(couponParam) : null;
+  const couponValid = !!foundCoupon && foundCoupon.villaId === villa.id;
+  const couponInvalid = couponAllowed && !!couponParam && !couponValid;
 
   // The guest's own booking is excluded when modifying so its current dates never
   // read as a clash against the (possibly overlapping) new range. An adjusted
@@ -639,6 +704,9 @@ export default async function PaymentPage({
                     flex={plan.length > 0}
                     services={svcIndices}
                     packageId={pkg ? pkg.id : undefined}
+                    couponCode={
+                      couponValid && foundCoupon ? foundCoupon.code : undefined
+                    }
                     modify={
                       isModify ? { bookingId: modifyId, amountDue: balanceDue } : undefined
                     }
@@ -731,6 +799,23 @@ export default async function PaymentPage({
               roomNights={roomNights}
               plan={plan}
               pkg={pkg}
+              coupon={
+                couponValid && foundCoupon
+                  ? {
+                      code: foundCoupon.code,
+                      pct: foundCoupon.pct,
+                      fixed: foundCoupon.fixed,
+                    }
+                  : modifyDiscount
+              }
+              couponSlot={
+                couponAllowed ? (
+                  <CouponField
+                    applied={couponValid && foundCoupon ? foundCoupon.code : null}
+                    invalid={couponInvalid}
+                  />
+                ) : null
+              }
               modify={isModify ? { alreadyPaid, balanceDue } : undefined}
               pay={
                 payBooking

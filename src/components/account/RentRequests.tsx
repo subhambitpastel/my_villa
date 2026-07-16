@@ -103,7 +103,7 @@ function RequestDetails({ r }: { r: RequestItem }) {
           {money.hostDiscount > 0 && (
             <>
               {" "}
-              − your discount{" "}
+              − {r.couponCode ? `coupon ${r.couponCode}` : "your discount"}{" "}
               <span className="font-semibold text-brand">
                 ${money.hostDiscount.toFixed(2)}
               </span>

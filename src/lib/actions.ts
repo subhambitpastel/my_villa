@@ -15,9 +15,14 @@ import {
 } from "./dates";
 import { bookingReference, quote } from "./pricing";
 import { allocateCustomerId, customerIdPrefix } from "./customerId";
-import { MAX_CALL_MESSAGE } from "./callRequest";
+import { MAX_CALL_MESSAGE, MAX_CHAT_MESSAGE } from "./callRequest";
+// Plain JS, shared by value with the custom server through globalThis — see
+// realtime/bus.mjs for why it can't just be another module under lib/.
+import { issueTicket, publishChat } from "../../realtime/bus.mjs";
 import { parsePackageType, presetNights, presetDiscount } from "./packageTypes";
 import {
+  findCoupon,
+  getCouponCodesLike,
   getGuestRoomBookings,
   getPackageBookingLock,
   getPackageById,
@@ -45,6 +50,7 @@ import {
   type RoomSegment,
 } from "./rooms";
 import type { GuestOption } from "./guests";
+import type { NotificationType } from "./notifications";
 import { hashPasswordSync, verifyPassword } from "./password";
 import { createSession, destroySession, getCurrentUser } from "./session";
 import { appBaseUrl, sendEmail } from "./email";
@@ -857,6 +863,80 @@ export async function setPackageLockedAction(
   return { ok: true };
 }
 
+/* -------------------------- notifications -------------------------- */
+
+/**
+ * Tell `userId` that something happened.
+ *
+ * Never throws. A notification is a side-effect of the real thing — a booking,
+ * a cancellation, a review — and none of those should fail because the news
+ * about them couldn't be filed. A missed notification is a small loss; a
+ * booking that blew up while telling someone about it is a much bigger one.
+ *
+ * The wording is passed in already written, and stored as-is: the villa may be
+ * renamed or deleted later, and "Alena booked The Bund" should still read true.
+ */
+async function notify(input: {
+  /** Who it's FOR — never the person who caused it. */
+  userId: number;
+  type: NotificationType;
+  title: string;
+  body?: string;
+  /** Where clicking it should land them. */
+  href?: string;
+}): Promise<void> {
+  try {
+    await getDb()
+      .prepare(
+        `INSERT INTO notifications (user_id, type, title, body, href)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.userId,
+        input.type,
+        input.title,
+        input.body ?? "",
+        input.href ?? "",
+      );
+    // The bell is in the header of every page, so its count is stale everywhere.
+    revalidatePath("/", "layout");
+  } catch {
+    /* see above: the event itself matters more than the news of it */
+  }
+}
+
+/** The villa's owner and name, for addressing a notification about it. */
+async function villaOwnerFor(
+  villaId: number,
+): Promise<{ ownerId: number; name: string } | null> {
+  const v = (await getDb()
+    .prepare("SELECT owner_id, name FROM villas WHERE id = ?")
+    .get(villaId)) as { owner_id: number; name: string } | undefined;
+  return v ? { ownerId: v.owner_id, name: v.name } : null;
+}
+
+/** The signed-in person's display name, for "X booked your villa". */
+const displayName = (u: { full_name: string; email: string }) =>
+  u.full_name.trim() || u.email;
+
+/**
+ * Mark this user's notifications read. Read/unread is only an indication — it
+ * gates nothing — so opening the bell is enough to clear it, and there's no
+ * per-item read state to manage.
+ */
+export async function markNotificationsReadAction(): Promise<ActionResult> {
+  const user = await getCurrentUser();
+  if (!user) return fail("You must be signed in.");
+  await getDb()
+    .prepare(
+      `UPDATE notifications SET read_at = ?
+       WHERE user_id = ? AND read_at IS NULL`,
+    )
+    .run(new Date().toISOString(), user.id);
+  revalidatePath("/", "layout");
+  return { ok: true };
+}
+
 /* ---------------------------- bookings ---------------------------- */
 
 export type BookingResult =
@@ -928,10 +1008,12 @@ export async function requestCallAction(input: {
     return fail("You've already requested a call for these dates. The host will be in touch.");
   }
 
-  await db
+  const created = await db
     .prepare(
+      // RETURNING id: the thread's first message needs the new request's id,
+      // and this facade only fills lastInsertRowid when asked to.
       `INSERT INTO call_requests (villa_id, guest_id, check_in, check_out, rooms, guests, message, services)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
     )
     .run(
       villa.id,
@@ -944,6 +1026,31 @@ export async function requestCallAction(input: {
       JSON.stringify(extras),
     );
 
+  // The note they wrote when asking IS the first message of the thread — copied
+  // in so the chat is one uniform list, rather than a note pinned above the
+  // messages that answer it. No note simply means the host opens the thread.
+  if (message && created.lastInsertRowid)
+    await db
+      .prepare(
+        `INSERT INTO call_messages (request_id, sender_id, body) VALUES (?, ?, ?)`,
+      )
+      .run(Number(created.lastInsertRowid), user.id, message);
+
+  // Someone is now sitting waiting for a call — the one notification with a
+  // person on the other end of it.
+  const asked = await villaOwnerFor(villa.id);
+  if (asked)
+    await notify({
+      userId: asked.ownerId,
+      type: "call_request",
+      title: `${displayName(user)} asked for a call about ${asked.name}`,
+      body:
+        checkIn && checkOut
+          ? `${formatRange(checkIn, checkOut)}${rooms > 0 ? ` · ${rooms} room${rooms === 1 ? "" : "s"}` : ""}`
+          : "No dates given",
+      href: "/profile/calls",
+    });
+
   revalidatePath("/profile/calls");
   return { ok: true };
 }
@@ -954,16 +1061,152 @@ export async function resolveCallRequestAction(
 ): Promise<ActionResult> {
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in.");
-  const res = await getDb()
+  const db = getDb();
+  const res = await db
     .prepare(
       `UPDATE call_requests SET status = 'done'
        WHERE id = ? AND villa_id IN (SELECT id FROM villas WHERE owner_id = ?)`,
     )
     .run(requestId, user.id);
   if (res.changes === 0) return fail("Request not found.");
+
+  // Closing the request ends the conversation, so the conversation goes with it.
+  // Both ways a request can close — "Fulfil this request" (the owner's booking
+  // form calls this once the stay exists) and "Mark as called" — come through
+  // here, which is the only reason one delete covers both.
+  //
+  // After the UPDATE, so a failed close can't take the messages with it.
+  await db
+    .prepare(`DELETE FROM call_messages WHERE request_id = ?`)
+    .run(requestId);
+
   // Call requests live on /profile/calls — that's the page whose list changes.
   revalidatePath("/profile/calls");
   revalidatePath("/profile/requests");
+  // The guest's side of the same request disappears with it.
+  revalidatePath("/profile/my-requests");
+  return { ok: true };
+}
+
+/** The two people allowed in a request's thread, plus what the notification of a
+ *  new message needs to say. Null when the request is gone or already closed —
+ *  a closed request has no thread, so nothing may be written to it. */
+async function chatPeers(requestId: number): Promise<{
+  guestId: number;
+  ownerId: number;
+  villaName: string;
+} | null> {
+  const row = (await getDb()
+    .prepare(
+      `SELECT c.guest_id, v.owner_id, v.name
+         FROM call_requests c
+         JOIN villas v ON v.id = c.villa_id
+        WHERE c.id = ? AND c.status = 'open'`,
+    )
+    .get(requestId)) as
+    | { guest_id: number; owner_id: number; name: string }
+    | undefined;
+  return row
+    ? { guestId: row.guest_id, ownerId: row.owner_id, villaName: row.name }
+    : null;
+}
+
+/**
+ * Post a message to a call request's thread. Either party may write; nobody
+ * else may read or write, and a closed request takes no messages at all (its
+ * thread has already been deleted — a write would resurrect a ghost).
+ */
+export async function sendCallMessageAction(input: {
+  requestId: number;
+  body: string;
+}): Promise<ActionResult> {
+  const user = await getCurrentUser();
+  if (!user) return fail("You must be signed in to send a message.");
+  if (!rateLimit(`chat:${user.id}`, 20, 60_000)) return fail(TOO_MANY);
+
+  const body = input.body.trim().slice(0, MAX_CHAT_MESSAGE);
+  if (!body) return fail("Write a message first.");
+
+  const peers = await chatPeers(input.requestId);
+  // One message for "no such request" and "not yours": a stranger probing ids
+  // learns nothing either way.
+  if (!peers) return fail("This request is no longer open.");
+  const isGuest = peers.guestId === user.id;
+  const isOwner = peers.ownerId === user.id;
+  if (!isGuest && !isOwner) return fail("This request is no longer open.");
+
+  await getDb()
+    .prepare(
+      `INSERT INTO call_messages (request_id, sender_id, body) VALUES (?, ?, ?)`,
+    )
+    .run(input.requestId, user.id, body);
+
+  // Push it to whoever has the thread open, right now. Only the two of them are
+  // told, and only that thread N changed — the content itself never crosses the
+  // socket, so reading it still goes through the query above with its own
+  // permission check. If nobody's connected this is a no-op and the
+  // notification below is how they find out.
+  publishChat({ requestId: input.requestId, to: [peers.guestId, peers.ownerId] });
+
+  // Neither side is sitting on the page waiting. Without this the reply just
+  // sits there — the notification IS how the other person finds out.
+  await notify({
+    userId: isGuest ? peers.ownerId : peers.guestId,
+    type: "chat_message",
+    title: `${displayName(user)} sent you a message about ${peers.villaName}`,
+    // The message itself, trimmed — enough to know whether it needs answering
+    // now, without turning the bell into the chat.
+    body: body.length > 90 ? `${body.slice(0, 90)}…` : body,
+    href: isGuest ? "/profile/calls" : "/profile/my-requests",
+  });
+
+  revalidatePath("/profile/calls");
+  revalidatePath("/profile/my-requests");
+  return { ok: true };
+}
+
+/**
+ * Mint a one-shot ticket for this user's chat WebSocket.
+ *
+ * The socket can't authenticate itself: a WebSocket upgrade can't run a server
+ * action, and the custom server that accepts it can't read the session (that's
+ * TypeScript over the database, and server.mjs doesn't go through the Next
+ * compiler). So the browser proves who it is HERE, where the session already
+ * exists, and carries the ticket to the socket.
+ *
+ * Returns "" when signed out, so a logged-out page simply never connects.
+ */
+export async function issueChatTicketAction(): Promise<string> {
+  const user = await getCurrentUser();
+  if (!user) return "";
+  // Cheap, but it mints credentials — don't let a loop spray the ticket store.
+  if (!rateLimit(`chatticket:${user.id}`, 30, 60_000)) return "";
+  return issueTicket(user.id);
+}
+
+/** Mark the other party's messages in one thread as seen. Called when the chat
+ *  is opened — read state is what the unread badge counts, nothing more. */
+export async function markCallChatReadAction(
+  requestId: number,
+): Promise<ActionResult> {
+  const user = await getCurrentUser();
+  if (!user) return fail("You must be signed in.");
+
+  const peers = await chatPeers(requestId);
+  if (!peers || (peers.guestId !== user.id && peers.ownerId !== user.id))
+    return fail("This request is no longer open.");
+
+  // Only the OTHER side's messages: reading your own back doesn't mark them
+  // seen by the person they were sent to.
+  await getDb()
+    .prepare(
+      `UPDATE call_messages SET read_at = to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
+        WHERE request_id = ? AND sender_id <> ? AND read_at IS NULL`,
+    )
+    .run(requestId, user.id);
+
+  revalidatePath("/profile/calls");
+  revalidatePath("/profile/my-requests");
   return { ok: true };
 }
 
@@ -1002,6 +1245,10 @@ export async function createBookingAction(input: {
   services?: number[];
   /** Booking a fixed package instead of a nightly stay. */
   packageId?: number;
+  /** Coupon code the guest applied at checkout. Validated here (it must exist
+   *  and belong to THIS property) and snapshotted onto the booking — never
+   *  trusted from the displayed price. */
+  couponCode?: string;
 }): Promise<BookingResult> {
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in to book.");
@@ -1037,13 +1284,14 @@ export async function createBookingAction(input: {
 
   const villa = (await db
     .prepare(
-      `SELECT id, owner_id, kind, rooms, max_guests, people_per_room, services, locked_at
+      `SELECT id, owner_id, name, kind, rooms, max_guests, people_per_room, services, locked_at
        FROM villas WHERE id = ?`,
     )
     .get(input.villaId)) as
     | {
         id: number;
         owner_id: number;
+        name: string;
         kind: string;
         rooms: number;
         max_guests: number;
@@ -1225,12 +1473,24 @@ export async function createBookingAction(input: {
         if (!fits)
           return { error: roomAllowanceError(allowanceFree(bookIn, bookOut, mine)) };
       }
+      // The coupon is resolved HERE, inside the transaction, never from the
+      // displayed price: it must exist and belong to THIS property. Its
+      // discount is snapshotted into disc_pct/disc_fixed with the code, so
+      // every later receipt recomputes the same charge — and a non-empty code
+      // floors that charge at $1 (bookingMoney's coupon clamp).
+      let coupon: { code: string; pct: number; fixed: number } | null = null;
+      if (input.couponCode && input.couponCode.trim()) {
+        const found = await findCoupon(input.couponCode);
+        if (!found || found.villaId !== villa.id)
+          return { error: "That coupon isn't valid for this property." };
+        coupon = { code: found.code, pct: found.pct, fixed: found.fixed };
+      }
       // A flat stay stores '' and its single room count; an adjusted one stores
       // the plan, with `rooms` carrying the peak for display.
       const inserted = await db
         .prepare(
-          `INSERT INTO bookings (villa_id, guest_id, dates, check_in, check_out, guests, rooms, room_plan, extras, package_id, package, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted') RETURNING id`,
+          `INSERT INTO bookings (villa_id, guest_id, dates, check_in, check_out, guests, rooms, room_plan, extras, package_id, package, disc_pct, disc_fixed, coupon_code, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted') RETURNING id`,
         )
         .run(
           villa.id,
@@ -1244,6 +1504,9 @@ export async function createBookingAction(input: {
           JSON.stringify(extras),
           pkg ? pkg.id : null,
           packageSnapshot,
+          coupon ? coupon.pct : 0,
+          coupon ? coupon.fixed : 0,
+          coupon ? coupon.code : "",
         );
       // The wishlist tracks places still to book — a booked villa leaves it.
       await db.prepare(
@@ -1256,6 +1519,18 @@ export async function createBookingAction(input: {
   }
   if ("error" in outcome) return fail(outcome.error);
   const bookingId = outcome.id;
+
+  // The owner's listing just got booked — that's news to them, and Rent
+  // Requests is where the booking now lives.
+  await notify({
+    userId: villa.owner_id,
+    type: "booking_made",
+    title: `${displayName(user)} booked ${villa.name}`,
+    body: `${formatRange(checkIn, checkOut)} · ${guests} guest${guests === 1 ? "" : "s"}${
+      roomBased ? ` · ${roomsNeeded} room${roomsNeeded === 1 ? "" : "s"}` : ""
+    }`,
+    href: "/profile/requests",
+  });
 
   revalidatePath("/profile/bookings");
   revalidatePath("/profile/requests");
@@ -1290,6 +1565,25 @@ export async function cancelBookingAction(
   if (res.changes === 0)
     return fail("This booking can no longer be cancelled.");
 
+  // The host loses a stay — read after the update, so the news only goes out if
+  // something actually changed.
+  const cancelled = (await getDb()
+    .prepare(
+      `SELECT b.dates, v.owner_id, v.name
+       FROM bookings b JOIN villas v ON v.id = b.villa_id WHERE b.id = ?`,
+    )
+    .get(bookingId)) as
+    | { dates: string; owner_id: number; name: string }
+    | undefined;
+  if (cancelled)
+    await notify({
+      userId: cancelled.owner_id,
+      type: "booking_cancelled",
+      title: `${displayName(user)} cancelled their stay at ${cancelled.name}`,
+      body: cancelled.dates,
+      href: "/profile/requests",
+    });
+
   revalidatePath("/profile/bookings");
   revalidatePath("/profile/requests");
   // Cancelling frees those dates — refresh availability everywhere it shows.
@@ -1318,6 +1612,24 @@ export async function ownerCancelBookingAction(
     )
     .run(bookingId, user.id);
   if (res.changes === 0) return fail("Booking not found.");
+
+  // The guest's stay was called off by someone else — they need to know.
+  const dropped = (await getDb()
+    .prepare(
+      `SELECT b.dates, b.guest_id, v.name
+       FROM bookings b JOIN villas v ON v.id = b.villa_id WHERE b.id = ?`,
+    )
+    .get(bookingId)) as
+    | { dates: string; guest_id: number; name: string }
+    | undefined;
+  if (dropped)
+    await notify({
+      userId: dropped.guest_id,
+      type: "booking_cancelled",
+      title: `Your stay at ${dropped.name} was cancelled by the host`,
+      body: dropped.dates,
+      href: "/profile/bookings",
+    });
 
   revalidatePath("/profile/bookings");
   revalidatePath("/profile/requests");
@@ -1458,11 +1770,37 @@ export async function updateBookingAction(
   if (!ok)
     return fail("Those dates are already booked. Please choose different dates.");
 
+  await notifyOwnerOfChange(bookingId, user);
+
   revalidatePath("/profile/bookings");
   revalidatePath("/place");
   revalidatePath("/search");
   revalidatePath("/");
   return { ok: true };
+}
+
+/** A guest moved or reshaped a stay the host already had on their calendar.
+ *  Read after the write, so the dates quoted are the NEW ones. */
+async function notifyOwnerOfChange(
+  bookingId: number,
+  guest: { full_name: string; email: string },
+): Promise<void> {
+  const changed = (await getDb()
+    .prepare(
+      `SELECT b.dates, v.owner_id, v.name
+       FROM bookings b JOIN villas v ON v.id = b.villa_id WHERE b.id = ?`,
+    )
+    .get(bookingId)) as
+    | { dates: string; owner_id: number; name: string }
+    | undefined;
+  if (!changed) return;
+  await notify({
+    userId: changed.owner_id,
+    type: "booking_changed",
+    title: `${displayName(guest)} changed their stay at ${changed.name}`,
+    body: `Now ${changed.dates}`,
+    href: "/profile/requests",
+  });
 }
 
 /**
@@ -1627,6 +1965,8 @@ export async function modifyBookingAction(
   }
   if (txError) return fail(txError);
 
+  await notifyOwnerOfChange(bookingId, user);
+
   revalidatePath("/profile/bookings");
   revalidatePath("/place");
   revalidatePath("/search");
@@ -1690,6 +2030,17 @@ export async function rateStayAction(
   } catch {
     return fail("Something went wrong saving your rating. Please try again.");
   }
+
+  // A rating is the host's reputation moving — worth telling them, good or bad.
+  const rated = await villaOwnerFor(booking.villa_id);
+  if (rated)
+    await notify({
+      userId: rated.ownerId,
+      type: "review",
+      title: `${displayName(user)} rated ${rated.name} ${value} star${value === 1 ? "" : "s"}`,
+      body: text || "No comment left.",
+      href: "/account",
+    });
 
   revalidateVillaViews();
   revalidatePath("/profile/bookings");
@@ -1896,12 +2247,13 @@ export async function createOwnerBookingAction(input: {
   const db = getDb();
   const villa = (await db
     .prepare(
-      "SELECT id, owner_id, kind, rooms, max_guests, people_per_room, services, price, discount FROM villas WHERE id = ?",
+      "SELECT id, owner_id, name, kind, rooms, max_guests, people_per_room, services, price, discount FROM villas WHERE id = ?",
     )
     .get(input.villaId)) as
     | {
         id: number;
         owner_id: number;
+        name: string;
         kind: string;
         rooms: number;
         max_guests: number;
@@ -1981,7 +2333,9 @@ export async function createOwnerBookingAction(input: {
          credit against the new total. */
       const overlapping = (await db
         .prepare(
-          `SELECT id, check_in, check_out, rooms, room_plan, extras FROM bookings
+          `SELECT id, check_in, check_out, rooms, room_plan, extras,
+                  disc_pct, disc_fixed, coupon_code
+           FROM bookings
            WHERE villa_id = ? AND guest_id = ? AND status = 'accepted'
              AND package_id IS NULL AND check_in < ? AND check_out > ?`,
         )
@@ -1992,6 +2346,9 @@ export async function createOwnerBookingAction(input: {
         rooms: number;
         room_plan: string;
         extras: string;
+        disc_pct: number;
+        disc_fixed: number;
+        coupon_code: string;
       }[];
 
       if (overlapping.length > 1)
@@ -2031,18 +2388,22 @@ export async function createOwnerBookingAction(input: {
 
         // What the guest already paid for the old stay, at the same quote its
         // checkout used — credited against the upgraded total.
+        // Any discount the old stay carried (a coupon, or an earlier owner
+        // discount) came OFF what they paid, so it comes off the credit too —
+        // with a coupon's $1 floor honoured, exactly as their checkout charged.
         const oldExtras = parseServiceList(old.extras);
         const oldNights = Math.max(1, nightsBetween(old.check_in, old.check_out));
-        const credit =
-          Math.round(
-            (quote(
-              villa.price * (roomBased ? Math.max(1, old.rooms) : 1),
-              oldNights,
-              villa.discount,
-            ).total +
-              oldExtras.reduce((s, e) => s + e.price, 0)) *
-              100,
-          ) / 100;
+        const oldBase =
+          quote(
+            villa.price * (roomBased ? Math.max(1, old.rooms) : 1),
+            oldNights,
+            villa.discount,
+          ).total + oldExtras.reduce((s, e) => s + e.price, 0);
+        const oldDiscount = Math.min(
+          old.coupon_code ? Math.max(0, oldBase - 1) : oldBase,
+          (oldBase * Math.max(0, old.disc_pct)) / 100 + Math.max(0, old.disc_fixed),
+        );
+        const credit = Math.round((oldBase - oldDiscount) * 100) / 100;
 
         // Add-ons the old stay already paid for come along; new picks add to
         // them (deduped by name — an add-on isn't bought twice).
@@ -2056,7 +2417,8 @@ export async function createOwnerBookingAction(input: {
             `UPDATE bookings
              SET dates = ?, check_in = ?, check_out = ?, guests = ?, rooms = ?,
                  room_plan = '', extras = ?, payment_due = 1,
-                 disc_pct = ?, disc_fixed = ?, paid_credit = ?
+                 disc_pct = ?, disc_fixed = ?, paid_credit = ?,
+                 coupon_code = ''
              WHERE id = ?`,
           )
           .run(
@@ -2128,6 +2490,19 @@ export async function createOwnerBookingAction(input: {
   }
   if ("error" in outcome) return fail(outcome.error);
   const bookingId = outcome.id;
+
+  // The guest never asked for this stay — the host arranged it — so the only
+  // way they learn it's waiting on them is if we tell them. Straight to the
+  // page that can settle it.
+  await notify({
+    userId: guestId,
+    type: "payment_request",
+    title: `${displayName(user)} booked ${villa.name} for you`,
+    body: `${formatRange(checkIn, checkOut)} — waiting to be paid. Your room${
+      roomsNeeded === 1 ? " isn't" : "s aren't"
+    } held until it is.`,
+    href: "/profile/payments",
+  });
 
   revalidatePath("/profile/bookings");
   revalidatePath("/profile/requests");
@@ -2230,5 +2605,216 @@ export async function payBookingAction(
   revalidatePath("/place");
   revalidatePath("/search");
   revalidatePath("/");
+  return { ok: true };
+}
+
+/* -------------------------------- coupons -------------------------------- */
+
+/** Codes read like codes: 3–20 chars of A–Z, digits and hyphens. Normalised to
+ *  uppercase so SAVE10 and save10 are the same coupon everywhere. */
+const COUPON_CODE_RE = /^[A-Z0-9-]{3,20}$/;
+
+export type CouponResult =
+  | { ok: true }
+  | {
+      ok: false;
+      error: string;
+      /** On a duplicate code: free variations of the attempted name the owner
+       *  can pick instead of inventing one from scratch. */
+      suggestions?: string[];
+    };
+
+/**
+ * Create a coupon for one of the owner's own properties.
+ *
+ * The discount is one thing or the other, never both, and never degenerate:
+ * a percentage is 1–99 (0 is no coupon, 100 is a free stay), a fixed amount is
+ * strictly positive. Redemption separately guarantees a fixed discount can't
+ * take a stay's price below $1. Codes are globally unique — a duplicate is
+ * refused with a few free variations suggested.
+ */
+export async function createCouponAction(input: {
+  villaId: number;
+  code: string;
+  pct?: number;
+  fixed?: number;
+}): Promise<CouponResult> {
+  const user = await getCurrentUser();
+  if (!user) return { ok: false, error: "You must be signed in." };
+
+  const db = getDb();
+  const villa = (await db
+    .prepare("SELECT id, owner_id FROM villas WHERE id = ?")
+    .get(Math.trunc(Number(input.villaId)))) as
+    | { id: number; owner_id: number }
+    | undefined;
+  if (!villa || villa.owner_id !== user.id)
+    return { ok: false, error: "Pick one of your own properties." };
+
+  const code = input.code.trim().toUpperCase();
+  if (!COUPON_CODE_RE.test(code))
+    return {
+      ok: false,
+      error: "Codes are 3–20 letters, numbers or hyphens (e.g. SUMMER-10).",
+    };
+
+  const pct = Math.trunc(Number(input.pct ?? 0)) || 0;
+  const fixed = Math.round((Number(input.fixed ?? 0) || 0) * 100) / 100;
+  if ((pct > 0) === (fixed > 0))
+    return {
+      ok: false,
+      error: "Give the coupon ONE discount: a percentage or a fixed amount.",
+    };
+  // Never 0 and never 100: 0% is not a coupon and 100% is a free stay.
+  if (pct !== 0 && (pct < 1 || pct > 99))
+    return { ok: false, error: "A percentage discount must be between 1 and 99." };
+  // A fixed discount must be a real amount. (At redemption it still can't take
+  // the price below $1, however large it is.)
+  if (fixed < 0 || (pct === 0 && fixed <= 0))
+    return { ok: false, error: "A fixed discount must be more than $0." };
+
+  // Codes are globally unique. On a clash, offer variations of the SAME name
+  // that are actually free, so the owner keeps the code they had in mind.
+  const taken = await getCouponCodesLike(code);
+  if (taken.has(code)) {
+    const candidates: string[] = [];
+    for (let n = 2; n <= 99 && candidates.length < 3; n++) {
+      const c = `${code}-${n}`.slice(0, 20);
+      if (!taken.has(c) && !candidates.includes(c)) candidates.push(c);
+    }
+    for (const suffix of ["-NEW", "-PLUS", "-VIP"]) {
+      if (candidates.length >= 3) break;
+      const c = `${code.slice(0, 20 - suffix.length)}${suffix}`;
+      if (!taken.has(c) && !candidates.includes(c)) candidates.push(c);
+    }
+    return {
+      ok: false,
+      error: `A ${code} coupon already exists. Coupon codes are unique across MyVilla — try one of these instead:`,
+      suggestions: candidates,
+    };
+  }
+
+  try {
+    await db
+      .prepare(
+        "INSERT INTO coupons (villa_id, code, pct, fixed) VALUES (?, ?, ?, ?)",
+      )
+      .run(villa.id, code, pct, fixed);
+  } catch {
+    // The unique index is the real referee — two owners saving the same code
+    // at once both passed the check above; one of them lands here.
+    return {
+      ok: false,
+      error: `A ${code} coupon already exists. Coupon codes are unique across MyVilla — try a variation.`,
+    };
+  }
+
+  revalidatePath("/profile/coupons");
+  return { ok: true };
+}
+
+/**
+ * Edit one of the owner's coupons — code, discount and even which property it
+ * belongs to. Same rules as creating one (1–99% or > $0, one or the other,
+ * globally unique code — this coupon's own current code excepted). Stays that
+ * already redeemed it keep their snapshotted discount; edits only change what
+ * FUTURE redemptions get.
+ */
+export async function updateCouponAction(input: {
+  couponId: number;
+  villaId: number;
+  code: string;
+  pct?: number;
+  fixed?: number;
+}): Promise<CouponResult> {
+  const user = await getCurrentUser();
+  if (!user) return { ok: false, error: "You must be signed in." };
+
+  const db = getDb();
+  // Both ends must be the owner's: the coupon being edited AND the property
+  // it's being (re)attached to.
+  const coupon = (await db
+    .prepare(
+      `SELECT c.id FROM coupons c JOIN villas v ON v.id = c.villa_id
+       WHERE c.id = ? AND v.owner_id = ?`,
+    )
+    .get(Math.trunc(Number(input.couponId)), user.id)) as
+    | { id: number }
+    | undefined;
+  if (!coupon) return { ok: false, error: "Coupon not found." };
+  const villa = (await db
+    .prepare("SELECT id, owner_id FROM villas WHERE id = ?")
+    .get(Math.trunc(Number(input.villaId)))) as
+    | { id: number; owner_id: number }
+    | undefined;
+  if (!villa || villa.owner_id !== user.id)
+    return { ok: false, error: "Pick one of your own properties." };
+
+  const code = input.code.trim().toUpperCase();
+  if (!COUPON_CODE_RE.test(code))
+    return {
+      ok: false,
+      error: "Codes are 3–20 letters, numbers or hyphens (e.g. SUMMER-10).",
+    };
+
+  const pct = Math.trunc(Number(input.pct ?? 0)) || 0;
+  const fixed = Math.round((Number(input.fixed ?? 0) || 0) * 100) / 100;
+  if ((pct > 0) === (fixed > 0))
+    return {
+      ok: false,
+      error: "Give the coupon ONE discount: a percentage or a fixed amount.",
+    };
+  if (pct !== 0 && (pct < 1 || pct > 99))
+    return { ok: false, error: "A percentage discount must be between 1 and 99." };
+  if (fixed < 0 || (pct === 0 && fixed <= 0))
+    return { ok: false, error: "A fixed discount must be more than $0." };
+
+  // Unique across the site — except against ITSELF, so saving without
+  // renaming never trips the check.
+  const existing = await findCoupon(code);
+  if (existing && existing.id !== coupon.id) {
+    const taken = await getCouponCodesLike(code);
+    const candidates: string[] = [];
+    for (let n = 2; n <= 99 && candidates.length < 3; n++) {
+      const c = `${code}-${n}`.slice(0, 20);
+      if (!taken.has(c) && !candidates.includes(c)) candidates.push(c);
+    }
+    return {
+      ok: false,
+      error: `A ${code} coupon already exists. Coupon codes are unique across MyVilla — try one of these instead:`,
+      suggestions: candidates,
+    };
+  }
+
+  try {
+    await db
+      .prepare(
+        "UPDATE coupons SET villa_id = ?, code = ?, pct = ?, fixed = ? WHERE id = ?",
+      )
+      .run(villa.id, code, pct, fixed, coupon.id);
+  } catch {
+    return {
+      ok: false,
+      error: `A ${code} coupon already exists. Coupon codes are unique across MyVilla — try a variation.`,
+    };
+  }
+
+  revalidatePath("/profile/coupons");
+  return { ok: true };
+}
+
+/** Delete one of the owner's coupons. Bookings that already redeemed it keep
+ *  their snapshotted discount — deleting only stops NEW redemptions. */
+export async function deleteCouponAction(couponId: number): Promise<ActionResult> {
+  const user = await getCurrentUser();
+  if (!user) return fail("You must be signed in.");
+  const res = await getDb()
+    .prepare(
+      `DELETE FROM coupons
+       WHERE id = ? AND villa_id IN (SELECT id FROM villas WHERE owner_id = ?)`,
+    )
+    .run(Math.trunc(Number(couponId)), user.id);
+  if (res.changes === 0) return fail("Coupon not found.");
+  revalidatePath("/profile/coupons");
   return { ok: true };
 }

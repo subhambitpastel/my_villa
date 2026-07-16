@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Poppins, Nunito_Sans } from "next/font/google";
 import "./globals.css";
+import { chatbotEnabled } from "@/lib/chatbot/config";
+import ChatbotWidget from "@/components/chatbot/ChatbotWidget";
 
 const poppins = Poppins({
   variable: "--font-poppins",
@@ -32,7 +34,15 @@ export default function RootLayout({
       lang="en"
       className={`${poppins.variable} ${nunitoSans.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col font-sans">{children}</body>
+      <body className="min-h-full flex flex-col font-sans">
+        {children}
+        {/* Rendered only when CHATBOT=1. Gated on the server env var (never
+            NEXT_PUBLIC), so when disabled the widget and its client bundle path
+            are entirely absent — the feature can't be toggled on from the
+            browser. Auth and audience (guest vs owner doc) are enforced by the
+            API per request. */}
+        {chatbotEnabled() && <ChatbotWidget />}
+      </body>
     </html>
   );
 }

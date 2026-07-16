@@ -249,15 +249,16 @@ function BookingDetails({ b }: { b: BookingItem }) {
         </div>
       )}
 
-      {/* A due amount never stands alone — spell out the same receipt the host
-          saw when arranging it: full stay, their discount, what the earlier
-          absorbed stay already paid. */}
-      {b.paymentDue && b.pay && (b.pay.hostDiscount > 0 || b.pay.alreadyPaid > 0) && (
+      {/* A discounted amount never stands alone — spell out the same receipt
+          the host sees: full stay, the discount (a coupon or the host's own),
+          what an earlier absorbed stay already paid. Shown for PAID stays too:
+          a $1.00 stay bought with a big coupon has to explain itself. */}
+      {b.pay && (b.pay.hostDiscount > 0 || b.pay.alreadyPaid > 0) && (
         <p className="mt-3 text-[12.5px] leading-[1.7] text-[#6a6a72]">
           Full stay <span className="font-semibold text-[#121212]">${b.pay.fullStay.toFixed(2)}</span>
           {b.pay.hostDiscount > 0 && (
             <>
-              {" "}− host&rsquo;s discount{" "}
+              {" "}− {b.couponCode ? `coupon ${b.couponCode}` : "host’s discount"}{" "}
               <span className="font-semibold text-brand">${b.pay.hostDiscount.toFixed(2)}</span>
             </>
           )}
@@ -267,7 +268,10 @@ function BookingDetails({ b }: { b: BookingItem }) {
               <span className="font-semibold text-[#1c7d5c]">${b.pay.alreadyPaid.toFixed(2)}</span>
             </>
           )}
-          {" "}= <span className="font-semibold text-[#121212]">${b.amountPaid.toFixed(2)} due</span>
+          {" "}={" "}
+          <span className="font-semibold text-[#121212]">
+            ${b.amountPaid.toFixed(2)} {b.paymentDue ? "due" : "paid"}
+          </span>
         </p>
       )}
 

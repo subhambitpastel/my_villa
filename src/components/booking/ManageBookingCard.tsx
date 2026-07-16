@@ -88,6 +88,9 @@ export default function ManageBookingCard({
   originalTotal = 0,
   locked = false,
   roomPlan = null,
+  couponCode = "",
+  discPct = 0,
+  discFixed = 0,
 }: {
   bookingId: number;
   villaId: number;
@@ -122,6 +125,12 @@ export default function ManageBookingCard({
    *  arranged it leg by leg). The editors here only speak one flat count and
    *  the server refuses modifying such a stay, so it renders read-only. */
   roomPlan?: RoomSegment[] | null;
+  /** The booking's own discount, re-applied to every re-priced total so an
+   *  edit never silently drops it: the coupon it was bought with (labelled by
+   *  `couponCode`, price floored at $1) or the owner's promised discount. */
+  couponCode?: string;
+  discPct?: number;
+  discFixed?: number;
   /** The villa's paid add-ons, offered here so the guest can add/remove them. */
   services?: VillaService[];
   /** Indices (into `services`) of the add-ons this booking currently has. */
@@ -324,6 +333,9 @@ export default function ManageBookingCard({
       services={services}
       originalExtras={originalExtras}
       originalTotal={originalTotal}
+      couponCode={couponCode}
+      discPct={discPct}
+      discFixed={discFixed}
     />
   );
 }
@@ -432,6 +444,9 @@ function NightlyManageCard({
   services,
   originalExtras,
   originalTotal,
+  couponCode = "",
+  discPct = 0,
+  discFixed = 0,
   pending,
   startTransition,
   setMessage,
@@ -457,6 +472,12 @@ function NightlyManageCard({
   services: VillaService[];
   originalExtras: number[];
   originalTotal: number;
+  /** The booking's own discount, re-applied to every re-priced total: the
+   *  coupon it was bought with (labelled by `couponCode`, floored at $1) or
+   *  the owner's promised discount. */
+  couponCode?: string;
+  discPct?: number;
+  discFixed?: number;
 }) {
   const [checkIn, setCheckIn] = useState(initialCheckIn);
   const [checkOut, setCheckOut] = useState(initialCheckOut);
@@ -515,7 +536,17 @@ function NightlyManageCard({
 
   const q = quote(roomBased ? price * rooms : price, nights, discount);
   const chosenTotal = chosen.reduce((sum, i) => sum + (services[i]?.price ?? 0), 0);
-  const newTotal = round2(q.total + chosenTotal);
+  // The booking's own discount rides every re-priced total: a percentage
+  // scales with the new stay, a fixed amount comes off once — and a coupon
+  // can still never take the price below $1.
+  const newBase = round2(q.total + chosenTotal);
+  const bookingDiscount = round2(
+    Math.min(
+      couponCode ? Math.max(0, newBase - 1) : newBase,
+      (newBase * Math.max(0, discPct)) / 100 + Math.max(0, discFixed),
+    ),
+  );
+  const newTotal = round2(newBase - bookingDiscount);
   const delta = round2(newTotal - originalTotal);
 
   const chosenKey = [...chosen].sort((a, b) => a - b).join(",");
@@ -782,6 +813,12 @@ function NightlyManageCard({
           <div className="flex items-center justify-between">
             <dt>Extra services</dt>
             <dd className="font-light">+${chosenTotal.toFixed(2)}</dd>
+          </div>
+        )}
+        {bookingDiscount > 0 && (
+          <div className="flex items-center justify-between text-[#1c7d5c]">
+            <dt>{couponCode ? `Coupon ${couponCode}` : "Host’s discount"}</dt>
+            <dd className="font-light">−${bookingDiscount.toFixed(2)}</dd>
           </div>
         )}
       </dl>

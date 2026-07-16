@@ -23,7 +23,7 @@ export default function ProfileShell({
 }) {
   const pathname = usePathname();
   // Same order as the header's avatar menu — both read from accountNav.
-  const tabs = accountSectionsFor(isHost);
+  const tabs = accountSectionsFor(isHost, counts);
 
   return (
     <div className="flex flex-col gap-8 lg:flex-row lg:gap-14">

@@ -13,6 +13,8 @@ import {
   type AccountSection,
 } from "@/lib/accountNav";
 import NavCountBadge from "@/components/ui/NavCountBadge";
+import NotificationBell from "./NotificationBell";
+import type { NotificationItem } from "@/lib/notifications";
 
 const NAV_LINKS = [
   { label: "Home", href: "/" },
@@ -28,9 +30,12 @@ const NAV_LINKS = [
  *  only exists under /profile, so this is the one global way to reach them) in
  *  the same order, framed by the two entries that only live in the header — the
  *  account overview above and Settings below. Sidebar-only sections are skipped. */
-const accountLinksFor = (isHost: boolean): AccountSection[] => [
+const accountLinksFor = (
+  isHost: boolean,
+  counts: AccountCounts,
+): AccountSection[] => [
   { label: "My Account", href: "/account" },
-  ...accountSectionsFor(isHost).filter((section) => !section.sidebarOnly),
+  ...accountSectionsFor(isHost, counts).filter((section) => !section.sidebarOnly),
   { label: "Settings", href: "/profile/settings" },
 ];
 
@@ -188,6 +193,8 @@ export default function HeaderClient({
   authed,
   isHost = false,
   counts = NO_ACCOUNT_COUNTS,
+  notifications = [],
+  unreadNotifications = 0,
   avatar = "",
   name = "",
   email = "",
@@ -197,6 +204,9 @@ export default function HeaderClient({
   isHost?: boolean;
   /** Unpaid stays and guests awaiting a call, badged on their account links. */
   counts?: AccountCounts;
+  /** What has happened lately, for the bell. */
+  notifications?: NotificationItem[];
+  unreadNotifications?: number;
   avatar?: string;
   name?: string;
   email?: string;
@@ -205,7 +215,7 @@ export default function HeaderClient({
   const router = useRouter();
   const pathname = usePathname();
   const [, startTransition] = useTransition();
-  const accountLinks = accountLinksFor(isHost);
+  const accountLinks = accountLinksFor(isHost, counts);
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
@@ -251,14 +261,24 @@ export default function HeaderClient({
             )}
           </nav>
           {authed ? (
-            <UserMenu
-              avatar={avatar}
-              name={name}
-              email={email}
-              links={accountLinks}
-              counts={counts}
-              onSignOut={signOut}
-            />
+            /* The bell and the avatar are a pair, so they sit closer than the
+               35px between nav items — but not touching. 4px left the unread
+               badge (which overhangs the bell's right edge) about 2px from the
+               avatar, reading as one smudged control rather than two. */
+            <div className="flex items-center gap-3">
+              <NotificationBell
+                items={notifications}
+                unread={unreadNotifications}
+              />
+              <UserMenu
+                avatar={avatar}
+                name={name}
+                email={email}
+                links={accountLinks}
+                counts={counts}
+                onSignOut={signOut}
+              />
+            </div>
           ) : (
             <Link
               href="/register"

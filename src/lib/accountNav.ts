@@ -8,7 +8,14 @@
 /** The counters a section can badge. Both are queues someone else is waiting
  *  on: an unpaid stay holds no rooms, and a call request is a guest sitting by
  *  the phone — neither should need the page opened to be noticed. */
-export type AccountCountKey = "pendingPayments" | "callRequests";
+export type AccountCountKey =
+  | "pendingPayments"
+  | "callRequests"
+  /** Open requests this user has MADE. Not a badge — it decides whether the My
+   *  Requests section exists at all. */
+  | "myRequests"
+  /** Replies waiting on them in a request thread, either side of the table. */
+  | "unreadChat";
 
 export type AccountCounts = Record<AccountCountKey, number>;
 
@@ -16,6 +23,8 @@ export type AccountCounts = Record<AccountCountKey, number>;
 export const NO_ACCOUNT_COUNTS: AccountCounts = {
   pendingPayments: 0,
   callRequests: 0,
+  myRequests: 0,
+  unreadChat: 0,
 };
 
 /** Screen-reader wording — a bare "3" next to a label says nothing about what
@@ -26,6 +35,8 @@ export const ACCOUNT_BADGE_LABEL: Record<
 > = {
   pendingPayments: (n) => `${n} awaiting payment`,
   callRequests: (n) => `${n} waiting for a call`,
+  myRequests: (n) => `${n} open`,
+  unreadChat: (n) => `${n} unread message${n === 1 ? "" : "s"}`,
 };
 
 export type AccountSection = {
@@ -41,6 +52,11 @@ export type AccountSection = {
    *  each render site so the header menu and the sidebar can't drift on which
    *  tab shows which number. */
   badge?: AccountCountKey;
+  /** Hide the section entirely while this counter is 0. For sections that only
+   *  mean anything once the user has done the thing — an empty My Requests is
+   *  noise for the many guests who never ask for a call. Distinct from `badge`:
+   *  what makes a section EXIST isn't always what's worth a number on it. */
+  hideWhen?: AccountCountKey;
 };
 
 /** Guest-facing sections first, host-only ones appended — a guest sees an
@@ -53,6 +69,15 @@ export const ACCOUNT_SECTIONS: AccountSection[] = [
   // it, it holds nothing, and it disappears from here the moment it's paid.
   { label: "Payment Pending", href: "/profile/payments", badge: "pendingPayments" },
   { label: "My Favorites", href: "/profile/favorites" },
+  // The guest's side of a call request: where they read the host's reply. Only
+  // appears once they've actually asked for a call — badged with unread replies
+  // rather than request count, since that's the part with something to do.
+  {
+    label: "My Requests",
+    href: "/profile/my-requests",
+    badge: "unreadChat",
+    hideWhen: "myRequests",
+  },
   { label: "My Property", href: "/profile/properties", hostOnly: true },
   { label: "My Packages", href: "/profile/packages", hostOnly: true },
   { label: "Rent Requests", href: "/profile/requests", hostOnly: true },
@@ -62,8 +87,18 @@ export const ACCOUNT_SECTIONS: AccountSection[] = [
     hostOnly: true,
     badge: "callRequests",
   },
+  { label: "Coupons", href: "/profile/coupons", hostOnly: true },
 ];
 
-/** The sections a guest (hosting off) or a host may see, in canonical order. */
-export const accountSectionsFor = (isHost: boolean): AccountSection[] =>
-  ACCOUNT_SECTIONS.filter((section) => isHost || !section.hostOnly);
+/** The sections a guest (hosting off) or a host may see, in canonical order.
+ *  `counts` only decides `hideWhen` sections; without it they stay hidden,
+ *  which is the safe default — a nav link to an empty page is worse than none. */
+export const accountSectionsFor = (
+  isHost: boolean,
+  counts: AccountCounts = NO_ACCOUNT_COUNTS,
+): AccountSection[] =>
+  ACCOUNT_SECTIONS.filter(
+    (section) =>
+      (isHost || !section.hostOnly) &&
+      (!section.hideWhen || counts[section.hideWhen] > 0),
+  );

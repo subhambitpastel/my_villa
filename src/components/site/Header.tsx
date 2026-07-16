@@ -1,5 +1,10 @@
 import { getCurrentUser } from "@/lib/session";
-import { getAccountCounts, getVillasByOwner } from "@/lib/queries";
+import {
+  getAccountCounts,
+  getNotifications,
+  getUnreadNotificationCount,
+  getVillasByOwner,
+} from "@/lib/queries";
 import { NO_ACCOUNT_COUNTS } from "@/lib/accountNav";
 import HeaderClient from "./HeaderClient";
 
@@ -16,11 +21,21 @@ export default async function Header() {
   const counts = user
     ? await getAccountCounts(user.id, isHost)
     : NO_ACCOUNT_COUNTS;
+  // The bell rides in the header for the same reason as the badges: it's the
+  // only surface on every page. Both are one query each and cached per request.
+  const [notifications, unread] = user
+    ? await Promise.all([
+        getNotifications(user.id),
+        getUnreadNotificationCount(user.id),
+      ])
+    : [[], 0];
   return (
     <HeaderClient
       authed={user !== null}
       isHost={isHost}
       counts={counts}
+      notifications={notifications}
+      unreadNotifications={unread}
       avatar={user?.avatar}
       name={user?.full_name}
       email={user?.email}
