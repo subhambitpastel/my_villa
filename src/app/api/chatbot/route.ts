@@ -17,6 +17,7 @@ import { chatbotEnabled, MAX_QUESTION_CHARS, HISTORY_TURNS } from "@/lib/chatbot
 import { audienceFor } from "@/lib/chatbot/audience";
 import { ask } from "@/lib/chatbot/graph";
 import type { ChatTurn } from "@/lib/chatbot/prompt";
+import { createThread, appendMessage, threadBelongsTo } from "@/lib/chatbot/threads";
 
 // Always run at request time — this reads the session cookie and streams a live
 // model response; there is nothing here to prerender or cache.
@@ -109,15 +110,22 @@ export async function POST(request: Request) {
     async start(controller) {
       const send = (obj: unknown) =>
         controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+      // Tell the client which thread this is, up front, so it can attach the
+      // next message to the same thread and refresh its history list.
+      if (threadId) send({ type: "thread", id: threadId });
+      let answer = "";
       try {
-        await ask({
+        answer = await ask({
           question,
           audience,
           // Identity comes from the authenticated session — never from the
           // request body — so a user's data lookups are always their own.
           userId: user.id,
           history,
-          onToken: (text) => send({ type: "token", text }),
+          onToken: (text) => {
+            answer += text;
+            send({ type: "token", text });
+          },
           signal: request.signal,
         });
         send({ type: "done" });
@@ -135,6 +143,16 @@ export async function POST(request: Request) {
           });
         }
       } finally {
+        // Save the assistant's reply so the thread reads back whole. Anything
+        // that streamed is worth keeping — even a partial answer cut off by an
+        // abort — so the saved thread matches what the user actually saw.
+        if (threadId && answer.trim()) {
+          try {
+            await appendMessage(threadId, "assistant", answer);
+          } catch (err) {
+            console.error("chatbot thread persistence (assistant turn) failed:", err);
+          }
+        }
         controller.close();
       }
     },
