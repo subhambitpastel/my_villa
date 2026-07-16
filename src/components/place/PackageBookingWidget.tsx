@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { loginHref } from "@/lib/returnTo";
-import { addDays, addMonths, formatDay, BOOKING_WINDOW_MONTHS } from "@/lib/dates";
+import { addDays, addMonths, BOOKING_WINDOW_MONTHS } from "@/lib/dates";
 import {
   roomsForGuests,
   roomsFreeForRange,
@@ -50,7 +50,6 @@ export default function PackageBookingWidget({
 }) {
   const router = useRouter();
   const [start, setStart] = useState(defaultStart);
-  const checkOut = start ? addDays(start, nights) : "";
   const roomsNeeded = roomsForGuests(villaKind, maxGuests, peoplePerRoom);
   // Bookings can only start within the next few months — the calendar stops
   // there and a start beyond it is treated as unbookable.
@@ -116,12 +115,8 @@ export default function PackageBookingWidget({
           hasBlockedDates={bookedRanges.length > 0 || roomBookings.length > 0}
         />
       </div>
-      {start && checkOut && (
-        <p className="mt-2 text-[15px] text-[#4a4a4a]">
-          {formatDay(start)} → {formatDay(checkOut)} ({nights} night
-          {nights === 1 ? "" : "s"})
-        </p>
-      )}
+      {/* The span used to be repeated here, under the field. The field itself
+          now shows "start → check-out · N nights", so this said it twice. */}
 
       <button
         type="button"

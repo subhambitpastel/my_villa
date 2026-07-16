@@ -11,7 +11,8 @@ import {
 } from "@/lib/actions";
 import type { BookingLock, PropertyItem } from "@/lib/queries";
 import { Star } from "@/components/home/sections";
-import AccountSearch, { matchesSearch } from "@/components/account/AccountSearch";
+import AccountSearch from "@/components/account/AccountSearch";
+import { matchesSearch } from "@/lib/textSearch";
 import { formatDay } from "@/lib/dates";
 
 /** "3 active bookings" — the phrase both the lock badge and its dialog use. */
@@ -190,7 +191,10 @@ export default function MyProperties({
                   : "bg-white"
               }`}
             >
-              <div className="relative h-[132px] w-28 shrink-0 overflow-hidden rounded-l-[6px] sm:w-[135px]">
+              {/* Stretches to the row rather than standing at a fixed 132px:
+                  the action column decides the height, and a photo that stops
+                  short leaves a bare strip under it. 132px stays the floor. */}
+              <div className="relative min-h-[132px] w-28 shrink-0 self-stretch overflow-hidden rounded-l-[6px] sm:w-[135px]">
                 <Image
                   src={p.image}
                   alt={`${p.name}, ${p.city}`}
@@ -276,7 +280,11 @@ export default function MyProperties({
                   )}
                 </p>
               </div>
-              <div className="flex shrink-0 flex-col items-end justify-between px-4 py-3">
+              {/* gap-3, not just justify-between: the switches and the actions
+                  together are taller than the row, so there's no free space
+                  left for justify-between to space them with — Lock and Create
+                  booking end up touching. The gap is a floor either way. */}
+              <div className="flex shrink-0 flex-col items-end justify-between gap-3 px-4 py-3">
                 {/* Feature and Lock are both listing states with a confirm
                     step, so they read as a matching pair of switches — Lock
                     turns red, since it takes the listing off the market. */}

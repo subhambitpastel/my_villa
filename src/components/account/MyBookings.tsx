@@ -5,7 +5,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { rateStayAction } from "@/lib/actions";
 import Dropdown from "@/components/ui/Dropdown";
-import AccountSearch, { matchesSearch } from "@/components/account/AccountSearch";
+import AccountSearch from "@/components/account/AccountSearch";
+import { matchesSearch } from "@/lib/textSearch";
 import type { BookingItem } from "@/lib/queries";
 import { bookingReference } from "@/lib/pricing";
 import { formatRange } from "@/lib/dates";
@@ -287,7 +288,88 @@ function BookingDetails({ b }: { b: BookingItem }) {
           </ul>
         </div>
       )}
+
+      {/* A package's bundle IS what was bought — its details panel has to say
+          what's in it, same as the owner's view does. */}
+      {b.package && b.package.inclusions.length > 0 && (
+        <div className="mt-4 border-t border-[#ececf0] pt-3">
+          <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[#9a9aa5]">
+            Package includes
+          </p>
+          <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-[#3a3a44]">
+            {b.package.inclusions.map((inc) => (
+              <li key={inc} className="flex items-center gap-1.5">
+                <span className="h-[5px] w-[5px] shrink-0 rounded-full bg-brand" />
+                {inc}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
+  );
+}
+
+/** A package-stay row that expands to the SAME details panel nightly rows get
+ *  — amount, reference, rooms reserved, receipt — plus the bundle's contents.
+ *  The header keeps the package layout; only the chevron and the click are new. */
+function PackageRow({ b, actions }: { b: BookingItem; actions: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <li className="overflow-hidden rounded-[6px] border border-[#dfdfdf] bg-white">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
+        className="flex cursor-pointer items-start justify-between gap-3 px-4 py-3 transition-colors hover:bg-[#faf9ff]"
+      >
+        <div className="flex min-w-0 items-start gap-2">
+          <ExpandIcon open={open} />
+          <div className="min-w-0">
+            <p className="text-[14px] font-semibold text-heading">
+              {b.package!.name}
+            </p>
+            <p className="flex flex-wrap items-center gap-1.5 text-[12px] text-gray">
+              {b.villa}
+              <span className="rounded-[3px] bg-[#f1f0f6] px-1.5 py-0.5 text-[10px] font-medium text-[#5a5a66]">
+                {b.kind}
+              </span>
+            </p>
+            <p className="mt-0.5 text-[12px] text-[#a1a1a2]">
+              {b.package!.nights} night{b.package!.nights === 1 ? "" : "s"} ·{" "}
+              {b.dates} · {b.guests}
+            </p>
+            {b.package!.inclusions.length > 0 && (
+              <ul className="mt-1.5 flex flex-wrap gap-1.5">
+                {b.package!.inclusions.map((inc) => (
+                  <li
+                    key={inc}
+                    className="rounded-full bg-[#f2f1fe] px-2 py-0.5 text-[11px] text-brand"
+                  >
+                    {inc}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+        {/* Cancelling mustn't toggle the row open on the way past. */}
+        <div
+          className="flex shrink-0 flex-col items-end gap-1.5 text-right"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {actions}
+        </div>
+      </div>
+      {open && <BookingDetails b={b} />}
+    </li>
   );
 }
 
@@ -588,39 +670,11 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
           </h2>
           <ul className="mt-4 space-y-3">
             {packageStays.map((b) => (
-              <li
+              <PackageRow
                 key={b.id}
-                className="rounded-[6px] border border-[#dfdfdf] px-4 py-3"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-[14px] font-semibold text-heading">
-                      {b.package!.name}
-                    </p>
-                    <p className="flex flex-wrap items-center gap-1.5 text-[12px] text-gray">
-                      {b.villa}
-                      <span className="rounded-[3px] bg-[#f1f0f6] px-1.5 py-0.5 text-[10px] font-medium text-[#5a5a66]">
-                        {b.kind}
-                      </span>
-                    </p>
-                    <p className="mt-0.5 text-[12px] text-[#a1a1a2]">
-                      {b.package!.nights} night{b.package!.nights === 1 ? "" : "s"}{" "}
-                      · {b.dates} · {b.guests}
-                    </p>
-                    {b.package!.inclusions.length > 0 && (
-                      <ul className="mt-1.5 flex flex-wrap gap-1.5">
-                        {b.package!.inclusions.map((inc) => (
-                          <li
-                            key={inc}
-                            className="rounded-full bg-[#f2f1fe] px-2 py-0.5 text-[11px] text-brand"
-                          >
-                            {inc}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                  <div className="flex shrink-0 flex-col items-end gap-1.5 text-right">
+                b={b}
+                actions={
+                  <>
                     <span className="text-[14px] font-semibold text-brand">
                       ${b.package!.price.toFixed(2)}
                     </span>
@@ -641,9 +695,9 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
                         Cancel Booking
                       </Link>
                     )}
-                  </div>
-                </div>
-              </li>
+                  </>
+                }
+              />
             ))}
           </ul>
         </>

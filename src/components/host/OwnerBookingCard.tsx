@@ -17,6 +17,7 @@ import {
   planMinRooms,
   planRoomNights,
   roomPlanFor,
+  roomsBookedOn,
   roomsFreeForRange,
   type RoomBooking,
 } from "@/lib/rooms";
@@ -291,6 +292,17 @@ export default function OwnerBookingCard({
         <DateRangeField
           variant="booking"
           windowMonths={BOOKING_WINDOW_MONTHS}
+          /* Same per-night counts the guest's booking card shows — the owner
+             picking dates needs to see how full each night is just as much.
+             Counted off `bookings`, not the raw list: while booking for the
+             prefilled guest their own stays are folded into this one, so those
+             rooms are available here, and the calendar has to agree with what
+             the Rooms picker below will actually offer. */
+          roomsFreeOn={
+            roomBased
+              ? (key) => Math.max(0, totalRooms - roomsBookedOn(key, bookings))
+              : undefined
+          }
           checkIn={checkIn || null}
           checkOut={checkOut || null}
           bookedRanges={calendarBlocked}

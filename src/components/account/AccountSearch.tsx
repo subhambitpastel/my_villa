@@ -48,21 +48,3 @@ export default function AccountSearch({
     </form>
   );
 }
-
-/**
- * Case-insensitive, all-terms match: every whitespace-separated word in the
- * query must appear somewhere across the given fields. An empty query matches
- * everything.
- */
-export function matchesSearch(
-  query: string,
-  ...fields: (string | number | null | undefined)[]
-): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  const hay = fields
-    .filter((f) => f != null && f !== "")
-    .join(" ")
-    .toLowerCase();
-  return q.split(/\s+/).every((term) => hay.includes(term));
-}

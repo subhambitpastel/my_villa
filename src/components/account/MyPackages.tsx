@@ -10,7 +10,8 @@ import {
   setPackageLockedAction,
 } from "@/lib/actions";
 import type { BookingLock, PackageItem, PropertyItem } from "@/lib/queries";
-import AccountSearch, { matchesSearch } from "@/components/account/AccountSearch";
+import AccountSearch from "@/components/account/AccountSearch";
+import { matchesSearch } from "@/lib/textSearch";
 import { formatDay } from "@/lib/dates";
 import { isRoomBased, roomsForGuests } from "@/lib/rooms";
 import { quote } from "@/lib/pricing";

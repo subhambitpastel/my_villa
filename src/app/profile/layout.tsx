@@ -3,7 +3,8 @@ import Footer from "@/components/site/Footer";
 import ProfileShell from "@/components/account/ProfileShell";
 import SignInGate from "@/components/account/SignInGate";
 import { getCurrentUser } from "@/lib/session";
-import { getPendingPaymentCount, getVillasByOwner } from "@/lib/queries";
+import { NO_ACCOUNT_COUNTS } from "@/lib/accountNav";
+import { getAccountCounts, getVillasByOwner } from "@/lib/queries";
 
 export default async function ProfileLayout({
   children,
@@ -16,9 +17,11 @@ export default async function ProfileLayout({
     ? user.hosting_enabled === 1 ||
       (await getVillasByOwner(user.id)).length > 0
     : false;
-  // Badged on the Payment Pending tab from every profile page, so a request the
-  // host made can't be missed — nothing is held until it's paid.
-  const pendingPayments = user ? await getPendingPaymentCount(user.id) : 0;
+  // Badged on the tabs from every profile page, so an unpaid stay (nothing is
+  // held until it's paid) or a guest waiting on a call can't be missed.
+  const counts = user
+    ? await getAccountCounts(user.id, isHost)
+    : NO_ACCOUNT_COUNTS;
 
   return (
     <>
@@ -26,7 +29,7 @@ export default async function ProfileLayout({
       <main className="bg-[#fafafa] pb-20">
         <div className="mx-auto max-w-6xl px-6 pt-10">
           {user ? (
-            <ProfileShell isHost={isHost} pendingPayments={pendingPayments}>
+            <ProfileShell isHost={isHost} counts={counts}>
               {children}
             </ProfileShell>
           ) : (

@@ -6,7 +6,13 @@ import { usePathname, useRouter } from "next/navigation";
 import Logo from "./Logo";
 import Avatar from "@/components/ui/Avatar";
 import { logoutAction } from "@/lib/actions";
-import { accountSectionsFor, type AccountSection } from "@/lib/accountNav";
+import {
+  accountSectionsFor,
+  NO_ACCOUNT_COUNTS,
+  type AccountCounts,
+  type AccountSection,
+} from "@/lib/accountNav";
+import NavCountBadge from "@/components/ui/NavCountBadge";
 
 const NAV_LINKS = [
   { label: "Home", href: "/" },
@@ -34,12 +40,14 @@ function UserMenu({
   name,
   email,
   links,
+  counts,
   onSignOut,
 }: {
   avatar: string;
   name: string;
   email: string;
   links: AccountSection[];
+  counts: AccountCounts;
   onSignOut: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -83,6 +91,11 @@ function UserMenu({
   // Clear any pending close timer if the menu unmounts.
   useEffect(() => cancelClose, []);
 
+  // The badges inside the menu are worth nothing while it's shut, so the avatar
+  // carries a dot when anything is waiting behind it. A dot, not a number: the
+  // per-tab counts are one click away, and this only has to say "look in here".
+  const waiting = counts.pendingPayments + counts.callRequests;
+
   return (
     <div
       ref={ref}
@@ -98,10 +111,24 @@ function UserMenu({
         }}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label="Account menu"
-        className="block h-10 w-10 overflow-hidden rounded-full ring-2 ring-transparent transition hover:ring-brand/40 focus:outline-none focus-visible:ring-brand"
+        aria-label={
+          waiting > 0 ? `Account menu, ${waiting} needing attention` : "Account menu"
+        }
+        className="relative block h-10 w-10 rounded-full ring-2 ring-transparent transition hover:ring-brand/40 focus:outline-none focus-visible:ring-brand"
       >
-        <Avatar src={avatar} alt="" className="h-full w-full object-cover" />
+        {/* The avatar clips itself round rather than the button doing it — the
+            dot hangs over the edge and would be cut off by an overflow-hidden
+            parent. */}
+        <span className="block h-full w-full overflow-hidden rounded-full">
+          <Avatar src={avatar} alt="" className="h-full w-full object-cover" />
+        </span>
+        {waiting > 0 && (
+          // Already spoken by the button's aria-label above.
+          <span
+            aria-hidden="true"
+            className="absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full border-2 border-white bg-[#e8a33d]"
+          />
+        )}
       </button>
 
       {open && (
@@ -133,9 +160,10 @@ function UserMenu({
               href={it.href}
               role="menuitem"
               onClick={() => setOpen(false)}
-              className="block rounded-[8px] px-3 py-2 text-ink transition-colors hover:bg-brand/5 hover:text-brand"
+              className="flex items-center justify-between gap-2 rounded-[8px] px-3 py-2 text-ink transition-colors hover:bg-brand/5 hover:text-brand"
             >
               {it.label}
+              <NavCountBadge section={it} counts={counts} />
             </Link>
           ))}
           <hr className="my-1 border-line/50" />
@@ -159,6 +187,7 @@ function UserMenu({
 export default function HeaderClient({
   authed,
   isHost = false,
+  counts = NO_ACCOUNT_COUNTS,
   avatar = "",
   name = "",
   email = "",
@@ -166,6 +195,8 @@ export default function HeaderClient({
   authed: boolean;
   /** Hosting mode on (or owns villas) — shows the host-only account links. */
   isHost?: boolean;
+  /** Unpaid stays and guests awaiting a call, badged on their account links. */
+  counts?: AccountCounts;
   avatar?: string;
   name?: string;
   email?: string;
@@ -225,6 +256,7 @@ export default function HeaderClient({
               name={name}
               email={email}
               links={accountLinks}
+              counts={counts}
               onSignOut={signOut}
             />
           ) : (
@@ -293,8 +325,12 @@ export default function HeaderClient({
                 </li>
                 {accountLinks.map((it) => (
                   <li key={it.href}>
-                    <Link href={it.href} className="block text-base text-ink">
+                    <Link
+                      href={it.href}
+                      className="flex items-center gap-2 text-base text-ink"
+                    >
                       {it.label}
+                      <NavCountBadge section={it} counts={counts} />
                     </Link>
                   </li>
                 ))}

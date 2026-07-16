@@ -1,5 +1,7 @@
 // Read-side queries mapping DB rows to the display shapes the UI renders.
+import { cache } from "react";
 import { getDb, timeAgo, type BookingStatus, type VillaRow } from "./db";
+import { NO_ACCOUNT_COUNTS, type AccountCounts } from "./accountNav";
 import { FACILITY_CHIPS, type VillaService } from "@/components/host/draft";
 import {
   isRoomBased,
@@ -1168,6 +1170,37 @@ export async function getCallRequestsForOwner(
     };
   });
 }
+
+/** How many guests are waiting on a call from this owner. Mirrors the WHERE of
+ *  getCallRequestsForOwner, so the badge and the list can't disagree. */
+export async function getCallRequestCount(ownerId: number): Promise<number> {
+  const r = (await getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM call_requests c
+       JOIN villas v ON v.id = c.villa_id
+       WHERE v.owner_id = ? AND c.status = 'open'`,
+    )
+    .get(ownerId)) as { n: number };
+  return Number(r?.n) || 0;
+}
+
+/** Everything the account nav badges, for one signed-in user.
+ *
+ *  `cache`d because a profile page renders the header's avatar menu AND the
+ *  sidebar — both need these numbers, and neither can pass them to the other.
+ *  Per-request memoization keeps that one pair of COUNTs, not two.
+ */
+export const getAccountCounts = cache(
+  async (userId: number, isHost: boolean): Promise<AccountCounts> => {
+    const [pendingPayments, callRequests] = await Promise.all([
+      getPendingPaymentCount(userId),
+      // Guests own no villas, so the query could only ever return 0 — skip it
+      // rather than pay for it on every page they load.
+      isHost ? getCallRequestCount(userId) : NO_ACCOUNT_COUNTS.callRequests,
+    ]);
+    return { pendingPayments, callRequests };
+  },
+);
 
 /** The rooms ONE guest already holds at a villa (their own confirmed stays,
  *  room-plan expanded like getRoomBookings). This is what the per-guest room cap

@@ -2,19 +2,24 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { accountSectionsFor } from "@/lib/accountNav";
+import {
+  accountSectionsFor,
+  NO_ACCOUNT_COUNTS,
+  type AccountCounts,
+} from "@/lib/accountNav";
+import NavCountBadge from "@/components/ui/NavCountBadge";
 
 export default function ProfileShell({
   children,
   isHost = false,
-  pendingPayments = 0,
+  counts = NO_ACCOUNT_COUNTS,
 }: {
   children: React.ReactNode;
   isHost?: boolean;
-  /** Stays a host arranged that this guest hasn't paid for. Badged on the tab
-   *  because they hold no rooms until settled — an unnoticed one is a lost stay,
-   *  so it has to be visible without opening the page. */
-  pendingPayments?: number;
+  /** What's queued behind each tab — unpaid stays, guests awaiting a call.
+   *  Badged here because both hold something up while they sit unread, so
+   *  neither should need the page opened to be noticed. */
+  counts?: AccountCounts;
 }) {
   const pathname = usePathname();
   // Same order as the header's avatar menu — both read from accountNav.
@@ -50,14 +55,7 @@ export default function ProfileShell({
                     }`}
                   >
                     {tab.label}
-                    {tab.href === "/profile/payments" && pendingPayments > 0 && (
-                      <span
-                        aria-label={`${pendingPayments} awaiting payment`}
-                        className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[#fff3d6] px-1.5 text-[11px] font-semibold text-[#a06a00]"
-                      >
-                        {pendingPayments}
-                      </span>
-                    )}
+                    <NavCountBadge section={tab} counts={counts} />
                   </Link>
                 </li>
               );

@@ -123,12 +123,27 @@ export default function StartDateField({
         <span className="block text-[15px] font-medium leading-[1.2] text-[#121212]">
           Choose your start date
         </span>
+        {/* Only the start is chosen — the package fixes the length — but the
+            check-out is what the guest actually needs to know, and working it
+            out from "7 nights" in their head isn't their job. Both dates, and
+            the length that ties them together. */}
         <span
           className={`mt-0.5 block text-[16px] leading-[1.2] ${
             value ? "text-[#4a4a4a]" : "text-[#9d9da6]"
           }`}
         >
-          {formatKey(value) ?? "Add date"}
+          {value ? (
+            <>
+              {formatKey(value)} <span className="text-[#8a8a94]">→</span>{" "}
+              {formatKey(addDays(value, nights))}
+              <span className="text-[#8a8a94]">
+                {" "}
+                · {nights} night{nights === 1 ? "" : "s"}
+              </span>
+            </>
+          ) : (
+            "Add date"
+          )}
         </span>
       </button>
 

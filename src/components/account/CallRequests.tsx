@@ -6,7 +6,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { resolveCallRequestAction } from "@/lib/actions";
 import type { CallRequestItem } from "@/lib/queries";
-import AccountSearch, { matchesSearch } from "@/components/account/AccountSearch";
+import AccountSearch from "@/components/account/AccountSearch";
+import { matchesSearch } from "@/lib/textSearch";
 import { formatRange, nightsBetween } from "@/lib/dates";
 
 /**

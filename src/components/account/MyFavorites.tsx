@@ -3,7 +3,8 @@
 import { useState } from "react";
 import Link from "next/link";
 import VillaCard, { type Villa } from "@/components/home/VillaCard";
-import AccountSearch, { matchesSearch } from "@/components/account/AccountSearch";
+import AccountSearch from "@/components/account/AccountSearch";
+import { matchesSearch } from "@/lib/textSearch";
 
 export default function MyFavorites({ favorites }: { favorites: Villa[] }) {
   const [query, setQuery] = useState("");

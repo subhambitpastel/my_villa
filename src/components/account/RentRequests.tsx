@@ -271,6 +271,70 @@ function RequestRow({
   );
 }
 
+/** A package-booking row that expands to the SAME details panel villa rows
+ *  get — receipt, rooms reserved, guest contact — plus the bundle's contents.
+ *  The header keeps the package layout; only the chevron and the click are new. */
+function PackageRequestRow({
+  r,
+  children,
+}: {
+  r: RequestItem;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <li className="overflow-hidden rounded-[6px] border border-[#dfdfdf] bg-white">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
+        className="flex cursor-pointer items-start justify-between gap-3 px-4 py-3 transition-colors hover:bg-[#faf9ff]"
+      >
+        <div className="flex min-w-0 items-center gap-2.5">
+          <ExpandIcon open={open} />
+          <Image
+            src={r.avatar}
+            alt=""
+            width={30}
+            height={30}
+            className="h-[30px] w-[30px] shrink-0 rounded-full object-cover"
+          />
+          <div className="min-w-0">
+            <p className="text-[14px] font-semibold text-heading">
+              {r.package!.name}
+            </p>
+            <p className="text-[12px] text-gray">
+              {r.tenant} · {r.villa}
+            </p>
+            <p className="mt-0.5 text-[12px] text-[#a1a1a2]">
+              {r.package!.nights} night{r.package!.nights === 1 ? "" : "s"} ·{" "}
+              {r.dates} · {r.guests} ·{" "}
+              <span className="font-medium text-brand">
+                {r.rooms} room{r.rooms === 1 ? "" : "s"} reserved
+              </span>
+            </p>
+          </div>
+        </div>
+        {/* Cancelling mustn't toggle the row open on the way past. */}
+        <div
+          className="flex shrink-0 flex-col items-end gap-1.5 text-right"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {children}
+        </div>
+      </div>
+      {open && <RequestDetails r={r} />}
+    </li>
+  );
+}
+
 export default function RentRequests({ requests }: { requests: RequestItem[] }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -380,72 +444,40 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
           </p>
           <ul className="mt-4 space-y-3">
             {pkgReqs.map((r) => (
-              <li
-                key={r.id}
-                className="rounded-[6px] border border-[#dfdfdf] px-4 py-3"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex min-w-0 items-center gap-2.5">
-                    <Image
-                      src={r.avatar}
-                      alt=""
-                      width={30}
-                      height={30}
-                      className="h-[30px] w-[30px] shrink-0 rounded-full object-cover"
-                    />
-                    <div className="min-w-0">
-                      <p className="text-[14px] font-semibold text-heading">
-                        {r.package!.name}
-                      </p>
-                      <p className="text-[12px] text-gray">
-                        {r.tenant} · {r.villa}
-                      </p>
-                      <p className="mt-0.5 text-[12px] text-[#a1a1a2]">
-                        {r.package!.nights} night
-                        {r.package!.nights === 1 ? "" : "s"} · {r.dates} ·{" "}
-                        {r.guests} ·{" "}
-                        <span className="font-medium text-brand">
-                          {r.rooms} room{r.rooms === 1 ? "" : "s"} reserved
-                        </span>
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 flex-col items-end gap-1.5 text-right">
-                    <span className="text-[14px] font-semibold text-brand">
-                      ${r.package!.price.toFixed(2)}
+              <PackageRequestRow key={r.id} r={r}>
+                <span className="text-[14px] font-semibold text-brand">
+                  ${r.package!.price.toFixed(2)}
+                </span>
+                <span
+                  className={`text-[13px] font-semibold ${
+                    r.status === "declined" || r.status === "cancelled"
+                      ? "text-[#eb5757]"
+                      : r.status === "pending"
+                        ? "text-[#a06a00]"
+                        : "text-brand"
+                  }`}
+                >
+                  {statusLabel(r.status)}
+                </span>
+                {r.paymentDue &&
+                  (r.status === "accepted" || r.status === "pending") && (
+                    <span className="rounded-[3px] bg-[#fff3d6] px-1.5 py-0.5 text-[11px] font-semibold text-[#a06a00]">
+                      {r.status === "pending"
+                        ? "Awaiting payment · holds no rooms"
+                        : "Upgrade balance due from guest"}
                     </span>
-                    <span
-                      className={`text-[13px] font-semibold ${
-                        r.status === "declined" || r.status === "cancelled"
-                          ? "text-[#eb5757]"
-                          : r.status === "pending"
-                            ? "text-[#a06a00]"
-                            : "text-brand"
-                      }`}
-                    >
-                      {statusLabel(r.status)}
-                    </span>
-                    {r.paymentDue &&
-                      (r.status === "accepted" || r.status === "pending") && (
-                        <span className="rounded-[3px] bg-[#fff3d6] px-1.5 py-0.5 text-[11px] font-semibold text-[#a06a00]">
-                          {r.status === "pending"
-                            ? "Awaiting payment · holds no rooms"
-                            : "Upgrade balance due from guest"}
-                        </span>
-                      )}
-                    {(r.status === "accepted" || r.status === "pending") && (
-                      <button
-                        type="button"
-                        disabled={pending}
-                        onClick={() => setCancelling(r)}
-                        className="text-[13px] text-[#eb5757] underline hover:opacity-80 disabled:opacity-50"
-                      >
-                        Cancel Booking
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </li>
+                  )}
+                {(r.status === "accepted" || r.status === "pending") && (
+                  <button
+                    type="button"
+                    disabled={pending}
+                    onClick={() => setCancelling(r)}
+                    className="text-[13px] text-[#eb5757] underline hover:opacity-80 disabled:opacity-50"
+                  >
+                    Cancel Booking
+                  </button>
+                )}
+              </PackageRequestRow>
             ))}
           </ul>
         </section>

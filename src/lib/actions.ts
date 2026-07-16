@@ -1211,7 +1211,11 @@ export async function createBookingAction(input: {
       // assembled by booking six at a time. Inside the tx next to the
       // availability re-check, so two concurrent bookings can't each read a
       // stale count and land the guest over the cap between them.
-      if (roomBased) {
+      // PACKAGES are exempt: the cap is an anti-hoarding guard on self-serve
+      // asks, but a package's size is the HOST's own design — a Monthly
+      // Retreat that seats 18 needs its 9 rooms, and refusing the host's own
+      // bundle would be absurd. Inventory (checked above) is the only limit.
+      if (roomBased && !pkg) {
         // Keyed on the plan actually in use, not the flex flag — a flex ask
         // that degraded to flat above must take the flat allowance path.
         const fits =
