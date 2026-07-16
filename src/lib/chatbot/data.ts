@@ -21,7 +21,9 @@ import {
   getRequestsForOwner,
   getCallRequestsForOwner,
 } from "@/lib/queries";
+import { getDb } from "@/lib/db";
 import { bookingReference } from "@/lib/pricing";
+import { dayFromNow } from "@/lib/dates";
 import type { Audience } from "./config";
 
 /** A single self-scoped lookup the classifier can choose. */
@@ -89,13 +91,46 @@ export const DATA_TOOLS: DataTool[] = [
     key: "recent_bookings",
     ownerOnly: false,
     description:
-      "The user's own bookings, most recent first — use for 'my last booking', 'my recent stays', 'my booking history', whether they've rated a stay, or a specific past booking.",
+      "The user's own bookings + spending totals — use for 'my last booking', 'my recent stays', 'my booking history', a booking from a given month, whether they've rated a stay, AND for 'how much have I spent', 'how many nights have I stayed', totals this year.",
     run: async (userId) => {
       const all = await getBookingsForGuest(userId);
       if (all.length === 0) return "You have no bookings yet.";
-      const lines = all.slice(0, 8).map(bookingLine);
-      const more = all.length > 8 ? `\n(…and ${all.length - 8} older.)` : "";
-      return `Your bookings, most recent first:\n${lines.join("\n")}${more}`;
+
+      // Totals computed in code (not left to the model to tally): only stays
+      // actually paid for count as "spent" — confirmed or completed, not
+      // cancelled, declined, or still-unpaid. "This year" keys off the stay's
+      // check-in, which BookingItem doesn't carry, so pull it once by id.
+      const year = dayFromNow(0).slice(0, 4);
+      const checkIns = (await getDb()
+        .prepare("SELECT id, check_in FROM bookings WHERE guest_id = ?")
+        .all<{ id: number; check_in: string }>(userId));
+      const checkInById = new Map(checkIns.map((r) => [r.id, r.check_in]));
+
+      let spent = 0, nights = 0, paidCount = 0, yearNights = 0, yearSpent = 0;
+      for (const b of all) {
+        const paid =
+          (b.status === "accepted" || b.status === "completed") && !b.paymentDue;
+        if (!paid) continue;
+        spent += b.amountPaid;
+        nights += b.nights;
+        paidCount += 1;
+        if ((checkInById.get(b.id) ?? "").startsWith(year)) {
+          yearNights += b.nights;
+          yearSpent += b.amountPaid;
+        }
+      }
+
+      const summary =
+        `Totals: ${paidCount} paid stay${paidCount === 1 ? "" : "s"}, ${nights} night${
+          nights === 1 ? "" : "s"
+        }, ${money(spent)} spent all-time` +
+        ` · this year (${year}): ${yearNights} night${
+          yearNights === 1 ? "" : "s"
+        }, ${money(yearSpent)}.`;
+
+      const lines = all.slice(0, 20).map(bookingLine);
+      const more = all.length > 20 ? `\n(…and ${all.length - 20} older.)` : "";
+      return `${summary}\n\nYour bookings, most recent first:\n${lines.join("\n")}${more}`;
     },
   },
   {
@@ -204,6 +239,40 @@ export const DATA_TOOLS: DataTool[] = [
       return `Bookings on your properties, most recent first:\n${lines.join(
         "\n",
       )}${more}`;
+    },
+  },
+  {
+    key: "property_earnings",
+    ownerOnly: true,
+    description:
+      "How much each of the owner's properties has earned, ranked — use for 'which of my properties earns the most', 'my best-performing listing', 'revenue/earnings by property', 'how much have I made'.",
+    run: async (userId) => {
+      const reqs = await getRequestsForOwner(userId);
+      // Only settled money counts toward earnings: confirmed (paid at checkout)
+      // and completed stays. Pending/cancelled/declined are not revenue.
+      const earned = reqs.filter(
+        (r) => (r.status === "accepted" || r.status === "completed") && !r.paymentDue,
+      );
+      if (earned.length === 0)
+        return "None of your properties has earned anything yet — no paid bookings so far.";
+      const byVilla = new Map<string, { total: number; count: number }>();
+      for (const r of earned) {
+        const cur = byVilla.get(r.villa) ?? { total: 0, count: 0 };
+        cur.total += r.amount;
+        cur.count += 1;
+        byVilla.set(r.villa, cur);
+      }
+      const ranked = [...byVilla.entries()].sort((a, b) => b[1].total - a[1].total);
+      const grand = ranked.reduce((s, [, v]) => s + v.total, 0);
+      const lines = ranked.map(
+        ([villa, v], i) =>
+          `${i + 1}. ${villa} — ${money(v.total)} across ${v.count} booking${
+            v.count === 1 ? "" : "s"
+          }`,
+      );
+      return `Earnings by property (paid + completed bookings), highest first — ${money(
+        grand,
+      )} total:\n${lines.join("\n")}`;
     },
   },
   {

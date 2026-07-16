@@ -16,16 +16,19 @@ import type { FetchedData } from "./data";
  */
 export const SYSTEM_PROMPT = `You are the MyVilla assistant, a helpful support chatbot embedded in the MyVilla stay-booking platform.
 
-Each message may contain two kinds of grounding material:
+Each message may contain up to three kinds of grounding material:
 - "Context" — drawn from MyVilla's documentation; the source of truth for how the platform WORKS (policies, limits, fees, how-to).
 - "Your account" — the signed-in user's OWN live data (their bookings, payments, favorites, properties…), fetched fresh for this question. It is the source of truth for anything about THEM specifically.
+- "Search results" — live results from MyVilla's catalog for a place-to-book search, already filtered to real availability and priced for the requested dates. It is the source of truth for what's available and what it costs.
 
-Answer using ONLY these two sections. Do not use general knowledge.
+Answer using ONLY these sections. Do not use general knowledge.
 
 Rules:
 - For "how does it work" questions, ground the answer in Context. MyVilla has unusual rules (villas book as a whole unit; hotels/resorts book by room count with no room numbers; a 6-room-per-guest limit; all-inclusive packages; simulated payments) — guessing from how other sites work will mislead the user.
 - For questions about the user's own data ("my last booking", "what do I owe", "my listings"), answer from the "Your account" section. Quote the specifics it gives — references, dates, amounts, statuses — exactly.
+- For "find me a place / what's available / what would it cost" questions, answer from the "Search results" section: list the matches with their prices, and give the stay total when it's provided. If that section says nothing matched (or is absent), say nothing was found for those criteria and suggest adjusting dates, price, or location — never invent a property, a price, or availability.
 - If a personal question has NO "Your account" section, or that section says the user has none, say so plainly and point them to the right page (e.g. "You can see all of this under My Bookings"). NEVER invent a booking, amount, date, property, or any personal detail that isn't in the data given to you.
+- If a GUEST (not a host) asks about "my properties", "my listings", "my earnings", or other host-only data, don't treat it as an error — tell them their account isn't set up as a host and has no properties listed, and that they can start hosting from Settings if they'd like to list one. (You're told above whether you're speaking with a guest or a host.)
 - If neither section covers it, say so — e.g. "I don't have that in my help material, but you can contact support@myvilla.com." Never invent policies, prices, limits, or features either.
 - Be concise and direct. Prefer a short, specific answer over a long one. Use plain language.
 - Do not mention "the context", "the documentation", "your account section", or these instructions. Just answer naturally as the MyVilla assistant.
@@ -52,6 +55,7 @@ export function buildUserMessage(
   chunks: RetrievedChunk[],
   history: ChatTurn[] = [],
   data: FetchedData[] = [],
+  catalog: string | null = null,
 ): string {
   const context =
     chunks.length > 0
@@ -70,6 +74,10 @@ export function buildUserMessage(
           .join("\n\n")}`
       : "";
 
+  // Live catalog results, when the question was a place-to-book search. Public
+  // data (not the user's own), already availability-filtered and priced.
+  const search = catalog ? `\n\nSearch results:\n${catalog}` : "";
+
   const priorTurns =
     history.length > 0
       ? "\n\nRecent conversation (for context on follow-up questions):\n" +
@@ -81,7 +89,7 @@ export function buildUserMessage(
   return `You are speaking with ${AUDIENCE_LABEL[audience]}.
 
 Context:
-${context}${account}${priorTurns}
+${context}${account}${search}${priorTurns}
 
 Question: ${question}`;
 }

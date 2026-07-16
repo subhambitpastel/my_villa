@@ -17,6 +17,7 @@ import { retrieve, type RetrievedChunk } from "./store";
 import { generate } from "./llm";
 import { routeDataIntents } from "./router";
 import { fetchUserData, type FetchedData } from "./data";
+import { catalogSearch } from "./catalog";
 import { SYSTEM_PROMPT, buildUserMessage, type ChatTurn } from "./prompt";
 import { HISTORY_TURNS, type Audience } from "./config";
 
@@ -31,6 +32,9 @@ const ChatState = Annotation.Root({
   history: Annotation<ChatTurn[]>({ reducer: (_, b) => b, default: () => [] }),
   chunks: Annotation<RetrievedChunk[]>({ reducer: (_, b) => b, default: () => [] }),
   data: Annotation<FetchedData[]>({ reducer: (_, b) => b, default: () => [] }),
+  /** Live catalog search results (availability + pricing), or null when the
+   *  question wasn't a place-to-book search. */
+  catalog: Annotation<string | null>({ reducer: (_, b) => b, default: () => null }),
   answer: Annotation<string>(),
 });
 
@@ -55,6 +59,18 @@ async function personalizeNode(state: typeof ChatState.State) {
   return { data };
 }
 
+/** catalog node: when the question is a "find/price a place to book" search,
+ *  extract its parameters and run the live catalog search (availability + price).
+ *  Public data, so it's not audience-gated; own listings are excluded inside. */
+async function catalogNode(state: typeof ChatState.State) {
+  const catalog = await catalogSearch(
+    state.question,
+    state.userId,
+    state.history.slice(-HISTORY_TURNS),
+  );
+  return { catalog };
+}
+
 /** generate node: build the grounded prompt, stream the CLI's answer out through
  *  the custom writer, and store the full text on the state. */
 async function generateNode(
@@ -67,6 +83,7 @@ async function generateNode(
     state.chunks,
     state.history.slice(-HISTORY_TURNS),
     state.data,
+    state.catalog,
   );
   const answer = await generate({
     system: SYSTEM_PROMPT,
@@ -77,17 +94,20 @@ async function generateNode(
   return { answer };
 }
 
-// retrieve (docs) and personalize (own data) are independent, so they fan out
-// from START and both must finish before generate runs. LangGraph treats two
-// edges into one node as a join, so generate waits for both.
+// retrieve (docs), personalize (own data) and catalog (live search) are all
+// independent, so they fan out from START and run together; generate joins on
+// all three (LangGraph waits for every edge into a node before running it).
 const compiled = new StateGraph(ChatState)
   .addNode("retrieve", retrieveNode)
   .addNode("personalize", personalizeNode)
+  .addNode("searchCatalog", catalogNode)
   .addNode("generate", generateNode)
   .addEdge(START, "retrieve")
   .addEdge(START, "personalize")
+  .addEdge(START, "searchCatalog")
   .addEdge("retrieve", "generate")
   .addEdge("personalize", "generate")
+  .addEdge("searchCatalog", "generate")
   .addEdge("generate", END)
   .compile();
 

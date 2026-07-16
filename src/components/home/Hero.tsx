@@ -45,19 +45,6 @@ const SLIDES = [
 
 const SLIDE_INTERVAL_MS = 5000;
 
-function FieldChevron() {
-  return (
-    /* eslint-disable-next-line @next/next/no-img-element */
-    <img
-      src="/icons/chevron-down.svg"
-      alt=""
-      width={32}
-      height={32}
-      className="pointer-events-none -ml-8 h-8 w-8 shrink-0"
-    />
-  );
-}
-
 export default function Hero({
   cities,
   tab,
@@ -200,6 +187,8 @@ export default function Hero({
               <div className="flex items-center">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src="/icons/user.svg" alt="" width={24} height={24} className="h-6 w-6 shrink-0" />
+                {/* Dropdown draws its own chevron — the standalone FieldChevron
+                    that used to dress the native select would double it up. */}
                 <Dropdown
                   ariaLabel="Guest"
                   value={String(guests)}
@@ -210,7 +199,6 @@ export default function Hero({
                   }))}
                   buttonClassName="flex w-[150px] cursor-pointer items-center justify-between bg-transparent pl-2 text-[18px] font-bold text-ink focus:outline-none"
                 />
-                <FieldChevron />
               </div>
             </div>
 
