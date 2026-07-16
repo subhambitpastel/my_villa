@@ -27,8 +27,12 @@ process.env.NODE_ENV ??= dev ? "development" : "production";
 const { default: next } = await import("next");
 
 const port = parseInt(process.env.PORT || "3000", 10);
-// 0.0.0.0, not localhost: a container's port is published from outside it.
-const hostname = process.env.HOSTNAME || "0.0.0.0";
+// Always bind 0.0.0.0 (every interface). Do NOT read process.env.HOSTNAME here:
+// Docker/Railway set HOSTNAME to the CONTAINER ID, and binding to that listens
+// on only that one container IP — so Railway's health check (which reaches the
+// app over localhost/its proxy) can't connect and the deploy is marked failed
+// even though the process is up. A machine name is never a bind address.
+const host = "0.0.0.0";
 
 /** Where the browser connects. Anything else upgrading is not ours. */
 const WS_PATH = "/api/chat/ws";
@@ -122,9 +126,9 @@ const heartbeat = setInterval(() => {
 heartbeat.unref();
 
 app.prepare().then(() => {
-  server.listen(port, hostname, () => {
+  server.listen(port, host, () => {
     console.log(
-      `> MyVilla on http://${hostname}:${port} (${dev ? "development" : process.env.NODE_ENV}) — chat socket at ${WS_PATH}`,
+      `> MyVilla listening on ${host}:${port} (${dev ? "development" : process.env.NODE_ENV}) — chat socket at ${WS_PATH}`,
     );
   });
 });
