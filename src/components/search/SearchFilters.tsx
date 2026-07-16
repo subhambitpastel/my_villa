@@ -112,6 +112,11 @@ export default function SearchFilters({
     }
     const qs = next.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    // A changed filter replaces the results — start reading them from the
+    // first card, not from wherever the guest had scrolled to in the OLD
+    // list. Smooth (and ours, not the router's instant jump) so it reads as
+    // "the list moved", not "the page blinked".
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   // Live filtering: push q/min/max into the URL shortly after the user stops
@@ -159,6 +164,7 @@ export default function SearchFilters({
     // Drop every query param — the derived values (amenities, rating, sort,
     // type, guests) all read from searchParams, so they reset automatically.
     router.replace(pathname, { scroll: false });
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function toggleAmenity(a: string) {
