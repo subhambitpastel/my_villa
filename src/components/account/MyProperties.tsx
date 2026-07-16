@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   deleteVillaAction,
-  setVillaArchivedAction,
+  setVillaLockedAction,
   setVillaFeaturedAction,
 } from "@/lib/actions";
 import type { BookingLock, PropertyItem } from "@/lib/queries";
@@ -19,7 +19,7 @@ const staysPhrase = (lock: BookingLock): string =>
   `${lock.active} active booking${lock.active === 1 ? "" : "s"}`;
 
 /** iOS-style on/off switch. `tone` colours the ON state: brand for a promotion,
- *  danger for a state that takes the listing off the market (archived). */
+ *  danger for a state that takes the listing off the market (locked). */
 function Toggle({
   on,
   disabled,
@@ -75,12 +75,12 @@ export default function MyProperties({
   // removal was refused (e.g. the villa still has active bookings).
   const [removing, setRemoving] = useState<PropertyItem | null>(null);
   const [removeError, setRemoveError] = useState<string | null>(null);
-  // Archive state, toggled optimistically like `featured`; a villa awaiting the
-  // archive confirmation sits in `archiving`.
-  const [archived, setArchived] = useState<Record<number, boolean>>(() =>
-    Object.fromEntries(properties.map((p) => [p.id, p.archived])),
+  // Lock state, toggled optimistically like `featured`; a villa awaiting the
+  // lock confirmation sits in `locking`.
+  const [locked, setLocked] = useState<Record<number, boolean>>(() =>
+    Object.fromEntries(properties.map((p) => [p.id, p.locked])),
   );
-  const [archiving, setArchiving] = useState<PropertyItem | null>(null);
+  const [locking, setLocking] = useState<PropertyItem | null>(null);
   // The listing whose "why is this locked?" dialog is open.
   const [lockInfo, setLockInfo] = useState<PropertyItem | null>(null);
 
@@ -122,22 +122,22 @@ export default function MyProperties({
     else setConfirming(p);
   }
 
-  function applyArchived(id: number, next: boolean) {
+  function applyLocked(id: number, next: boolean) {
     startTransition(async () => {
-      const res = await setVillaArchivedAction(id, next);
+      const res = await setVillaLockedAction(id, next);
       if (res.ok) {
-        setArchived((cur) => ({ ...cur, [id]: next }));
+        setLocked((cur) => ({ ...cur, [id]: next }));
         router.refresh();
       }
-      setArchiving(null);
+      setLocking(null);
     });
   }
 
-  // Restoring just puts the listing back, so it applies straight away; archiving
+  // Restoring just puts the listing back, so it applies straight away; locking
   // delists it, so confirm that direction first (mirrors the Feature toggle).
-  function toggleArchived(p: PropertyItem) {
-    if (archived[p.id]) applyArchived(p.id, false);
-    else setArchiving(p);
+  function toggleLocked(p: PropertyItem) {
+    if (locked[p.id]) applyLocked(p.id, false);
+    else setLocking(p);
   }
 
   const visible = properties.filter((p) =>
@@ -179,13 +179,13 @@ export default function MyProperties({
       ) : (
         <ul className="mt-5 space-y-5">
           {visible.map((p) => (
-            /* An archived listing is off the market — tint the whole row red and
+            /* A locked listing is off the market — tint the whole row red and
                drain the photo's colour so it reads as inactive at a glance,
                rather than sitting identically among the live ones. */
             <li
               key={p.id}
               className={`flex gap-4 overflow-hidden rounded-[6px] shadow-[0px_4px_14px_0px_rgba(0,0,0,0.09)] sm:gap-5 ${
-                archived[p.id]
+                locked[p.id]
                   ? "bg-[#fffafa] ring-1 ring-inset ring-[#eb5757]/35"
                   : "bg-white"
               }`}
@@ -197,7 +197,7 @@ export default function MyProperties({
                   fill
                   sizes="135px"
                   className={`object-cover transition-[filter] ${
-                    archived[p.id] ? "opacity-60 grayscale" : ""
+                    locked[p.id] ? "opacity-60 grayscale" : ""
                   }`}
                 />
               </div>
@@ -209,7 +209,7 @@ export default function MyProperties({
                   <span className="rounded-[3px] bg-brand/10 px-2 py-0.5 text-[10px] font-medium text-brand">
                     {p.kind}
                   </span>
-                  {featured[p.id] && !archived[p.id] && (
+                  {featured[p.id] && !locked[p.id] && (
                     <span className="flex items-center gap-1 rounded-[3px] bg-[#fff3d6] px-2 py-0.5 text-[10px] font-semibold text-[#a06a00]">
                       <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                         <path d="M12 2l2.9 6.3L22 9.2l-5 4.9 1.2 7L12 17.8 5.8 21l1.2-7-5-4.9 7.1-.9z" />
@@ -217,7 +217,7 @@ export default function MyProperties({
                       Featured
                     </span>
                   )}
-                  {archived[p.id] && (
+                  {locked[p.id] && (
                     <span
                       title="Hidden from search and taking no new bookings. Stays already booked still go ahead."
                       className="flex items-center gap-1 rounded-[3px] bg-[#eb5757] px-2 py-0.5 text-[10px] font-semibold text-white"
@@ -225,7 +225,7 @@ export default function MyProperties({
                       <svg width="9" height="9" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                         <path d="M3 7h18v3H3zM5 10h14v10H5zM10 14h4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                       </svg>
-                      Archived
+                      Locked
                     </span>
                   )}
                 </span>
@@ -259,7 +259,7 @@ export default function MyProperties({
                     {p.posted}
                   </span>
                   {/* Opens the explanation in a real dialog. The reasons (and
-                      the archive suggestion) are far more than a hover bubble
+                      the lock suggestion) are far more than a hover bubble
                       can hold, and a native title never shows on touch. */}
                   {locks[p.id] && (
                     <button
@@ -277,45 +277,45 @@ export default function MyProperties({
                 </p>
               </div>
               <div className="flex shrink-0 flex-col items-end justify-between px-4 py-3">
-                {/* Feature and Archive are both listing states with a confirm
-                    step, so they read as a matching pair of switches — Archive
+                {/* Feature and Lock are both listing states with a confirm
+                    step, so they read as a matching pair of switches — Lock
                     turns red, since it takes the listing off the market. */}
                 <div className="flex flex-col items-end gap-2.5">
-                  {/* An archived listing is hidden from the home page, so paying
+                  {/* A locked listing is hidden from the home page, so paying
                       to promote it there would buy nothing — shut the toggle. */}
                   <span
                     title={
-                      archived[p.id]
-                        ? "Restore this listing before featuring it — archived listings don't appear on the home page."
+                      locked[p.id]
+                        ? "Restore this listing before featuring it — locked listings don't appear on the home page."
                         : undefined
                     }
                     className={`flex items-center gap-2 text-[12px] font-medium ${
-                      archived[p.id] ? "text-[#a8a8b0]" : "text-[#121212]"
+                      locked[p.id] ? "text-[#a8a8b0]" : "text-[#121212]"
                     }`}
                   >
                     Feature
                     <Toggle
-                      on={!!featured[p.id] && !archived[p.id]}
-                      disabled={pending || !!archived[p.id]}
+                      on={!!featured[p.id] && !locked[p.id]}
+                      disabled={pending || !!locked[p.id]}
                       onClick={() => toggleFeatured(p)}
                       label={`Feature ${p.name}`}
                     />
                   </span>
                   {/* Deliberately NOT gated on locks: active bookings are the
-                      very reason to archive rather than remove — the stays go
+                      very reason to lock rather than remove — the stays go
                       ahead while the listing stops taking new ones. */}
                   <span
-                    title="Archived listings are hidden from search and take no new bookings. Stays already booked still go ahead."
+                    title="Locked listings are hidden from search and take no new bookings. Stays already booked still go ahead."
                     className={`flex items-center gap-2 text-[12px] font-medium ${
-                      archived[p.id] ? "text-[#eb5757]" : "text-[#121212]"
+                      locked[p.id] ? "text-[#eb5757]" : "text-[#121212]"
                     }`}
                   >
-                    Archive
+                    Lock
                     <Toggle
-                      on={!!archived[p.id]}
+                      on={!!locked[p.id]}
                       disabled={pending}
-                      onClick={() => toggleArchived(p)}
-                      label={`Archive ${p.name}`}
+                      onClick={() => toggleLocked(p)}
+                      label={`Lock ${p.name}`}
                       tone="danger"
                     />
                   </span>
@@ -424,7 +424,7 @@ export default function MyProperties({
           listed — its capacity gates availability and its name/city are read
           live onto their booking — so it can't be edited; and removing it would
           cascade their bookings away entirely. Both stay shut until every stay
-          is done, so the useful thing to offer here is archiving: the one lever
+          is done, so the useful thing to offer here is locking: the one lever
           that stops new bookings without touching the existing ones. */}
       {lockInfo && locks[lockInfo.id] && (
         <div
@@ -479,19 +479,23 @@ export default function MyProperties({
               </li>
             </ul>
 
-            {/* Archiving is deliberately never locked — it's the answer to
+            {/* Locking is deliberately never locked — it's the answer to
                 "stop new bookings" without waiting or cancelling on anyone. */}
-            {!archived[lockInfo.id] && (
+            {!locked[lockInfo.id] && (
               <div className="mt-4 rounded-[8px] border border-[#e8d5a3] bg-[#fdf9f0] p-3.5">
                 <p className="text-[13px] font-semibold text-[#8a6a1f]">
                   Just want to stop taking further bookings?
                 </p>
+                {/* "Locked" means two things here — editing is frozen BY the
+                    bookings, while the Lock switch is the owner's own. Say which
+                    one always works rather than leaving them to guess. */}
                 <p className="mt-1 text-[13px] leading-relaxed text-[#7a6a45]">
-                  Archive the listing instead — that isn&rsquo;t locked. It
-                  won&rsquo;t affect the{" "}
+                  Use the <span className="font-semibold">Lock</span> switch on
+                  this listing instead — that one always works, even while
+                  editing is frozen. It won&rsquo;t affect the{" "}
                   {staysPhrase(locks[lockInfo.id])} already made (those stays go
                   ahead as planned), and no new bookings can come in. You can
-                  restore it whenever you like.
+                  unlock it whenever you like.
                 </p>
               </div>
             )}
@@ -510,18 +514,18 @@ export default function MyProperties({
               >
                 Go to Rent Requests
               </Link>
-              {!archived[lockInfo.id] && (
-                // Hands off to the normal archive confirmation, so there's one
-                // place that actually archives.
+              {!locked[lockInfo.id] && (
+                // Hands off to the normal lock confirmation, so there's one
+                // place that actually locks.
                 <button
                   type="button"
                   onClick={() => {
-                    setArchiving(lockInfo);
+                    setLocking(lockInfo);
                     setLockInfo(null);
                   }}
                   className="rounded-[8px] bg-brand px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-brand-dark"
                 >
-                  Archive listing
+                  Lock listing
                 </button>
               )}
             </div>
@@ -529,14 +533,14 @@ export default function MyProperties({
         </div>
       )}
 
-      {archiving && (
+      {locking && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
           role="dialog"
           aria-modal="true"
-          aria-label="Confirm archiving your villa"
+          aria-label="Confirm locking your villa"
           onClick={(e) =>
-            e.target === e.currentTarget && !pending && setArchiving(null)
+            e.target === e.currentTarget && !pending && setLocking(null)
           }
         >
           <div className="w-full max-w-[440px] rounded-[12px] bg-white p-6 shadow-[0px_20px_60px_0px_rgba(0,0,0,0.25)]">
@@ -548,10 +552,10 @@ export default function MyProperties({
               </span>
               <div>
                 <h3 className="text-[18px] font-semibold text-[#121212]">
-                  Archive this villa?
+                  Lock this villa?
                 </h3>
                 <p className="mt-1.5 text-[14px] leading-relaxed text-[#4a4a4a]">
-                  <span className="font-semibold">{archiving.name}</span> will
+                  <span className="font-semibold">{locking.name}</span> will
                   disappear from search and stop taking{" "}
                   <span className="font-semibold">new</span> bookings, along with
                   any packages on it.
@@ -567,7 +571,7 @@ export default function MyProperties({
               <button
                 type="button"
                 disabled={pending}
-                onClick={() => setArchiving(null)}
+                onClick={() => setLocking(null)}
                 className="text-[14px] text-[#7a7a85] underline disabled:opacity-60"
               >
                 Cancel
@@ -575,10 +579,10 @@ export default function MyProperties({
               <button
                 type="button"
                 disabled={pending}
-                onClick={() => applyArchived(archiving.id, true)}
+                onClick={() => applyLocked(locking.id, true)}
                 className="rounded-[8px] bg-brand px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-brand-dark disabled:opacity-60"
               >
-                {pending ? "Archiving…" : "Archive villa"}
+                {pending ? "Locking…" : "Lock villa"}
               </button>
             </div>
           </div>
@@ -619,20 +623,20 @@ export default function MyProperties({
                         Go to Rent Requests
                       </Link>
                     </p>
-                    {/* Archiving is the answer to exactly this dead end: retire
+                    {/* Locking is the answer to exactly this dead end: retire
                         the listing now, let the booked stays finish. */}
                     <p className="mt-2 text-[13px] leading-relaxed text-[#4a4a4a]">
                       Or{" "}
                       <button
                         type="button"
                         onClick={() => {
-                          setArchiving(removing);
+                          setLocking(removing);
                           setRemoving(null);
                           setRemoveError(null);
                         }}
                         className="font-semibold text-[#121212] underline"
                       >
-                        archive it instead
+                        lock it instead
                       </button>{" "}
                       — it stops taking new bookings and disappears from search
                       right away, while those stays still go ahead.

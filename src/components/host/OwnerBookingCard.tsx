@@ -4,21 +4,24 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import DateRangeField from "@/components/home/DateRangeField";
 import GuestPicker from "@/components/host/GuestPicker";
+import PickerField from "@/components/ui/PickerField";
 import { createOwnerBookingAction, resolveCallRequestAction } from "@/lib/actions";
 import { BOOKING_WINDOW_MONTHS, formatRange, nightsBetween } from "@/lib/dates";
 import { quote } from "@/lib/pricing";
 import type { GuestOption } from "@/lib/guests";
 import type { BookedRange } from "@/lib/queries";
 import type { VillaService } from "@/components/host/draft";
-import { fullyBookedRanges, roomsFreeForRange, type RoomBooking } from "@/lib/rooms";
+import {
+  fullyBookedRanges,
+  isGraduated,
+  planMinRooms,
+  planRoomNights,
+  roomPlanFor,
+  roomsFreeForRange,
+  type RoomBooking,
+} from "@/lib/rooms";
 
-/* eslint-disable @next/next/no-img-element */
 
-/** How far past the listed capacity the guest dropdown keeps going. The owner
- *  isn't bound by the listing's own occupancy, so the list has to reach beyond
- *  it — but a dropdown still needs an end, and a bounded run of options stays
- *  usable where an unbounded one wouldn't. */
-const GUEST_HEADROOM = 10;
 
 /**
  * The owner's own booking form — the counter version of the guest's BookingCard.
@@ -26,8 +29,9 @@ const GUEST_HEADROOM = 10;
  * still picks up its automatic discount). The differences are deliberate:
  *
  *  - it books FOR someone, so it starts with a guest picker;
- *  - the guest-facing caps don't apply (any length, any headcount, any number of
- *    the property's rooms);
+ *  - the guest-facing caps don't apply (any length, any number of the
+ *    property's rooms — but never more PEOPLE than those rooms sleep: beds
+ *    are physics, not policy);
  *  - there's no checkout HERE — the owner sends a payment request, and the
  *    guest's payment is what actually reserves the rooms. Until then the stay is
  *    pending and holds nothing, so this form can't take rooms off the market on
@@ -55,6 +59,8 @@ export default function OwnerBookingCard({
   defaultGuests,
   defaultServices = [],
   callRequestId,
+  roomBookingsExclGuest,
+  guestHeld = [],
 }: {
   villaId: number;
   price: number;
@@ -81,6 +87,12 @@ export default function OwnerBookingCard({
   /** The call request this booking answers. Closed once the booking is made, so
    *  a fulfilled request stops asking to be called back. */
   callRequestId?: number;
+  /** Availability with the prefilled guest's own stays left out — their
+   *  overlapping rooms fold into this booking rather than blocking it. Only
+   *  meaningful while booking for that guest. */
+  roomBookingsExclGuest?: RoomBooking[];
+  /** The prefilled guest's own holdings here, to preview the fold. */
+  guestHeld?: RoomBooking[];
 }) {
   const router = useRouter();
   const [guest, setGuest] = useState<GuestOption | null>(defaultGuest);
@@ -97,18 +109,45 @@ export default function OwnerBookingCard({
   });
   const [error, setError] = useState<string | null>(null);
   const [pending, startBooking] = useTransition();
+  // Owner's discount for this booking: percent of the total, or a fixed amount.
+  const [discMode, setDiscMode] = useState<"pct" | "fixed">("pct");
+  const [discVal, setDiscVal] = useState("");
+  const discNum = Math.max(0, Number(discVal) || 0);
+  // When the ask can't be held every night: true = fulfil with what each night
+  // has (the graduated plan), false = drop to the flat count that fits.
+  const [flexSel, setFlexSel] = useState(true);
 
   const nights = Math.max(0, nightsBetween(checkIn, checkOut));
   // No upper bound on nights — an owner may book as long a stay as they like.
   const datesReady = nights >= 1 && checkIn >= today;
 
+  // While booking for the PREFILLED guest, their own stays don't block: an
+  // overlapping one is folded into this booking (upgraded in place, what they
+  // paid credited), so its rooms are available to the upgrade. Switching to a
+  // different guest falls back to the full picture.
+  const forPrefilled =
+    !!guest && !!defaultGuest && guest.id === defaultGuest.id;
+  const bookings =
+    forPrefilled && roomBookingsExclGuest ? roomBookingsExclGuest : roomBookings;
+  // The prefilled guest's stays that overlap the picked dates — these are what
+  // the booking would absorb. Shown so the owner confirms the fold knowingly.
+  const folded = forPrefilled
+    ? guestHeld.filter((b) => b.checkIn < checkOut && b.checkOut > checkIn)
+    : [];
+  const foldedRooms = folded.reduce((max, b) => Math.max(max, b.rooms), 0);
+  const unionIn = folded.reduce((d, b) => (b.checkIn < d ? b.checkIn : d), checkIn);
+  const unionOut = folded.reduce(
+    (d, b) => (b.checkOut > d ? b.checkOut : d),
+    checkOut,
+  );
+
   const calendarBlocked = roomBased
-    ? fullyBookedRanges(roomBookings, totalRooms)
+    ? fullyBookedRanges(bookings, totalRooms)
     : bookedRanges;
 
   const roomsFree = roomBased
     ? datesReady
-      ? roomsFreeForRange(checkIn, checkOut, roomBookings, totalRooms)
+      ? roomsFreeForRange(checkIn, checkOut, bookings, totalRooms)
       : totalRooms
     : 1;
   const soldOut = roomBased && datesReady && roomsFree === 0;
@@ -116,23 +155,43 @@ export default function OwnerBookingCard({
   // doesn't apply to the owner.
   const rooms = roomBased ? Math.min(Math.max(1, roomsSel), Math.max(1, totalRooms)) : 1;
 
+  /* The ask isn't free every night but each night still has SOMETHING: the same
+     graduated plan a guest can self-serve, bounded by inventory alone (a host
+     has no per-guest allowance). Left out while a fold is in play — an upgrade
+     replaces the guest's stay with one flat count, and stacking a varying plan
+     on top would change what the merge stores. */
+  const plan =
+    roomBased && datesReady && !soldOut && folded.length === 0
+      ? roomPlanFor(checkIn, checkOut, bookings, totalRooms, rooms, [], Infinity)
+      : [];
+  const canAdjust = isGraduated(plan);
+  const adjusted = canAdjust && flexSel;
+  // What a FLAT fulfilment holds: the leanest night. Only differs from the ask
+  // when the calendar can't meet it.
+  const effRooms = adjusted ? rooms : canAdjust ? planMinRooms(plan) : rooms;
+
   // What the picked rooms actually sleep — same sum the guest's booking card
-  // uses, so the owner sees the property's real capacity rather than a guess.
+  // uses (an adjusted stay sums what EACH leg sleeps), so the owner sees the
+  // property's real capacity rather than a guess.
   const listedCapacity = roomBased
-    ? Math.max(1, rooms * Math.max(1, peoplePerRoom))
+    ? Math.max(
+        1,
+        adjusted
+          ? plan.reduce((s, leg) => s + leg.rooms * Math.max(1, peoplePerRoom), 0)
+          : effRooms * Math.max(1, peoplePerRoom),
+      )
     : Math.max(1, maxGuests);
-  // The owner isn't held to it, though: the dropdown runs past the listed
-  // capacity so they can seat a party the listing wouldn't advertise, and it
-  // always covers whatever's already selected (a call request may ask for more
-  // than the rooms nominally sleep).
-  const guestOptions = Math.max(listedCapacity + GUEST_HEADROOM, guestsSel);
-  const guests = Math.max(1, Math.min(guestsSel, guestOptions));
-  const overCapacity = guests > listedCapacity;
+  // And the owner IS held to it: the rooms sleep what they sleep. A call
+  // request asking for more people than the picked rooms hold simply clamps —
+  // the owner adds rooms (or arranges differently), never oversells beds.
+  const guests = Math.max(1, Math.min(guestsSel, listedCapacity));
 
   const unavailable =
     datesReady &&
     (calendarBlocked.some((r) => r.checkIn < checkOut && r.checkOut > checkIn) ||
-      (roomBased && roomsFree < rooms));
+      // An adjusted plan is feasible by construction — the bottleneck test only
+      // applies to flat stays.
+      (roomBased && !adjusted && roomsFree < effRooms));
 
   const paidServices = services
     .map((s, i) => ({ service: s, index: i }))
@@ -141,7 +200,40 @@ export default function OwnerBookingCard({
   const toggleService = (i: number) =>
     setChosen((cur) => (cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i]));
 
-  const q = quote(roomBased ? price * rooms : price, nights, discount);
+  // An adjusted stay bills its real room-nights (the same unit-price trick the
+  // guest card uses); flat stays price exactly as before.
+  const roomNights = adjusted
+    ? planRoomNights(plan)
+    : effRooms * Math.max(1, nights);
+  const q = quote(
+    roomBased ? (price * roomNights) / Math.max(1, nights) : price,
+    nights,
+    discount,
+  );
+  const fullTotal = q.total + chosenTotal;
+
+  // What the guest already paid for the stays this booking folds in — the same
+  // quote their checkout used, so this preview matches the credit the server
+  // stores at fulfilment (their add-ons aside). Comes off what they're asked
+  // to pay, since that money has already changed hands.
+  const creditPreview = folded.reduce(
+    (sum, b) =>
+      sum +
+      quote(
+        roomBased ? price * Math.max(1, b.rooms) : price,
+        Math.max(1, nightsBetween(b.checkIn, b.checkOut)),
+        discount,
+      ).total,
+    0,
+  );
+
+  // The owner's own discount — a % of the total or a fixed amount off, whatever
+  // was agreed on the phone. Stored on the booking so the guest's payment page
+  // shows exactly this figure.
+  const discAmount =
+    discMode === "pct"
+      ? Math.round(((fullTotal * Math.min(90, discNum)) / 100) * 100) / 100
+      : Math.min(fullTotal, Math.round(discNum * 100) / 100);
 
   function handleReserve() {
     setError(null);
@@ -160,8 +252,13 @@ export default function OwnerBookingCard({
         checkIn,
         checkOut,
         guests,
-        rooms,
+        // Adjusted: send the ASK with the flex flag — the server re-derives
+        // the same plan in its transaction. Flat: send what actually fits.
+        rooms: adjusted ? rooms : effRooms,
         services: chosen,
+        discPct: discMode === "pct" ? Math.min(90, Math.trunc(discNum)) : 0,
+        discFixed: discMode === "fixed" ? discNum : 0,
+        flex: adjusted,
       });
       if (!res.ok) {
         setError(res.error);
@@ -205,107 +302,134 @@ export default function OwnerBookingCard({
         />
       </div>
 
+      {/* The whole inventory, with no per-guest allowance in the way. */}
       {roomBased && (
-        <label
-          htmlFor="owner-rooms"
-          className={`relative mt-[22px] flex items-center justify-between rounded-[10px] border-[1.5px] p-[15px] ${
-            soldOut ? "cursor-not-allowed border-[#f0c4c0]" : "cursor-pointer border-[#ddd]"
-          }`}
-        >
-          <span className="min-w-0">
-            <span className="block text-[18px] font-medium leading-[1.2] text-[#121212]">
-              Rooms
-            </span>
-            <span className="mt-0.5 block text-[16px] leading-[1.2]">
-              {soldOut ? (
-                <span className="font-medium text-[#c0392b]">
-                  Sold out for these dates
-                </span>
-              ) : (
-                <span className="text-[#4a4a4a]">
-                  {rooms} {rooms === 1 ? "room" : "rooms"}
-                  {datesReady && (
-                    <span className="text-[#8a8a94]"> · {roomsFree} available</span>
-                  )}
-                </span>
-              )}
-            </span>
-          </span>
-          <img
-            src="/icons/place/dropdown.svg"
-            alt=""
-            width={49}
-            height={49}
-            className="pointer-events-none h-[49px] w-[49px] shrink-0"
-          />
-          {/* The whole inventory, with no per-guest allowance in the way. */}
-          <select
-            id="owner-rooms"
-            value={rooms}
-            onChange={(e) => setRoomsSel(Number(e.target.value))}
-            aria-label="Number of rooms"
-            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-          >
-            {Array.from({ length: Math.max(1, totalRooms) }, (_, i) => i + 1).map((n) => (
-              <option key={n} value={n}>
-                {n} {n === 1 ? "room" : "rooms"}
-              </option>
-            ))}
-          </select>
-        </label>
+        <PickerField
+          label="Rooms"
+          ariaLabel="Number of rooms"
+          value={rooms}
+          onChange={(n) => setRoomsSel(n)}
+          disabled={soldOut}
+          boxClassName={soldOut ? "border-[#f0c4c0]" : "border-[#ddd]"}
+          options={Array.from({ length: Math.max(1, totalRooms) }, (_, i) => i + 1).map(
+            (n) => ({
+              value: n,
+              label: `${n} ${n === 1 ? "room" : "rooms"}`,
+            }),
+          )}
+          display={
+            soldOut ? (
+              <span className="font-medium text-[#c0392b]">
+                Sold out for these dates
+              </span>
+            ) : (
+              <span className="text-[#4a4a4a]">
+                {rooms} {rooms === 1 ? "room" : "rooms"}
+                {datesReady && (
+                  <span className="text-[#8a8a94]"> · {roomsFree} available</span>
+                )}
+              </span>
+            )
+          }
+        />
       )}
 
-      {/* Same picker as the guest's booking card — the count is derived from the
-          rooms picked above, and the invisible native select covers the whole box
-          so clicking anywhere in it opens the list. */}
-      <label
-        htmlFor="owner-guests"
-        className="relative mt-[22px] flex cursor-pointer items-center justify-between rounded-[10px] border-[1.5px] border-[#ddd] p-[15px]"
-      >
-        <span className="min-w-0">
-          <span className="block text-[18px] font-medium leading-[1.2] text-[#121212]">
-            Guests
-          </span>
-          <span className="mt-0.5 block text-[16px] leading-[1.2] text-[#4a4a4a]">
+      {/* The ask can't be held every night — show what each night has and let
+          the owner fulfil exactly that (the same adjusted stay guests can book,
+          minus the per-guest cap). The guest pays only for the rooms they get. */}
+      {canAdjust && (
+        <div className="mt-[22px] rounded-[10px] border-[1.5px] border-[#e8d5a3] bg-[#fdf9f0] p-[15px]">
+          <p className="text-[16px] font-semibold leading-[1.3] text-[#8a6a1f]">
+            {rooms} rooms aren&apos;t free every night
+          </p>
+          <p className="mt-1 text-[14px] leading-[1.4] text-[#7a6a45]">
+            Here&apos;s what the calendar has across these dates:
+          </p>
+          <ul className="mt-2.5 space-y-1.5">
+            {plan.map((seg) => (
+              <li
+                key={seg.checkIn}
+                className="flex items-center justify-between gap-3 text-[15px] leading-[1.3]"
+              >
+                <span className="text-[#5a5a64]">
+                  {formatRange(seg.checkIn, seg.checkOut)}
+                </span>
+                <span className="font-semibold text-[#121212]">
+                  {seg.rooms} room{seg.rooms === 1 ? "" : "s"}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <fieldset className="mt-3.5 space-y-2 border-t border-[#e8d5a3] pt-3">
+            <legend className="sr-only">How to fulfil these dates</legend>
+            <label className="flex cursor-pointer items-start gap-2.5 text-[15px] leading-[1.35] text-[#121212]">
+              <input
+                type="radio"
+                name="owner-room-plan"
+                checked={flexSel}
+                onChange={() => setFlexSel(true)}
+                className="mt-0.5"
+              />
+              <span>
+                <span className="font-semibold">Book it with this adjustment</span>
+                <span className="block text-[13.5px] text-[#7a6a45]">
+                  Every night gets all the rooms it has — the guest pays only
+                  for the rooms they get.
+                </span>
+              </span>
+            </label>
+            <label className="flex cursor-pointer items-start gap-2.5 text-[15px] leading-[1.35] text-[#121212]">
+              <input
+                type="radio"
+                name="owner-room-plan"
+                checked={!flexSel}
+                onChange={() => setFlexSel(false)}
+                className="mt-0.5"
+              />
+              <span>
+                <span className="font-semibold">
+                  Keep {planMinRooms(plan)} room
+                  {planMinRooms(plan) === 1 ? "" : "s"} for the whole stay
+                </span>
+                <span className="block text-[13.5px] text-[#7a6a45]">
+                  The same rooms every night, nothing changes mid-stay.
+                </span>
+              </span>
+            </label>
+          </fieldset>
+        </div>
+      )}
+
+      {/* Same picker as the guest's booking card — capped at what the picked
+          rooms actually sleep. No over-capacity entries: an owner can add
+          rooms, not beds. */}
+      <PickerField
+        label="Guests"
+        ariaLabel="Number of guests"
+        value={guests}
+        onChange={(n) => setGuestsSel(n)}
+        options={Array.from({ length: listedCapacity }, (_, i) => i + 1).map(
+          (n) => ({
+            value: n,
+            label: `${n} ${n === 1 ? "guest" : "guests"}`,
+          }),
+        )}
+        display={
+          <>
             {guests} {guests === 1 ? "guest" : "guests"}
             {roomBased && (
               <span className="text-[#8a8a94]">
                 {" "}
-                · {rooms} {rooms === 1 ? "room" : "rooms"} sleep{" "}
+                ·{" "}
+                {adjusted
+                  ? "across its legs this stay sleeps"
+                  : `${effRooms} ${effRooms === 1 ? "room" : "rooms"} sleep`}{" "}
                 {listedCapacity}
               </span>
             )}
-          </span>
-        </span>
-        <img
-          src="/icons/place/dropdown.svg"
-          alt=""
-          width={49}
-          height={49}
-          className="pointer-events-none h-[49px] w-[49px] shrink-0"
-        />
-        <select
-          id="owner-guests"
-          value={guests}
-          onChange={(e) => setGuestsSel(Number(e.target.value))}
-          aria-label="Number of guests"
-          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-        >
-          {Array.from({ length: guestOptions }, (_, i) => i + 1).map((n) => (
-            <option key={n} value={n}>
-              {n} {n === 1 ? "guest" : "guests"}
-              {n > listedCapacity ? " (over capacity)" : ""}
-            </option>
-          ))}
-        </select>
-      </label>
-      {overCapacity && (
-        <p className="mt-2 text-[13px] leading-[1.4] text-[#a06a00]">
-          That&rsquo;s more than the {listedCapacity} this listing advertises
-          {roomBased ? " for that many rooms" : ""} — allowed here, just
-          double-check it&rsquo;s what you meant.
-        </p>
-      )}
+          </>
+        }
+      />
 
       {paidServices.length > 0 && (
         <div className="mt-[22px]">
@@ -331,6 +455,79 @@ export default function OwnerBookingCard({
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* The owner's own discount, as agreed with the guest — % or a fixed
+          amount. It's stored on the booking and the guest sees this exact
+          figure at payment, so what was promised is what appears. */}
+      <div className="mt-[22px]">
+        <p className="text-[18px] font-medium leading-[1.2] text-[#121212]">
+          Discount{" "}
+          <span className="text-[14px] font-normal text-[#8a8a94]">(optional)</span>
+        </p>
+        <div className="mt-3 flex items-stretch gap-2.5">
+          {/* Two clearly labelled halves, not two cramped glyphs: the active
+              mode is filled brand, the other stays clickable-looking. */}
+          <div className="flex shrink-0 overflow-hidden rounded-[8px] border-[1.5px] border-[#c9c9d4]">
+            <button
+              type="button"
+              onClick={() => setDiscMode("pct")}
+              aria-pressed={discMode === "pct"}
+              title="Percent off the total"
+              className={`min-w-[64px] px-4 py-2.5 text-[15px] font-semibold transition-colors ${
+                discMode === "pct"
+                  ? "bg-brand text-white"
+                  : "bg-white text-[#4a4a4a] hover:bg-brand/5"
+              }`}
+            >
+              % off
+            </button>
+            <button
+              type="button"
+              onClick={() => setDiscMode("fixed")}
+              aria-pressed={discMode === "fixed"}
+              title="Fixed amount off the total"
+              className={`min-w-[64px] border-l-[1.5px] border-[#c9c9d4] px-4 py-2.5 text-[15px] font-semibold transition-colors ${
+                discMode === "fixed"
+                  ? "bg-brand text-white"
+                  : "bg-white text-[#4a4a4a] hover:bg-brand/5"
+              }`}
+            >
+              $ off
+            </button>
+          </div>
+          <input
+            value={discVal}
+            onChange={(e) => setDiscVal(e.target.value.replace(/[^\d.]/g, ""))}
+            inputMode="decimal"
+            placeholder={discMode === "pct" ? "e.g. 10 (% off)" : "e.g. 150 ($ off)"}
+            aria-label={discMode === "pct" ? "Discount percent" : "Discount amount"}
+            className="w-full rounded-[8px] border-[1.5px] border-[#c9c9d4] px-3.5 py-2.5 text-[15px] text-[#121212] placeholder:text-[#9d9da6] focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
+          />
+        </div>
+        {discAmount > 0 && (
+          <p className="mt-1.5 text-[13px] text-[#1c7d5c]">
+            The guest will see −${discAmount.toFixed(2)} at payment.
+          </p>
+        )}
+      </div>
+
+      {/* The fold: this booking absorbs the guest's overlapping stay, growing it
+          into ONE booking rather than stacking a second on top. Spelled out so
+          the owner confirms it knowingly, and so "their 5 rooms became 7" is
+          never a surprise to either side. */}
+      {folded.length > 0 && datesReady && (
+        <div className="mt-[22px] rounded-[10px] border border-[#c9d8ee] bg-[#f2f7fd] px-4 py-3.5 text-[14px] leading-[1.5] text-[#2c5b8f]">
+          <p className="font-semibold">
+            This upgrades their existing stay ({foldedRooms} room
+            {foldedRooms === 1 ? "" : "s"}, {formatRange(folded[0].checkIn, folded[0].checkOut)})
+          </p>
+          <p className="mt-1 text-[#4a6b8a]">
+            It becomes one booking of {rooms} room{rooms === 1 ? "" : "s"} for{" "}
+            {formatRange(unionIn, unionOut)}. What they already paid is credited
+            — they&rsquo;re only asked for the difference.
+          </p>
         </div>
       )}
 
@@ -372,14 +569,37 @@ export default function OwnerBookingCard({
       )}
 
       <dl className="mt-[35px] space-y-[18px] text-[20px] leading-[1.2] text-black">
-        <div className="flex items-center justify-between">
-          <dt>
-            ${price}
-            {roomBased ? ` × ${rooms} room${rooms === 1 ? "" : "s"}` : ""} × {nights}{" "}
-            night{nights === 1 ? "" : "s"}
-          </dt>
-          <dd className="font-light">${q.subtotal.toFixed(2)}</dd>
-        </div>
+        {adjusted ? (
+          /* Rooms vary night to night — bill each leg for what it holds, the
+             same itemization the guest sees, so "the guest pays accordingly"
+             is visible before the request is ever sent. */
+          plan.map((seg) => {
+            const legNights = Math.max(1, nightsBetween(seg.checkIn, seg.checkOut));
+            return (
+              <div key={seg.checkIn} className="flex items-start justify-between gap-4">
+                <dt className="min-w-0">
+                  <span className="block text-[16px] text-[#7a7a85]">
+                    {formatRange(seg.checkIn, seg.checkOut)}
+                  </span>
+                  ${price} × {seg.rooms} room{seg.rooms === 1 ? "" : "s"} ×{" "}
+                  {legNights} night{legNights === 1 ? "" : "s"}
+                </dt>
+                <dd className="shrink-0 font-light">
+                  ${(price * seg.rooms * legNights).toFixed(2)}
+                </dd>
+              </div>
+            );
+          })
+        ) : (
+          <div className="flex items-center justify-between">
+            <dt>
+              ${price}
+              {roomBased ? ` × ${effRooms} room${effRooms === 1 ? "" : "s"}` : ""} ×{" "}
+              {nights} night{nights === 1 ? "" : "s"}
+            </dt>
+            <dd className="font-light">${q.subtotal.toFixed(2)}</dd>
+          </div>
+        )}
         {q.discountAmount > 0 && (
           <div className="flex items-center justify-between text-brand">
             <dt>{q.discount.label}</dt>
@@ -399,9 +619,44 @@ export default function OwnerBookingCard({
       </dl>
       <hr className="mt-[25px] border-t border-[#c6c6c6]" />
       <div className="mt-5 flex items-center justify-between text-[20px] font-semibold leading-[1.2] text-[#121212]">
-        <p>Total before taxes</p>
-        <p>${(q.total + chosenTotal).toFixed(2)}</p>
+        <p>{creditPreview > 0 ? "Full stay (before taxes)" : "Total before taxes"}</p>
+        <p>${fullTotal.toFixed(2)}</p>
       </div>
+      {discAmount > 0 && (
+        <div className="mt-3 flex items-center justify-between text-[18px] leading-[1.2] text-brand">
+          <p>Your discount{discMode === "pct" ? ` (${Math.min(90, Math.trunc(discNum))}%)` : ""}</p>
+          <p>−${discAmount.toFixed(2)}</p>
+        </div>
+      )}
+      {/* Folding in their existing stay: what they paid for it comes straight
+          off — the guest is asked only for the difference, and the owner sees
+          that figure BEFORE sending the request, not after the guest complains. */}
+      {creditPreview > 0 && (
+        <div className="mt-3 flex items-start justify-between gap-4 text-[18px] leading-[1.2] text-[#1c7d5c]">
+          <div className="min-w-0">
+            <p>Guest already paid</p>
+            <p className="mt-1 text-[14px] leading-[1.4] text-[#4f9c82]">
+              their {foldedRooms}-room booking (
+              {formatRange(folded[0].checkIn, folded[0].checkOut)}) — the exact
+              amount they were charged, service fee included
+            </p>
+          </div>
+          <p className="shrink-0">−${creditPreview.toFixed(2)}</p>
+        </div>
+      )}
+      {(discAmount > 0 || creditPreview > 0) && (
+        <div className="mt-3 flex items-start justify-between gap-4 text-[20px] font-semibold leading-[1.2] text-[#121212]">
+          <div className="min-w-0">
+            <p>Guest pays</p>
+            <p className="mt-1 text-[13px] font-normal leading-[1.4] text-[#7a7a85]">
+              only the difference — this is what their payment request asks for
+            </p>
+          </div>
+          <p className="shrink-0">
+            ${Math.max(0, fullTotal - discAmount - creditPreview).toFixed(2)}
+          </p>
+        </div>
+      )}
     </aside>
   );
 }

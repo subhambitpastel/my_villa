@@ -65,7 +65,7 @@ export type VillaRow = {
   reviews: number;
   image: string;
   images: string; // JSON string[] — gallery, first entry doubles as cover
-  archived_at: string | null; // set = archived (no new bookings, hidden from browse)
+  locked_at: string | null; // set = locked (no new bookings, hidden from browse)
   created_at: string;
 };
 
@@ -81,7 +81,7 @@ export type PackageRow = {
   discount: number; // advertised % off the nightly rate (0 = none)
   price: number; // all-inclusive total for the N-night stay
   inclusions: string; // JSON string[] — included experiences, all mandatory
-  archived_at: string | null; // set = archived; also implied by an archived villa
+  locked_at: string | null; // set = locked; also implied by a locked villa
   created_at: string;
 };
 
@@ -120,6 +120,15 @@ export type BookingRow = {
   // 1 = the guest still owes for this stay. Only owner-made bookings start this
   // way: a guest booking their own stay pays at checkout, so it is never due.
   payment_due: number;
+  // Owner-granted discount on an owner-arranged stay: a % of the total and/or a
+  // fixed amount off. Stored so the guest sees at payment exactly what the
+  // owner promised on the phone. Zero on guest-made bookings.
+  disc_pct: number;
+  disc_fixed: number;
+  // Value of an earlier PAID stay that was folded into this one when the owner
+  // fulfilled a bigger request over the same dates — credited against what the
+  // guest owes, since they already paid it once.
+  paid_credit: number;
   status: BookingStatus;
   created_at: string;
 };
@@ -173,10 +182,10 @@ CREATE TABLE IF NOT EXISTS villas (
   reviews     INTEGER NOT NULL DEFAULT 0,
   image       TEXT NOT NULL DEFAULT '/images/host/photo-1.jpg',
   images      TEXT NOT NULL DEFAULT '[]',
-  -- When set, the owner has archived this listing: it stops taking new bookings
+  -- When set, the owner has locked this listing: it stops taking new bookings
   -- and drops out of search/browse, while bookings already made still stand.
   -- NULL = live. Nullable rather than a boolean so we keep the "when".
-  archived_at TEXT,
+  locked_at TEXT,
   created_at  TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
@@ -207,6 +216,13 @@ CREATE TABLE IF NOT EXISTS bookings (
   -- behalf). Guest-made bookings pay at checkout, so they default to 0 and
   -- every pre-existing row stays settled.
   payment_due INTEGER NOT NULL DEFAULT 0,
+  -- Owner-granted discount on an owner-arranged stay (% and/or fixed $), shown
+  -- to the guest at payment. Zero on guest-made bookings.
+  disc_pct    INTEGER NOT NULL DEFAULT 0,
+  disc_fixed  REAL NOT NULL DEFAULT 0,
+  -- Value of an earlier paid stay folded into this one on fulfilment — credited
+  -- against what the guest owes.
+  paid_credit REAL NOT NULL DEFAULT 0,
   status     TEXT NOT NULL DEFAULT 'accepted'
              CHECK (status IN ('pending','accepted','declined','cancelled','completed')),
   created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
@@ -255,9 +271,9 @@ CREATE TABLE IF NOT EXISTS packages (
   discount    INTEGER NOT NULL DEFAULT 0,
   price       REAL NOT NULL DEFAULT 0,
   inclusions  TEXT NOT NULL DEFAULT '[]',
-  -- Same as villas.archived_at, but for a single package. A package is also
-  -- unbookable when its villa is archived, whatever this column says.
-  archived_at TEXT,
+  -- Same as villas.locked_at, but for a single package. A package is also
+  -- unbookable when its villa is locked, whatever this column says.
+  locked_at TEXT,
   created_at  TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
@@ -304,6 +320,9 @@ ALTER TABLE villas ADD COLUMN IF NOT EXISTS discount INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rooms INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS room_plan TEXT NOT NULL DEFAULT '';
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_due INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS disc_pct    INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS disc_fixed  REAL NOT NULL DEFAULT 0;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS paid_credit REAL NOT NULL DEFAULT 0;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS extras TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS package_id INTEGER;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS package TEXT NOT NULL DEFAULT '';
@@ -311,9 +330,29 @@ ALTER TABLE packages ADD COLUMN IF NOT EXISTS nights INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE packages ADD COLUMN IF NOT EXISTS max_guests INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE packages ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'curated';
 ALTER TABLE packages ADD COLUMN IF NOT EXISTS discount INTEGER NOT NULL DEFAULT 0;
+-- This column was called archived_at before the feature was renamed to "Lock".
+-- RENAME rather than add: the ADD COLUMN below would happily create an empty
+-- locked_at beside the old column, quietly putting every already-delisted
+-- listing back on the market. Guarded both ways so it's a no-op on a database
+-- that's already been renamed (or was created fresh with locked_at).
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'villas' AND column_name = 'archived_at')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_name = 'villas' AND column_name = 'locked_at')
+  THEN ALTER TABLE villas RENAME COLUMN archived_at TO locked_at;
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'packages' AND column_name = 'archived_at')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_name = 'packages' AND column_name = 'locked_at')
+  THEN ALTER TABLE packages RENAME COLUMN archived_at TO locked_at;
+  END IF;
+END $$;
+
 -- Nullable with no default, so every existing listing stays live on upgrade.
-ALTER TABLE villas   ADD COLUMN IF NOT EXISTS archived_at TEXT;
-ALTER TABLE packages ADD COLUMN IF NOT EXISTS archived_at TEXT;
+ALTER TABLE villas   ADD COLUMN IF NOT EXISTS locked_at TEXT;
+ALTER TABLE packages ADD COLUMN IF NOT EXISTS locked_at TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS pay_methods      TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS pay_account_type TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS card_number      TEXT NOT NULL DEFAULT '';

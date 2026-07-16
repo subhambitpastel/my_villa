@@ -7,7 +7,7 @@ import {
   createPackageAction,
   updatePackageAction,
   deletePackageAction,
-  setPackageArchivedAction,
+  setPackageLockedAction,
 } from "@/lib/actions";
 import type { BookingLock, PackageItem, PropertyItem } from "@/lib/queries";
 import AccountSearch, { matchesSearch } from "@/components/account/AccountSearch";
@@ -237,11 +237,11 @@ export default function MyPackages({
     });
   }
 
-  // Archiving a package retires it without deleting it: no new bookings and it
+  // Locking a package retires it without deleting it: no new bookings and it
   // drops off the guest-facing pages, while stays already booked go ahead.
-  function toggleArchived(p: PackageItem) {
+  function toggleLocked(p: PackageItem) {
     startTransition(async () => {
-      await setPackageArchivedAction(p.id, !p.archived);
+      await setPackageLockedAction(p.id, !p.locked);
       router.refresh();
     });
   }
@@ -703,22 +703,22 @@ export default function MyPackages({
                             {p.discount}% off
                           </span>
                         )}
-                        {p.archived && (
+                        {p.locked && (
                           <span
                             title="Hidden from guests and taking no new bookings. Stays already booked still go ahead."
                             className="rounded-[3px] bg-[#e9e9ef] px-1.5 py-0.5 text-[10px] font-semibold text-[#5f5f6b]"
                           >
-                            Archived
+                            Locked
                           </span>
                         )}
-                        {/* The villa's own archive overrides this package —
+                        {/* The villa's own lock overrides this package —
                             restoring the package alone wouldn't bring it back. */}
-                        {p.villaArchived && (
+                        {p.villaLocked && (
                           <span
-                            title="This package's villa is archived, so the package takes no bookings either. Restore the villa from My Property."
+                            title="This package's villa is locked, so the package takes no bookings either. Restore the villa from My Property."
                             className="rounded-[3px] bg-[#fff3d6] px-1.5 py-0.5 text-[10px] font-semibold text-[#a06a00]"
                           >
-                            Villa archived
+                            Villa locked
                           </span>
                         )}
                       </div>
@@ -760,10 +760,10 @@ export default function MyPackages({
                     <button
                       type="button"
                       disabled={pending}
-                      onClick={() => toggleArchived(p)}
+                      onClick={() => toggleLocked(p)}
                       className="text-[13px] font-medium text-[#121212] underline disabled:opacity-50"
                     >
-                      {p.archived ? "Restore" : "Archive"}
+                      {p.locked ? "Restore" : "Lock"}
                     </button>
                     <button
                       type="button"

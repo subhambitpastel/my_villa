@@ -53,22 +53,25 @@ function LockedNotice({ villa, lock }: { villa: string; lock: BookingLock }) {
               . You can wait for them to complete, or cancel them all in Rent
               Requests to edit now.
             </p>
-            {/* Archiving is never locked — it's the answer for an owner who
-                only wants the bookings to stop, without waiting out the
-                calendar or cancelling on guests who already booked. */}
+            {/* Two different things are called "locked" on this page: editing is
+                frozen BY the live bookings, whereas locking the listing is the
+                owner's own switch — and that switch always works. It's the
+                answer for an owner who only wants the bookings to stop, without
+                waiting out the calendar or cancelling on anyone. */}
             <div className="mx-auto mt-5 max-w-md rounded-[8px] border border-[#e8d5a3] bg-[#fdf9f0] p-4 text-left">
               <p className="text-[13px] font-semibold text-[#8a6a1f]">
                 Just want to stop taking further bookings?
               </p>
               <p className="mt-1 text-[13px] leading-relaxed text-[#7a6a45]">
-                Archive the listing from{" "}
+                Lock the listing from{" "}
                 <Link href="/profile/properties" className="underline">
                   My Properties
                 </Link>{" "}
-                instead — archiving isn&rsquo;t locked. It won&rsquo;t affect the{" "}
-                {lock.active} booking{lock.active === 1 ? "" : "s"} already made
-                (those stays go ahead as planned), and no new bookings can come
-                in. You can restore it whenever you like.
+                instead — that switch always works, even while editing is
+                frozen. It won&rsquo;t affect the {lock.active} booking
+                {lock.active === 1 ? "" : "s"} already made (those stays go ahead
+                as planned), and no new bookings can come in. You can unlock it
+                whenever you like.
               </p>
             </div>
             <div className="mt-6 flex flex-wrap items-center justify-center gap-4">

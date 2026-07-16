@@ -18,17 +18,20 @@ import {
 } from "@/lib/actions";
 import StartDateField from "@/components/place/StartDateField";
 import DateRangeField from "@/components/home/DateRangeField";
+import PickerField from "@/components/ui/PickerField";
 import type { BookedRange } from "@/lib/queries";
 import type { VillaService } from "@/components/host/draft";
 import {
   allowanceFree,
   fullyBookedRanges,
   MAX_ROOMS_PER_GUEST,
+  roomsBookedOn,
   roomsFreeForRange,
   type RoomBooking,
+  type RoomSegment,
 } from "@/lib/rooms";
 
-/* eslint-disable @next/next/no-img-element */
+
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -42,14 +45,14 @@ type Shared = {
   setMessage: (m: Message) => void;
   router: ReturnType<typeof useRouter>;
   footer: React.ReactNode;
-  /** The listing has been archived: this stay still goes ahead, but its dates are
+  /** The listing has been locked: this stay still goes ahead, but its dates are
    *  frozen (the server refuses a re-date). Rooms, guests and add-ons stay
    *  editable, and cancelling is always allowed. */
-  archived: boolean;
+  locked: boolean;
 };
 
-/** Shown in place of the date picker on an archived listing. */
-function ArchivedDatesNotice({ packageStay }: { packageStay: boolean }) {
+/** Shown in place of the date picker on a locked listing. */
+function LockedDatesNotice({ packageStay }: { packageStay: boolean }) {
   return (
     <p className="mt-3 rounded-[10px] bg-[#fff6e5] px-4 py-3 text-[14px] leading-[1.5] text-[#a06a00]">
       The host has stopped taking new bookings here, so these dates are fixed.
@@ -83,14 +86,15 @@ export default function ManageBookingCard({
   services = [],
   originalExtras = [],
   originalTotal = 0,
-  archived = false,
+  locked = false,
+  roomPlan = null,
 }: {
   bookingId: number;
   villaId: number;
   price: number;
-  /** The villa (or this stay's package) is archived — dates frozen, the rest of
+  /** The villa (or this stay's package) is locked — dates frozen, the rest of
    *  the booking still editable. Mirrors the server-side guard. */
-  archived?: boolean;
+  locked?: boolean;
   /** Host-set % off the nightly price (applied in the quote). */
   discount?: number;
   checkIn: string;
@@ -114,6 +118,10 @@ export default function ManageBookingCard({
   /** Set when this booking is a package: its length, occupancy and price are
    *  fixed, so the guest may only shift the start date. */
   packageStay?: { nights: number; price: number } | null;
+  /** Set when the stay holds different rooms on different nights (host
+   *  arranged it leg by leg). The editors here only speak one flat count and
+   *  the server refuses modifying such a stay, so it renders read-only. */
+  roomPlan?: RoomSegment[] | null;
   /** The villa's paid add-ons, offered here so the guest can add/remove them. */
   services?: VillaService[];
   /** Indices (into `services`) of the add-ons this booking currently has. */
@@ -255,8 +263,27 @@ export default function ManageBookingCard({
     setMessage,
     router,
     footer,
-    archived,
+    locked,
   };
+
+  // A stay the host arranged night by night can't be reshaped here — every
+  // editor below speaks one flat room count, and the server refuses re-dating
+  // or modifying it. Show it faithfully; changes go through the host, and
+  // cancelling (the footer) still works.
+  if (roomBased && roomPlan && roomPlan.length > 0) {
+    return (
+      <PlanStayCard
+        checkIn={checkIn}
+        checkOut={checkOut}
+        guests={guests}
+        roomPlan={roomPlan}
+        extras={originalExtras
+          .map((i) => services[i])
+          .filter((s): s is VillaService => !!s)}
+        footer={footer}
+      />
+    );
+  }
 
   if (packageStay) {
     return (
@@ -301,6 +328,86 @@ export default function ManageBookingCard({
   );
 }
 
+/* ──────────────────── Night-by-night stay: view only ──────────────────── */
+// The host fulfilled this ask with different rooms on different nights. There
+// is nothing here a flat rooms-picker could edit without lying about at least
+// one night, so the stay is shown exactly as arranged and changes are routed
+// back through the host. Cancelling stays available via the shared footer.
+function PlanStayCard({
+  checkIn,
+  checkOut,
+  guests,
+  roomPlan,
+  extras,
+  footer,
+}: {
+  checkIn: string;
+  checkOut: string;
+  guests: number;
+  roomPlan: RoomSegment[];
+  extras: VillaService[];
+  footer: React.ReactNode;
+}) {
+  const nights = Math.max(1, nightsBetween(checkIn, checkOut));
+  return (
+    <aside className="h-fit w-full min-w-0 max-w-[576px] rounded-[20px] bg-white px-[41px] py-[48px] shadow-[0px_15px_50px_0px_rgba(0,0,0,0.18)] lg:mt-[60px]">
+      <p className="text-[22px] font-semibold leading-[1.2] text-[#121212]">
+        Your stay
+      </p>
+      <dl className="mt-6 space-y-4 text-[16px] leading-[1.4] text-[#121212]">
+        <div className="flex items-start justify-between gap-4">
+          <dt className="text-[#7a7a85]">Dates</dt>
+          <dd className="text-right font-medium">
+            {formatRange(checkIn, checkOut)}
+            <span className="block text-[13px] font-normal text-[#7a7a85]">
+              {nights} night{nights === 1 ? "" : "s"}
+            </span>
+          </dd>
+        </div>
+        <div>
+          <dt className="text-[#7a7a85]">Rooms by night</dt>
+          <dd>
+            <ul className="mt-1.5 space-y-1.5">
+              {roomPlan.map((seg) => (
+                <li
+                  key={seg.checkIn}
+                  className="flex items-center justify-between gap-4"
+                >
+                  <span className="text-[15px] text-[#3a3a44]">
+                    {formatRange(seg.checkIn, seg.checkOut)}
+                  </span>
+                  <span className="font-semibold">
+                    {seg.rooms} room{seg.rooms === 1 ? "" : "s"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </dd>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <dt className="text-[#7a7a85]">Guests</dt>
+          <dd className="font-medium">{guests}</dd>
+        </div>
+        {extras.length > 0 && (
+          <div className="flex items-start justify-between gap-4">
+            <dt className="text-[#7a7a85]">Add-ons</dt>
+            <dd className="text-right font-medium">
+              {extras.map((e) => e.name).join(", ")}
+            </dd>
+          </div>
+        )}
+      </dl>
+      <p className="mt-6 rounded-[10px] bg-[#fff6e5] px-4 py-3 text-[14px] leading-[1.5] text-[#a06a00]">
+        Your host arranged this stay night by night to fit the calendar, so it
+        can&apos;t be edited online — ask your host to change the dates, rooms
+        or guests and they&apos;ll rearrange it for you. You can still cancel
+        below.
+      </p>
+      {footer}
+    </aside>
+  );
+}
+
 /* ─────────────────────────── Nightly: full editor ─────────────────────────── */
 // Change any part of the stay — dates, length, rooms, guests, add-ons — then
 // reconcile: a higher total sends the guest to checkout to pay the difference,
@@ -330,7 +437,7 @@ function NightlyManageCard({
   setMessage,
   router,
   footer,
-  archived,
+  locked,
 }: Shared & {
   villaId: number;
   price: number;
@@ -483,11 +590,11 @@ function NightlyManageCard({
         </span>
       </div>
 
-      {/* Archived: the dates are settled, so show them read-only rather than a
+      {/* Locked: the dates are settled, so show them read-only rather than a
           picker that would only be refused on save. Everything below stays
           editable — that's the whole point of the narrower rule. */}
       <div className="mt-5">
-        {archived ? (
+        {locked ? (
           <>
             <div className="rounded-[10px] border-[1.5px] border-[#ddd] p-[15px]">
               <span className="block text-[18px] font-medium leading-[1.2] text-[#121212]">
@@ -498,7 +605,7 @@ function NightlyManageCard({
                 {nights === 1 ? "" : "s"}
               </span>
             </div>
-            <ArchivedDatesNotice packageStay={false} />
+            <LockedDatesNotice packageStay={false} />
           </>
         ) : (
           /* No maxNights — same as the booking card: a longer stay is allowed
@@ -507,6 +614,16 @@ function NightlyManageCard({
           <DateRangeField
             variant="booking"
             windowMonths={BOOKING_WINDOW_MONTHS}
+            /* Same per-night free counts the booking card shows. This booking's
+               own rooms are excluded from `roomBookings`, so the numbers answer
+               the question actually being asked here: "how many rooms could MY
+               stay hold that night if I moved it?" */
+            roomsFreeOn={
+              roomBased
+                ? (key) =>
+                    Math.max(0, totalRooms - roomsBookedOn(key, roomBookings))
+                : undefined
+            }
             checkIn={checkIn || null}
             checkOut={checkOut || null}
             bookedRanges={calendarBlocked}
@@ -520,95 +637,56 @@ function NightlyManageCard({
       </div>
 
       {roomBased && (
-        <label
-          htmlFor="manage-rooms"
-          className={`relative mt-[22px] flex items-center justify-between rounded-[10px] border-[1.5px] p-[15px] ${
-            soldOut ? "cursor-not-allowed border-[#f0c4c0]" : "cursor-pointer border-[#ddd]"
-          }`}
-        >
-          <span className="min-w-0">
-            <span className="block text-[18px] font-medium leading-[1.2] text-[#121212]">
-              Rooms
-            </span>
-            <span className="mt-0.5 block text-[16px] leading-[1.2]">
-              {soldOut ? (
-                <span className="font-medium text-[#c0392b]">
-                  Sold out for these dates
-                </span>
-              ) : (
-                <span className="text-[#4a4a4a]">
-                  {rooms} {rooms === 1 ? "room" : "rooms"}
-                  {datesReady && (
-                    <span className="text-[#8a8a94]"> · {roomsFree} available</span>
-                  )}
-                  {/* Say WHY the picker stops short of the inventory. */}
-                  {cappedByAllowance && (
-                    <span className="text-[#8a6a1f]">
-                      {" "}
-                      · you can hold {allowanceLeft} more here
-                    </span>
-                  )}
-                </span>
-              )}
-            </span>
-          </span>
-          <img
-            src="/icons/place/dropdown.svg"
-            alt=""
-            width={49}
-            height={49}
-            className="pointer-events-none h-[49px] w-[49px] shrink-0"
-          />
-          <select
-            id="manage-rooms"
-            value={rooms}
-            onChange={(e) => setRoomsSel(Number(e.target.value))}
-            disabled={soldOut}
-            aria-label="Number of rooms"
-            className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
-          >
-            {Array.from({ length: roomsMax }, (_, i) => i + 1).map((n) => (
-              <option key={n} value={n}>
-                {n} {n === 1 ? "room" : "rooms"}
-              </option>
-            ))}
-          </select>
-        </label>
+        <PickerField
+          label="Rooms"
+          ariaLabel="Number of rooms"
+          value={rooms}
+          onChange={(n) => setRoomsSel(n)}
+          disabled={soldOut}
+          boxClassName={soldOut ? "border-[#f0c4c0]" : "border-[#ddd]"}
+          options={Array.from({ length: roomsMax }, (_, i) => i + 1).map((n) => ({
+            value: n,
+            label: `${n} ${n === 1 ? "room" : "rooms"}`,
+          }))}
+          display={
+            soldOut ? (
+              <span className="font-medium text-[#c0392b]">
+                Sold out for these dates
+              </span>
+            ) : (
+              <span className="text-[#4a4a4a]">
+                {rooms} {rooms === 1 ? "room" : "rooms"}
+                {datesReady && (
+                  <span className="text-[#8a8a94]"> · {roomsFree} available</span>
+                )}
+                {/* Say WHY the picker stops short of the inventory. */}
+                {cappedByAllowance && (
+                  <span className="text-[#8a6a1f]">
+                    {" "}
+                    · you can hold {allowanceLeft} more here
+                  </span>
+                )}
+              </span>
+            )
+          }
+        />
       )}
 
-      <label
-        htmlFor="manage-guests"
-        className="relative mt-[22px] flex cursor-pointer items-center justify-between rounded-[10px] border-[1.5px] border-[#ddd] p-[15px]"
-      >
-        <span className="min-w-0">
-          <span className="block text-[18px] font-medium leading-[1.2] text-[#121212]">
-            Guests
-          </span>
-          <span className="mt-0.5 block text-[16px] leading-[1.2] text-[#4a4a4a]">
+      <PickerField
+        label="Guests"
+        ariaLabel="Number of guests"
+        value={guests}
+        onChange={(n) => setGuestsSel(n)}
+        options={Array.from({ length: guestCap }, (_, i) => i + 1).map((n) => ({
+          value: n,
+          label: `${n} ${n === 1 ? "guest" : "guests"}`,
+        }))}
+        display={
+          <>
             {guests} {guests === 1 ? "guest" : "guests"}
-          </span>
-        </span>
-        <img
-          src="/icons/place/dropdown.svg"
-          alt=""
-          width={49}
-          height={49}
-          className="pointer-events-none h-[49px] w-[49px] shrink-0"
-        />
-        <select
-          id="manage-guests"
-          value={guests}
-          onChange={(e) => setGuestsSel(Number(e.target.value))}
-          aria-label="Number of guests"
-          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-        >
-          {Array.from({ length: guestCap }, (_, i) => i + 1).map((n) => (
-            <option key={n} value={n}>
-              {n} {n === 1 ? "guest" : "guests"}
-            </option>
-          ))}
-        </select>
-      </label>
+          </>
+        }
+      />
 
       {paidServices.length > 0 && (
         <div className="mt-[22px]">
@@ -748,7 +826,7 @@ function PackageManageCard({
   setMessage,
   router,
   footer,
-  archived,
+  locked,
 }: Shared & {
   packageStay: { nights: number; price: number };
   checkIn: string;
@@ -811,11 +889,11 @@ function PackageManageCard({
         </span>
       </div>
 
-      {/* Archived package (or villa): the start date is frozen, and a package
+      {/* Locked package (or villa): the start date is frozen, and a package
           fixes everything else already — so there's nothing left to edit here
           beyond cancelling. */}
       <div className="mt-5">
-        {archived ? (
+        {locked ? (
           <>
             <div className="rounded-[10px] border-[1.5px] border-[#ddd] p-[15px]">
               <span className="block text-[15px] font-medium leading-[1.2] text-[#121212]">
@@ -826,7 +904,7 @@ function PackageManageCard({
                 {stayNights === 1 ? "" : "s"}
               </span>
             </div>
-            <ArchivedDatesNotice packageStay />
+            <LockedDatesNotice packageStay />
           </>
         ) : (
           <StartDateField

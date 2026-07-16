@@ -60,6 +60,7 @@ function BookingSummary({
   plan = [],
   pkg = null,
   modify,
+  pay,
 }: {
   villa: VillaRow;
   nights: number;
@@ -77,6 +78,9 @@ function BookingSummary({
   /** Set when this is a booking modification: shows the amount already paid and
    *  the balance due now (the top-up) instead of a single total. */
   modify?: { alreadyPaid: number; balanceDue: number };
+  /** Set when settling an owner-arranged stay: the owner's discount, any credit
+   *  from a merged (already-paid) stay, and the net amount due. */
+  pay?: { hostDiscount: number; credit: number; amount: number };
 }) {
   // Charge the room-nights actually held. With a constant room count this is
   // identical to the old price × rooms, while the length-of-stay discount keeps
@@ -210,7 +214,7 @@ function BookingSummary({
             </div>
           ))}
           <div className="flex items-center justify-between pt-8 font-semibold">
-            <dt>{modify ? "New total (USD)" : "Total (USD)"}</dt>
+            <dt>{modify || pay ? "New total (USD)" : "Total (USD)"}</dt>
             <dd>${(q.total + extrasTotal).toFixed(2)}</dd>
           </div>
           {modify && (
@@ -222,6 +226,29 @@ function BookingSummary({
               <div className="flex items-center justify-between font-semibold text-brand">
                 <dt>Balance due now</dt>
                 <dd>${modify.balanceDue.toFixed(2)}</dd>
+              </div>
+            </>
+          )}
+          {/* An owner-arranged stay may carry the owner's promised discount and,
+              on a merged upgrade, credit for the stay the guest already paid —
+              each on its own line so the final figure explains itself. */}
+          {pay && (
+            <>
+              {pay.hostDiscount > 0 && (
+                <div className="flex items-center justify-between text-brand">
+                  <dt>Host&rsquo;s discount</dt>
+                  <dd>−${pay.hostDiscount.toFixed(2)}</dd>
+                </div>
+              )}
+              {pay.credit > 0 && (
+                <div className="flex items-center justify-between text-[#4a4a4a]">
+                  <dt>Your earlier stay (already paid)</dt>
+                  <dd>−${pay.credit.toFixed(2)}</dd>
+                </div>
+              )}
+              <div className="flex items-center justify-between font-semibold text-brand">
+                <dt>Due now</dt>
+                <dd>${pay.amount.toFixed(2)}</dd>
               </div>
             </>
           )}
@@ -286,26 +313,26 @@ export default async function PaymentPage({
   // Owners can't book their own villa — send them to its manage view.
   if (villa.owner_id === user.id) redirect(`/place?id=${villa.id}`);
 
-  // Archived: no NEW booking can be checked out here — back to the listing,
+  // Locked: no NEW booking can be checked out here — back to the listing,
   // which explains it isn't taking bookings. A `modify` top-up is deliberately
-  // still allowed through: on an archived stay the guest may add rooms/guests
+  // still allowed through: on a locked stay the guest may add rooms/guests
   // and owes the difference, and modifyBookingAction is what enforces that its
   // dates don't move. Gating this on `modify` is what keeps that flow alive.
   // Paying for a stay that already exists is exempt for the same reason modify
-  // is: the booking was made before (or despite) the archive, and the guest
+  // is: the booking was made before (or despite) the lock, and the guest
   // still owes for it.
-  if (villa.archived_at !== null && !params.modify && !payBooking)
+  if (villa.locked_at !== null && !params.modify && !payBooking)
     redirect(`/place?id=${villa.id}`);
 
   const roomBased = isRoomBased(villa.kind);
 
   // Package mode: a package fixes the duration, occupancy and price server-side
   // (the guest only chose a start date). Load it and verify it's this villa's.
-  // An archived package can't start a new booking (packages have no top-up
+  // A locked package can't start a new booking (packages have no top-up
   // flow — their price is fixed — so there's no modify exception to make).
   const pkgId = Number(params.pkg);
   const pkg = Number.isInteger(pkgId) ? await getPackageById(pkgId) : null;
-  if (params.pkg && (!pkg || pkg.villaId !== villa.id || pkg.archived))
+  if (params.pkg && (!pkg || pkg.villaId !== villa.id || pkg.locked))
     redirect(`/place?id=${villa.id}`);
 
   let checkIn: string;
@@ -319,12 +346,15 @@ export default async function PaymentPage({
 
   if (payBooking) {
     // Nothing to choose: the owner already set these terms and the guest is
-    // simply settling them.
+    // simply settling them. A stay the owner fulfilled night by night carries
+    // its legs, so the summary itemizes them instead of pretending one count
+    // fits every night.
     checkIn = payBooking.checkIn;
     checkOut = payBooking.checkOut;
     guests = payBooking.guests;
     rooms = payBooking.rooms;
     extras = payBooking.extras;
+    plan = payBooking.plan ?? [];
   } else if (pkg) {
     // Only the start date is the guest's; it must be real and not in the past.
     // Everything else is derived from the package.
@@ -400,11 +430,16 @@ export default async function PaymentPage({
     }
 
     rooms = plan.length > 0 ? planMaxRooms(plan) : roomsWanted;
-    // Occupancy follows the rooms the stay peaks at (`rooms`), matching the
-    // booking card and createBookingAction — an adjusted stay isn't held to its
-    // leanest night.
+    // Occupancy sums what EACH leg of an adjusted stay sleeps, matching the
+    // booking card and createBookingAction — a 1-room leg plus a 6-room leg
+    // offers 2 + 12 guests, not the peak leg's 12.
     const cap = roomBased
-      ? Math.max(1, rooms * villa.people_per_room)
+      ? Math.max(
+          1,
+          plan.length > 0
+            ? plan.reduce((s, leg) => s + leg.rooms * villa.people_per_room, 0)
+            : rooms * villa.people_per_room,
+        )
       : Math.max(1, villa.max_guests);
     guests = Math.min(cap, guestsWanted);
 
@@ -483,13 +518,18 @@ export default async function PaymentPage({
   // engine anyway. If the rooms went in the meantime, the guest is told here
   // rather than after being charged.
   const available = payBooking
-    ? await isVillaAvailable(
-        villa.id,
-        checkIn,
-        checkOut,
-        rooms,
-        payBooking.id,
-      )
+    ? plan.length > 0
+      ? // An owner-fulfilled adjusted stay: leg by leg here too — its `rooms`
+        // column carries the PEAK night, and demanding that every night would
+        // reject the very stay being paid for.
+        await isPlanAvailable(villa.id, plan, payBooking.id)
+      : await isVillaAvailable(
+          villa.id,
+          checkIn,
+          checkOut,
+          rooms,
+          payBooking.id,
+        )
     : plan.length > 0
       ? await isPlanAvailable(villa.id, plan)
       : await isVillaAvailable(
@@ -547,10 +587,29 @@ export default async function PaymentPage({
                         <path d="M12 8v5m0 3h.01M12 21a9 9 0 100-18 9 9 0 000 18Z" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
                       </svg>
                       <span>
-                        <span className="font-semibold">{payBooking.hostName}</span>{" "}
-                        booked this stay for you at {villa.name} and is asking you
-                        to pay for it. Your room{payBooking.rooms === 1 ? " is" : "s are"}{" "}
-                        already held for {formatDay(checkIn)} – {formatDay(checkOut)}.
+                        {payBooking.upgraded ? (
+                          <>
+                            <span className="font-semibold">{payBooking.hostName}</span>{" "}
+                            upgraded your existing stay at {villa.name} — it now
+                            covers {formatDay(checkIn)} – {formatDay(checkOut)} with{" "}
+                            {payBooking.rooms} room{payBooking.rooms === 1 ? "" : "s"}.
+                            What you already paid is credited below; only the
+                            difference is due.
+                          </>
+                        ) : (
+                          /* A pending owner-made stay holds NOTHING until it's
+                             paid — saying "already held" here would promise
+                             rooms someone else can still take. */
+                          <>
+                            <span className="font-semibold">{payBooking.hostName}</span>{" "}
+                            booked this stay for you at {villa.name} and is asking you
+                            to pay for it. Paying is what reserves the room
+                            {payBooking.rooms === 1 ? "" : "s"} for{" "}
+                            {formatDay(checkIn)} – {formatDay(checkOut)} — until
+                            then {payBooking.rooms === 1 ? "it isn't" : "they aren't"}{" "}
+                            held.
+                          </>
+                        )}
                       </span>
                     </p>
                   ) : (
@@ -673,6 +732,15 @@ export default async function PaymentPage({
               plan={plan}
               pkg={pkg}
               modify={isModify ? { alreadyPaid, balanceDue } : undefined}
+              pay={
+                payBooking
+                  ? {
+                      hostDiscount: payBooking.hostDiscount,
+                      credit: payBooking.credit,
+                      amount: payBooking.amount,
+                    }
+                  : undefined
+              }
             />
           </div>
         </div>

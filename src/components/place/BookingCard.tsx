@@ -14,6 +14,7 @@ import { loginHref } from "@/lib/returnTo";
 import { MAX_CALL_MESSAGE } from "@/lib/callRequest";
 import { requestCallAction } from "@/lib/actions";
 import DateRangeField from "@/components/home/DateRangeField";
+import PickerField from "@/components/ui/PickerField";
 import type { BookedRange } from "@/lib/queries";
 import type { VillaService } from "@/components/host/draft";
 import {
@@ -21,6 +22,7 @@ import {
   isGraduated,
   MAX_ROOMS_PER_GUEST,
   neededSpan,
+  nightsInRange,
   planMaxRooms,
   planMinRooms,
   planRoomNights,
@@ -184,21 +186,6 @@ export default function BookingCard({
   // Every room is taken for the needed range — no inventory to offer.
   const soldOut = roomBased && datesReady && !covered && roomsFree === 0;
 
-  // How the stay splits if the guest takes as many rooms as each night allows —
-  // limited by free inventory AND by their own remaining allowance, so nights
-  // where they already hold rooms offer only what's left of the six.
-  const plan =
-    roomBased && datesReady && !covered && !gapSplit && !soldOut
-      ? roomPlanFor(
-          effIn,
-          effOut,
-          roomBookings,
-          totalRooms,
-          roomsWanted,
-          myRoomBookings,
-          MAX_ROOMS_PER_GUEST,
-        )
-      : [];
   /* Where an ask that self-serve can't take goes. Only these two are dead ends
      the HOST can still fix, so the Reserve button becomes "request a call"
      rather than a refusal:
@@ -214,13 +201,72 @@ export default function BookingCard({
   const overRoomCap = roomBased && datesReady && roomsWanted > MAX_ROOMS_PER_GUEST;
   const needsCall = overStay || overRoomCap;
 
-  // Worth offering only when the count actually changes part-way through AND
-  // self-serve could finish it. Asking over the cap graduates the plan too (the
-  // allowance caps the good nights at six while lean nights give less), but
-  // adjusting can't rescue an ask that's out of bounds to begin with — that goes
-  // to the host, so don't offer a split next to a button that says it can't.
+  // How the stay splits if the guest takes as many rooms as each night allows.
+  // Within self-serve, each night is limited by free inventory AND their own
+  // remaining allowance. Past the cap (needsCall) the HOST arranges the stay
+  // and the allowance doesn't bind — only the building does — so the preview
+  // (rooms, guests, price sent with the request) shows what the host would set
+  // up, not a meaningless allowance-clamped sliver.
+  const plan =
+    roomBased && datesReady && !covered && !gapSplit && !soldOut
+      ? roomPlanFor(
+          effIn,
+          effOut,
+          roomBookings,
+          totalRooms,
+          roomsWanted,
+          myRoomBookings,
+          needsCall ? Infinity : MAX_ROOMS_PER_GUEST,
+        )
+      : [];
+
+  // Rooms the guest already holds on the nights being priced — shown alongside
+  // the per-leg amounts so the totals read as "added on top of what you have",
+  // never as if the held rooms vanished or were charged twice.
+  const heldOverlaps = roomBased
+    ? myRoomBookings.filter((b) => b.checkIn < effOut && b.checkOut > effIn)
+    : [];
+  // Room-value of those held rooms across the priced span — the "already paid"
+  // line the totals subtract. Computed per NIGHT off the same data as the leg
+  // lines, so legs-minus-this always equals the net subtotal being charged.
+  const heldValue = roomBased
+    ? nightsInRange(effIn, effOut).reduce(
+        (sum, night) => sum + roomsBookedOn(night, myRoomBookings) * price,
+        0,
+      )
+    : 0;
+  // What those earlier checkouts actually CHARGED — room price, long-stay
+  // discount and service fee, the same quote they paid (add-ons aside). This is
+  // the figure the guest can find on their statement, the credit the server
+  // stores at fulfilment, and the deduction the payment page shows — so the
+  // preview here, the owner's preview and the final receipt all tell one story.
+  const heldParts = heldOverlaps.map((b) =>
+    quote(
+      price * Math.max(1, b.rooms),
+      Math.max(1, nightsBetween(b.checkIn, b.checkOut)),
+      discount,
+    ),
+  );
+  const heldPaid = heldParts.reduce((sum, p) => sum + p.total, 0);
+  const heldFee = heldParts.reduce((sum, p) => sum + p.serviceFee, 0);
+  const heldDiscount = heldParts.reduce((sum, p) => sum + p.discountAmount, 0);
+  // The paid-amount framing only adds up when every earlier stay sits inside
+  // the nights being priced; one poking outside falls back to deducting the
+  // in-span room value, which stays exact there.
+  const heldWithin =
+    heldOverlaps.length > 0 &&
+    heldOverlaps.every((b) => b.checkIn >= effIn && b.checkOut <= effOut);
+
+  // The opt-in split is only OFFERED when self-serve could finish it — past the
+  // cap the split still exists but it's the host's to arrange, so no radio.
   const canAdjust = isGraduated(plan) && !needsCall;
-  const adjusted = canAdjust && flexSel;
+  // What the pricing/rooms/guests derive from: the guest's accepted split, or —
+  // in call mode — the host-arranged split being previewed.
+  const adjusted = (canAdjust && flexSel) || (needsCall && isGraduated(plan));
+  // Show the receipt the way the payment page and the owner's preview show it:
+  // full stay (fee included) minus the amount actually paid before. One story
+  // on every surface, and the deduction matches the guest's bank statement.
+  const paidFraming = adjusted && heldWithin;
 
   // The most a FLAT stay can hold: the same count every night, so it's the
   // tightest night once BOTH the hotel's inventory and this guest's own
@@ -236,13 +282,17 @@ export default function BookingCard({
   // Rooms held: an adjusted stay peaks at the plan's best night; a flat stay
   // sits at the bottleneck.
   const rooms = roomBased ? (adjusted ? planMaxRooms(plan) : flatRooms) : 1;
-  // Occupancy follows the rooms the stay PEAKS at, not its thinnest leg: an
-  // adjusted stay is offered so a party doesn't have to shrink to the leanest
-  // night, and capping guests there would defeat that — a 4-room party would be
-  // held to a 2-room cap by two tight nights. They're told the split before
-  // confirming and can ask the host for the full count on every night instead.
+  // Occupancy: a flat stay sleeps rooms × per-room. An adjusted stay sums what
+  // EACH leg sleeps — a 1-room leg (2 guests) plus a 6-room leg (12) offers 14,
+  // not the peak leg's 12: the legs host on different nights, and holding the
+  // whole stay to one leg's ceiling would undersell every other leg.
   const guestCap = roomBased
-    ? Math.max(1, rooms * peoplePerRoom)
+    ? Math.max(
+        1,
+        adjusted && plan.length > 0
+          ? plan.reduce((sum, leg) => sum + leg.rooms * peoplePerRoom, 0)
+          : rooms * peoplePerRoom,
+      )
     : Math.max(1, maxGuests);
   const guests = Math.min(Math.max(1, guestsSel), guestCap);
 
@@ -424,105 +474,105 @@ export default function BookingCard({
         />
       </div>
 
-      {/* Hotels/resorts sell individual rooms — pick how many, then guests. */}
+      {/* Hotels/resorts sell individual rooms — pick how many, then guests.
+          The whole inventory is offered, not just what's free every night —
+          asking for more is what surfaces the adjusted-stay option below,
+          instead of silently capping the guest at the leanest night. It's
+          not capped by the per-guest allowance either: going past that is a
+          legitimate ask, it just gets arranged on a call — those counts read
+          different before they're picked: dimmed, ☎-marked, tooltipped. */}
       {roomBased && (
-        <label
-          htmlFor="booking-rooms"
-          className={`relative mt-[22px] flex items-center justify-between rounded-[10px] border-[1.5px] p-[15px] ${
-            soldOut
-              ? "cursor-not-allowed border-[#f0c4c0]"
-              : "cursor-pointer border-[#ddd]"
-          }`}
-        >
-          <span className="min-w-0">
-            <span className="block text-[18px] font-medium leading-[1.2] text-[#121212]">
-              Rooms
-            </span>
-            <span className="mt-0.5 block text-[16px] leading-[1.2]">
-              {soldOut ? (
-                <span className="font-medium text-[#c0392b]">
-                  Sold out for these dates
-                </span>
-              ) : (
-                <span className="text-[#4a4a4a]">
-                  {roomsWanted} {roomsWanted === 1 ? "room" : "rooms"}
-                  {datesReady && (
-                    <span className="text-[#8a8a94]">
-                      {" "}
-                      · {roomsFree} available
-                      {canAdjust ? " all nights" : ""}
-                    </span>
-                  )}
-                  {/* Not an error — it just means this ask goes via the host.
-                      Same ☎ mark the dropdown option carried, so the closed box
-                      keeps telling the same story. */}
-                  {overRoomCap && (
-                    <span
-                      className="font-medium text-[#8a6a1f]"
-                      title={`More than ${MAX_ROOMS_PER_GUEST} rooms can't be booked online — request a call below and the host will arrange it with you.`}
-                    >
-                      {" "}
-                      · ☎ over the {MAX_ROOMS_PER_GUEST}-room online limit
-                    </span>
-                  )}
-                  {/* The ask is short but evenly so, i.e. there's no split to
-                      offer — say what they'd actually get rather than quietly
-                      booking them fewer rooms than the picker shows. */}
-                  {!overRoomCap && !canAdjust && !soldOut && flatRooms < roomsWanted && (
-                    <span className="font-medium text-[#8a6a1f]">
-                      {" "}
-                      · only {flatRooms} bookable by you
-                    </span>
-                  )}
-                </span>
-              )}
-            </span>
-          </span>
-          <img
-            src="/icons/place/dropdown.svg"
-            alt=""
-            width={49}
-            height={49}
-            className="pointer-events-none h-[49px] w-[49px] shrink-0"
-          />
-          {/* The whole inventory is offered, not just what's free every night —
-              asking for more is what surfaces the adjusted-stay option below,
-              instead of silently capping the guest at the leanest night. It's
-              not capped by the per-guest allowance either: going past that is a
-              legitimate ask, it just gets arranged on a call. */}
-          <select
-            id="booking-rooms"
-            value={roomsWanted}
-            onChange={(e) => setRoomsSel(Number(e.target.value))}
-            disabled={soldOut}
-            aria-label="Number of rooms"
-            className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
-          >
-            {Array.from({ length: roomsOfferable }, (_, i) => i + 1).map((n) => {
-              // Counts over the online cap are still offered (the host can
-              // arrange them), but they must READ different before the guest
-              // picks one: dimmed, marked with a phone, and a hover tooltip
-              // saying how such a block actually gets booked.
+        <PickerField
+          label="Rooms"
+          ariaLabel="Number of rooms"
+          value={roomsWanted}
+          onChange={(n) => setRoomsSel(n)}
+          disabled={soldOut}
+          boxClassName={soldOut ? "border-[#f0c4c0]" : "border-[#ddd]"}
+          options={Array.from({ length: roomsOfferable }, (_, i) => i + 1).map(
+            (n) => {
               const viaHost = n > MAX_ROOMS_PER_GUEST;
-              return (
-                <option
-                  key={n}
-                  value={n}
-                  title={
-                    viaHost
-                      ? `More than ${MAX_ROOMS_PER_GUEST} rooms can't be booked online — pick this and request a call, and the host will arrange it with you.`
-                      : undefined
-                  }
-                  style={viaHost ? { color: "#a8a8b0" } : undefined}
-                >
-                  {n} {n === 1 ? "room" : "rooms"}
-                  {viaHost ? " · ☎ host arranges" : ""}
-                </option>
-              );
-            })}
-          </select>
-        </label>
+              return {
+                value: n,
+                label: `${n} ${n === 1 ? "room" : "rooms"}`,
+                hint: viaHost ? "☎ host arranges" : undefined,
+                dimmed: viaHost,
+                title: viaHost
+                  ? `More than ${MAX_ROOMS_PER_GUEST} rooms can't be booked online — pick this and request a call, and the host will arrange it with you.`
+                  : undefined,
+              };
+            },
+          )}
+          display={
+            soldOut ? (
+              <span className="font-medium text-[#c0392b]">
+                Sold out for these dates
+              </span>
+            ) : (
+              <span className="text-[#4a4a4a]">
+                {roomsWanted} {roomsWanted === 1 ? "room" : "rooms"}
+                {datesReady && (
+                  <span className="text-[#8a8a94]">
+                    {" "}
+                    · {roomsFree} available
+                    {canAdjust ? " all nights" : ""}
+                  </span>
+                )}
+                {/* Not an error — it just means this ask goes via the host.
+                    Same ☎ mark the dropdown option carried, so the closed box
+                    keeps telling the same story. */}
+                {overRoomCap && (
+                  <span
+                    className="font-medium text-[#8a6a1f]"
+                    title={`More than ${MAX_ROOMS_PER_GUEST} rooms can't be booked online — request a call below and the host will arrange it with you.`}
+                  >
+                    {" "}
+                    · ☎ over the {MAX_ROOMS_PER_GUEST}-room online limit
+                  </span>
+                )}
+                {/* The ask is short but evenly so, i.e. there's no split to
+                    offer — say what they'd actually get rather than quietly
+                    booking them fewer rooms than the picker shows. */}
+                {!overRoomCap && !canAdjust && !soldOut && flatRooms < roomsWanted && (
+                  <span className="font-medium text-[#8a6a1f]">
+                    {" "}
+                    · only {flatRooms} bookable by you
+                  </span>
+                )}
+              </span>
+            )
+          }
+        />
       )}
+
+      {/* The ask can't be met and flexing wouldn't help either — EVERY night
+          bottoms out at the same smaller count, so there's no adjustment to
+          offer, just a smaller stay. Never bill it silently: say what they're
+          actually getting and why before the price panel shows it. */}
+      {roomBased &&
+        datesReady &&
+        !covered &&
+        !gapSplit &&
+        !soldOut &&
+        !canAdjust &&
+        !needsCall &&
+        roomsWanted > rooms && (
+          <div className="mt-[22px] rounded-[10px] border-[1.5px] border-[#e8d5a3] bg-[#fdf9f0] p-[15px] text-[14px] leading-[1.5] text-[#7a6a45]">
+            <p className="text-[16px] font-semibold leading-[1.3] text-[#8a6a1f]">
+              Only {rooms} room{rooms === 1 ? "" : "s"} a night for these dates
+            </p>
+            <p className="mt-1">
+              {rooms < roomsFree
+                ? `Rooms already booked in your name leave you ${rooms} more a night here — one guest can hold ${MAX_ROOMS_PER_GUEST}.`
+                : `You asked for ${roomsWanted}, but every night of ${formatRange(
+                    effIn,
+                    effOut,
+                  )} has just ${rooms} room${rooms === 1 ? "" : "s"} left.`}{" "}
+              The price below is for {rooms} room{rooms === 1 ? "" : "s"} — you
+              only pay for what you actually get.
+            </p>
+          </div>
+        )}
 
       {/* The asked-for rooms aren't free every night, but the stay is still
           possible if the room count flexes — show exactly what's free when, and
@@ -612,41 +662,21 @@ export default function BookingCard({
         </div>
       )}
 
-      {/* The native select overlays the whole box (invisible) so clicking
-          anywhere — label, value, or the chevron — opens the dropdown. */}
-      <label
-        htmlFor="booking-guests"
-        className="relative mt-[22px] flex cursor-pointer items-center justify-between rounded-[10px] border-[1.5px] border-[#ddd] p-[15px]"
-      >
-        <span className="min-w-0">
-          <span className="block text-[18px] font-medium leading-[1.2] text-[#121212]">
-            Guests
-          </span>
-          <span className="mt-0.5 block text-[16px] leading-[1.2] text-[#4a4a4a]">
+      <PickerField
+        label="Guests"
+        ariaLabel="Number of guests"
+        value={guests}
+        onChange={(n) => setGuestsSel(n)}
+        options={Array.from({ length: guestCap }, (_, i) => i + 1).map((n) => ({
+          value: n,
+          label: `${n} ${n === 1 ? "guest" : "guests"}`,
+        }))}
+        display={
+          <>
             {guests} {guests === 1 ? "guest" : "guests"}
-          </span>
-        </span>
-        <img
-          src="/icons/place/dropdown.svg"
-          alt=""
-          width={49}
-          height={49}
-          className="pointer-events-none h-[49px] w-[49px] shrink-0"
-        />
-        <select
-          id="booking-guests"
-          value={guests}
-          onChange={(e) => setGuestsSel(Number(e.target.value))}
-          aria-label="Number of guests"
-          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-        >
-          {Array.from({ length: guestCap }, (_, i) => i + 1).map((n) => (
-            <option key={n} value={n}>
-              {n} {n === 1 ? "guest" : "guests"}
-            </option>
-          ))}
-        </select>
-      </label>
+          </>
+        }
+      />
 
       {/* Paid add-ons, pickable right here on the details page — the choices
           carry into checkout (and back again if the guest edits their booking). */}
@@ -786,34 +816,111 @@ export default function BookingCard({
       )}
 
       <dl className="mt-[45px] space-y-[18px] text-[20px] leading-[1.2] text-black">
-        <div className="flex items-center justify-between">
-          <dt>
-            {adjusted ? (
-              // Rooms vary night to night, so "× N rooms × M nights" would be a
-              // lie — bill the room-nights actually held instead.
-              <>
-                ${price} × {roomNights} room-night{roomNights === 1 ? "" : "s"}
-              </>
-            ) : (
-              <>
-                ${price}
-                {roomBased ? ` × ${rooms} room${rooms === 1 ? "" : "s"}` : ""} ×{" "}
-                {effNights} night{effNights === 1 ? "" : "s"}
-              </>
+        {adjusted ? (
+          /* Rooms vary night to night, so one "× N rooms × M nights" line would
+             be a lie and a bare "21 room-nights" says nothing. Bill the FULL
+             stay leg by leg — the combined room count, including rooms the
+             guest already holds — then take what they already paid back off on
+             its own line, so the total visibly IS "full stay minus what you've
+             paid". The legs sum minus the deduction equals exactly the net
+             room-nights the quote below charges. */
+          <>
+            {plan.map((seg) => {
+              const legNights = Math.max(
+                1,
+                nightsBetween(seg.checkIn, seg.checkOut),
+              );
+              const held = roomsBookedOn(seg.checkIn, myRoomBookings);
+              const combined = held + seg.rooms;
+              return (
+                <div key={seg.checkIn} className="flex items-start justify-between gap-4">
+                  <dt className="min-w-0">
+                    <span className="block text-[16px] text-[#7a7a85]">
+                      {formatRange(seg.checkIn, seg.checkOut)}
+                      {held > 0 && ` · ${held} of these are yours already`}
+                    </span>
+                    ${price} × {combined} room{combined === 1 ? "" : "s"} ×{" "}
+                    {legNights} night{legNights === 1 ? "" : "s"}
+                  </dt>
+                  <dd className="shrink-0 font-light">
+                    ${(price * combined * legNights).toFixed(2)}
+                  </dd>
+                </div>
+              );
+            })}
+            {/* An earlier stay poking outside the priced nights can't be
+                deducted at its full charged amount without the rows no longer
+                adding up — deduct the in-span room value instead, which stays
+                exact. Fully-covered stays take the clearer paid-amount rows
+                after the fee below. */}
+            {!heldWithin && heldValue > 0 && (
+              <div className="flex items-start justify-between gap-4 text-[#1c7d5c]">
+                <dt className="min-w-0">
+                  Already paid — your {heldOverlaps[0]?.rooms ?? 0} room
+                  {(heldOverlaps[0]?.rooms ?? 0) === 1 ? "" : "s"} (
+                  {heldOverlaps[0]
+                    ? formatRange(heldOverlaps[0].checkIn, heldOverlaps[0].checkOut)
+                    : ""}
+                  )
+                </dt>
+                <dd className="shrink-0 font-light">−${heldValue.toFixed(2)}</dd>
+              </div>
             )}
-          </dt>
-          <dd className="font-light">${q.subtotal.toFixed(2)}</dd>
-        </div>
-        {q.discountAmount > 0 && (
+          </>
+        ) : (
+          <div className="flex items-center justify-between">
+            <dt>
+              ${price}
+              {roomBased ? ` × ${rooms} room${rooms === 1 ? "" : "s"}` : ""} ×{" "}
+              {effNights} night{effNights === 1 ? "" : "s"}
+            </dt>
+            <dd className="font-light">${q.subtotal.toFixed(2)}</dd>
+          </div>
+        )}
+        {q.discountAmount + (paidFraming ? heldDiscount : 0) > 0 && (
           <div className="flex items-center justify-between text-brand">
             <dt>{q.discount.label}</dt>
-            <dd className="font-light">−${q.discountAmount.toFixed(2)}</dd>
+            <dd className="font-light">
+              −${(q.discountAmount + (paidFraming ? heldDiscount : 0)).toFixed(2)}
+            </dd>
           </div>
         )}
         <div className="flex items-center justify-between">
           <dt>Service Fee</dt>
-          <dd className="font-light">${q.serviceFee.toFixed(2)}</dd>
+          <dd className="font-light">
+            ${(q.serviceFee + (paidFraming ? heldFee : 0)).toFixed(2)}
+          </dd>
         </div>
+        {paidFraming && (
+          <>
+            <div className="flex items-start justify-between gap-4">
+              <dt className="min-w-0">
+                <span className="block text-[16px] text-[#7a7a85]">
+                  your earlier booking{heldOverlaps.length === 1 ? "" : "s"} and
+                  this one together
+                </span>
+                Full stay
+              </dt>
+              <dd className="shrink-0 font-light">
+                ${(q.total + heldPaid).toFixed(2)}
+              </dd>
+            </div>
+            <div className="flex items-start justify-between gap-4 text-[#1c7d5c]">
+              <dt className="min-w-0">
+                <span className="block text-[16px] text-[#4f9c82]">
+                  {heldOverlaps.length === 1
+                    ? `your ${heldOverlaps[0].rooms}-room booking, ${formatRange(
+                        heldOverlaps[0].checkIn,
+                        heldOverlaps[0].checkOut,
+                      )} · service fee included`
+                    : `your ${heldOverlaps.length} earlier bookings on these nights · service fees included`}
+                </span>
+                You already paid
+              </dt>
+              <dd className="shrink-0 font-light">−${heldPaid.toFixed(2)}</dd>
+            </div>
+          </>
+        )}
         {chosenTotal > 0 && (
           <div className="flex items-center justify-between">
             <dt>Extra services</dt>
@@ -826,6 +933,12 @@ export default function BookingCard({
         <p>Total before taxes</p>
         <p>${(q.total + chosenTotal).toFixed(2)}</p>
       </div>
+      {paidFraming && (
+        <p className="mt-4 text-center text-[13px] text-[#7a7a85]">
+          You only pay the difference — what you paid earlier is taken off
+          above, service fee and all.
+        </p>
+      )}
       {hasLongStayPackages && (
         <p className="mt-4 text-center text-[13px] text-[#7a7a85]">
           Stay 7+ nights for 15% off, 28+ nights for 30% off — applied automatically.

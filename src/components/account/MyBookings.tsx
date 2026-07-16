@@ -8,6 +8,7 @@ import Dropdown from "@/components/ui/Dropdown";
 import AccountSearch, { matchesSearch } from "@/components/account/AccountSearch";
 import type { BookingItem } from "@/lib/queries";
 import { bookingReference } from "@/lib/pricing";
+import { formatRange } from "@/lib/dates";
 import { isRoomBased } from "@/lib/rooms";
 
 /* eslint-disable @next/next/no-img-element */
@@ -206,9 +207,68 @@ function BookingDetails({ b }: { b: BookingItem }) {
           <Stat label="Stay length" value={`${b.nights} night${b.nights === 1 ? "" : "s"}`} />
         )}
         {roomBased && (
-          <Stat label="Rooms" value={`${b.rooms} room${b.rooms === 1 ? "" : "s"}`} />
+          <Stat
+            label="Rooms"
+            value={
+              b.plan
+                ? // `rooms` alone would show only the peak night — say the
+                  // range and let the legs below carry the detail.
+                  `${Math.min(...b.plan.map((s) => s.rooms))}–${Math.max(
+                    ...b.plan.map((s) => s.rooms),
+                  )} by night`
+                : `${b.rooms} room${b.rooms === 1 ? "" : "s"}`
+            }
+          />
         )}
       </div>
+
+      {/* A stay the host arranged night by night: list exactly which nights
+          hold how many rooms — "9 rooms" alone would promise the peak count
+          for the whole stay. */}
+      {b.plan && (
+        <div className="mt-4 border-t border-[#ececf0] pt-3">
+          <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[#9a9aa5]">
+            Rooms by night
+          </p>
+          <ul className="mt-2 max-w-[360px] space-y-1.5">
+            {b.plan.map((seg) => (
+              <li
+                key={seg.checkIn}
+                className="flex items-center justify-between gap-4 text-[13px]"
+              >
+                <span className="truncate text-[#3a3a44]">
+                  {formatRange(seg.checkIn, seg.checkOut)}
+                </span>
+                <span className="shrink-0 font-semibold text-[#121212]">
+                  {seg.rooms} room{seg.rooms === 1 ? "" : "s"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* A due amount never stands alone — spell out the same receipt the host
+          saw when arranging it: full stay, their discount, what the earlier
+          absorbed stay already paid. */}
+      {b.paymentDue && b.pay && (b.pay.hostDiscount > 0 || b.pay.alreadyPaid > 0) && (
+        <p className="mt-3 text-[12.5px] leading-[1.7] text-[#6a6a72]">
+          Full stay <span className="font-semibold text-[#121212]">${b.pay.fullStay.toFixed(2)}</span>
+          {b.pay.hostDiscount > 0 && (
+            <>
+              {" "}− host&rsquo;s discount{" "}
+              <span className="font-semibold text-brand">${b.pay.hostDiscount.toFixed(2)}</span>
+            </>
+          )}
+          {b.pay.alreadyPaid > 0 && (
+            <>
+              {" "}− already paid{" "}
+              <span className="font-semibold text-[#1c7d5c]">${b.pay.alreadyPaid.toFixed(2)}</span>
+            </>
+          )}
+          {" "}= <span className="font-semibold text-[#121212]">${b.amountPaid.toFixed(2)} due</span>
+        </p>
+      )}
 
       {b.extras.length > 0 && (
         <div className="mt-4 border-t border-[#ececf0] pt-3">
@@ -427,14 +487,29 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
             b={b}
             actions={
               <>
-                {/* Active means paid: an unpaid host-made booking is 'pending'
-                    and lives in Payment Due above, so nothing here is unpaid. */}
-                <span
-                  className="rounded-[3px] bg-[#e9e8fd] px-2 py-0.5 text-[11px] font-semibold text-brand"
-                  title="Paid — your stay is confirmed"
-                >
-                  Confirmed
-                </span>
+                {/* Active normally means paid — the one exception is a stay the
+                    host UPGRADED (folded a bigger request into it): its rooms
+                    are held, but the difference is still owed. */}
+                {b.paymentDue ? (
+                  <>
+                    <span className="rounded-[3px] bg-[#fff3d6] px-2 py-0.5 text-[11px] font-semibold text-[#a06a00]">
+                      Balance due
+                    </span>
+                    <Link
+                      href={`/payment?pay=${b.id}`}
+                      className="rounded-[6px] bg-brand px-3 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-brand-dark"
+                    >
+                      Pay ${b.amountPaid.toFixed(2)}
+                    </Link>
+                  </>
+                ) : (
+                  <span
+                    className="rounded-[3px] bg-[#e9e8fd] px-2 py-0.5 text-[11px] font-semibold text-brand"
+                    title="Paid — your stay is confirmed"
+                  >
+                    Confirmed
+                  </span>
+                )}
                 {/* A booking can only be cancelled while it's still upcoming. */}
                 {b.upcoming && (
                   <Link

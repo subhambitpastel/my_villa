@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { ownerCancelBookingAction } from "@/lib/actions";
 import Dropdown from "@/components/ui/Dropdown";
+import { bookingReference } from "@/lib/pricing";
+import { formatRange } from "@/lib/dates";
 import type { RequestItem } from "@/lib/queries";
 
 const GRID = "grid grid-cols-[1.4fr_1.2fr_1fr_0.9fr_0.8fr] items-center gap-2";
@@ -22,6 +24,252 @@ const STATUS_LABEL: Record<string, string> = {
 /** Never guess "Confirmed" for an unknown status — that's how a pending,
  *  room-holding-nothing booking came to read as confirmed. */
 const statusLabel = (status: string) => STATUS_LABEL[status] ?? status;
+
+/** Chevron that points down, rotating up when the row is expanded. */
+function ExpandIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="10"
+      height="7"
+      viewBox="0 0 9 6"
+      fill="none"
+      aria-hidden="true"
+      className={`mt-1 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
+    >
+      <path d="M1 1l3.5 3.5L8 1" stroke="#4a4a4a" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  accent = false,
+}: {
+  label: string;
+  value: string;
+  accent?: boolean;
+}) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[#9a9aa5]">
+        {label}
+      </p>
+      <p
+        className={`mt-1 truncate text-[15px] font-semibold ${
+          accent ? "text-brand" : "text-[#121212]"
+        }`}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+/** Everything about a booking the collapsed row has no room for. Deliberately
+ *  the host's view of it: what it's worth, how to reach the guest, and what
+ *  they're actually getting — none of which the tenant/dates/guests line says. */
+function RequestDetails({ r }: { r: RequestItem }) {
+  const money = r.money;
+  const showReceipt = money.hostDiscount > 0 || money.alreadyPaid > 0;
+  return (
+    <div className="border-t border-[#ececf0] bg-[#faf9fc] px-4 py-4">
+      <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
+        {/* The same figure the guest sees — paid, or owed while it's due. */}
+        <Stat
+          label={r.paymentDue ? "Amount due" : "Amount paid"}
+          value={`$${r.amount.toFixed(2)}`}
+          accent
+        />
+        <Stat label="Reference" value={bookingReference(r.id)} />
+        {r.nights > 0 && (
+          <Stat
+            label="Stay length"
+            value={`${r.nights} night${r.nights === 1 ? "" : "s"}`}
+          />
+        )}
+        <Stat label="Rooms" value={`${r.rooms} room${r.rooms === 1 ? "" : "s"}`} />
+        <Stat label="Booked" value={r.bookedAt} />
+      </div>
+
+      {/* An amount that isn't the list price needs its arithmetic shown, or the
+          host can't answer "why this number?" when the guest asks. */}
+      {showReceipt && (
+        <p className="mt-3 text-[12.5px] leading-[1.7] text-[#6a6a72]">
+          Full stay{" "}
+          <span className="font-semibold text-[#121212]">
+            ${money.fullStay.toFixed(2)}
+          </span>
+          {money.hostDiscount > 0 && (
+            <>
+              {" "}
+              − your discount{" "}
+              <span className="font-semibold text-brand">
+                ${money.hostDiscount.toFixed(2)}
+              </span>
+            </>
+          )}
+          {money.alreadyPaid > 0 && (
+            <>
+              {" "}
+              − already paid{" "}
+              <span className="font-semibold text-[#1c7d5c]">
+                ${money.alreadyPaid.toFixed(2)}
+              </span>
+            </>
+          )}{" "}
+          ={" "}
+          <span className="font-semibold text-[#121212]">
+            ${r.amount.toFixed(2)} {r.paymentDue ? "due" : "paid"}
+          </span>
+        </p>
+      )}
+
+      {/* A stay whose room count changes mid-way — spell out the legs, since
+          "5 rooms" above is only its peak. */}
+      {r.roomPlan.length > 1 && (
+        <div className="mt-4 border-t border-[#ececf0] pt-3">
+          <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[#9a9aa5]">
+            Rooms night by night
+          </p>
+          <ul className="mt-2 max-w-[360px] space-y-1.5">
+            {r.roomPlan.map((seg) => (
+              <li
+                key={seg.checkIn}
+                className="flex items-center justify-between gap-4 text-[13px]"
+              >
+                <span className="text-[#3a3a44]">
+                  {formatRange(seg.checkIn, seg.checkOut)}
+                </span>
+                <span className="shrink-0 font-semibold text-[#121212]">
+                  {seg.rooms} room{seg.rooms === 1 ? "" : "s"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {r.extras.length > 0 && (
+        <div className="mt-4 border-t border-[#ececf0] pt-3">
+          <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[#9a9aa5]">
+            Paid add-ons
+          </p>
+          <ul className="mt-2 max-w-[360px] space-y-1.5">
+            {r.extras.map((e) => (
+              <li
+                key={e.name}
+                className="flex items-center justify-between gap-4 text-[13px]"
+              >
+                <span className="truncate text-[#3a3a44]">{e.name}</span>
+                <span className="shrink-0 font-semibold text-[#121212]">
+                  ${e.price.toFixed(2)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {r.package && (
+        <div className="mt-4 border-t border-[#ececf0] pt-3">
+          <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[#9a9aa5]">
+            Package includes
+          </p>
+          <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-[#3a3a44]">
+            {r.package.inclusions.map((inc) => (
+              <li key={inc} className="flex items-center gap-1.5">
+                <span className="h-[5px] w-[5px] shrink-0 rounded-full bg-brand" />
+                {inc}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* The host's reason to open this panel at all is often just "how do I
+          reach them?" — so the contact details are here, not a tab away. */}
+      <div className="mt-4 border-t border-[#ececf0] pt-3">
+        <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[#9a9aa5]">
+          Guest
+        </p>
+        <p className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-[#3a3a44]">
+          <a href={`mailto:${r.guestEmail}`} className="underline hover:opacity-80">
+            {r.guestEmail}
+          </a>
+          {r.guestPhone ? (
+            <a
+              href={`tel:${r.guestPhone.replace(/\s+/g, "")}`}
+              className="underline hover:opacity-80"
+            >
+              {r.guestPhone}
+            </a>
+          ) : (
+            <span className="text-[#a1a1a2]">No phone</span>
+          )}
+          {r.guestCustomerId && (
+            <span className="font-mono text-[12px] text-[#a1a1a2]">
+              {r.guestCustomerId}
+            </span>
+          )}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** A bookings row that expands on click to reveal the whole booking.
+ *  `children` is the right-hand status/action cell — passed in because the
+ *  cancel button lives there and must not toggle the row. */
+function RequestRow({
+  r,
+  children,
+}: {
+  r: RequestItem;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <li className="overflow-hidden rounded-[6px] border border-[#dfdfdf] bg-white">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
+        className={`${GRID} cursor-pointer px-4 py-3 text-[13px] text-[#121212] transition-colors hover:bg-[#faf9ff]`}
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <ExpandIcon open={open} />
+          <Image
+            src={r.avatar}
+            alt=""
+            width={26}
+            height={26}
+            className="h-[26px] w-[26px] shrink-0 rounded-full object-cover"
+          />
+          <span className="min-w-0 truncate">{r.tenant}</span>
+        </span>
+        <span className="min-w-0 truncate">{r.villa}</span>
+        <span title={`Booked on ${r.bookedAt}`}>{r.dates}</span>
+        <span>{r.guests}</span>
+        {/* Cancelling shouldn't toggle the row open on the way past. */}
+        <span
+          className="flex flex-col items-end gap-1.5 text-right"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {children}
+        </span>
+      </div>
+      {open && <RequestDetails r={r} />}
+    </li>
+  );
+}
 
 export default function RentRequests({ requests }: { requests: RequestItem[] }) {
   const router = useRouter();
@@ -79,24 +327,7 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
 
       <ul className="mt-3 space-y-3">
         {villaReqs.map((r) => (
-          <li
-            key={r.id}
-            className={`${GRID} rounded-[6px] border border-[#dfdfdf] bg-white px-4 py-2 text-[13px] text-[#121212]`}
-          >
-            <span className="flex items-center gap-2.5">
-              <Image
-                src={r.avatar}
-                alt=""
-                width={26}
-                height={26}
-                className="h-[26px] w-[26px] rounded-full object-cover"
-              />
-              {r.tenant}
-            </span>
-            <span className="min-w-0 truncate">{r.villa}</span>
-            <span>{r.dates}</span>
-            <span>{r.guests}</span>
-            <span className="flex flex-col items-end gap-1.5 text-right">
+          <RequestRow key={r.id} r={r}>
               <span
                 className={`text-[13px] font-semibold ${
                   r.status === "declined" || r.status === "cancelled"
@@ -108,6 +339,17 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
               >
                 {statusLabel(r.status)}
               </span>
+              {/* Money is still outstanding — "Confirmed" alone would read as
+                  settled. Pending holds nothing; an upgraded stay holds its
+                  rooms while the guest owes the difference. */}
+              {r.paymentDue &&
+                (r.status === "accepted" || r.status === "pending") && (
+                  <span className="rounded-[3px] bg-[#fff3d6] px-1.5 py-0.5 text-[11px] font-semibold text-[#a06a00]">
+                    {r.status === "pending"
+                      ? "Awaiting payment · holds no rooms"
+                      : "Upgrade balance due from guest"}
+                  </span>
+                )}
               {(r.status === "accepted" || r.status === "pending") && (
                 <button
                   type="button"
@@ -118,8 +360,7 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
                   Cancel Booking
                 </button>
               )}
-            </span>
-          </li>
+          </RequestRow>
         ))}
         {villaReqs.length === 0 && (
           <li className="rounded-[6px] border border-[#dfdfdf] px-4 py-4 text-center text-[13px] text-[#a1a1a2]">
@@ -184,6 +425,14 @@ export default function RentRequests({ requests }: { requests: RequestItem[] }) 
                     >
                       {statusLabel(r.status)}
                     </span>
+                    {r.paymentDue &&
+                      (r.status === "accepted" || r.status === "pending") && (
+                        <span className="rounded-[3px] bg-[#fff3d6] px-1.5 py-0.5 text-[11px] font-semibold text-[#a06a00]">
+                          {r.status === "pending"
+                            ? "Awaiting payment · holds no rooms"
+                            : "Upgrade balance due from guest"}
+                        </span>
+                      )}
                     {(r.status === "accepted" || r.status === "pending") && (
                       <button
                         type="button"

@@ -13,7 +13,7 @@ import {
   parseDay,
   MAX_STAY_NIGHTS,
 } from "./dates";
-import { bookingReference } from "./pricing";
+import { bookingReference, quote } from "./pricing";
 import { allocateCustomerId, customerIdPrefix } from "./customerId";
 import { MAX_CALL_MESSAGE } from "./callRequest";
 import { parsePackageType, presetNights, presetDiscount } from "./packageTypes";
@@ -621,14 +621,14 @@ export async function deleteVillaAction(villaId: number): Promise<ActionResult> 
   return { ok: true };
 }
 
-/** Archive (or restore) one of the owner's listings. Archiving retires it
+/** Lock (or restore) one of the owner's listings. Locking retires it
  *  gently: it stops taking new bookings and drops out of search and every other
  *  browse surface, while stays already booked go ahead untouched — which is what
  *  makes this the safe alternative to deleting a villa that guests have booked.
  *  Fully reversible; the flag is the only thing that changes. */
-export async function setVillaArchivedAction(
+export async function setVillaLockedAction(
   villaId: number,
-  archived: boolean,
+  locked: boolean,
 ): Promise<ActionResult> {
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in.");
@@ -640,8 +640,8 @@ export async function setVillaArchivedAction(
   if (!villa) return fail("Property not found.");
 
   await db
-    .prepare("UPDATE villas SET archived_at = ? WHERE id = ?")
-    .run(archived ? new Date().toISOString() : null, villaId);
+    .prepare("UPDATE villas SET locked_at = ? WHERE id = ?")
+    .run(locked ? new Date().toISOString() : null, villaId);
 
   revalidateVillaViews();
   // The listing leaves/rejoins the packages pages and guests' favourites too.
@@ -839,19 +839,19 @@ export async function deletePackageAction(
   return { ok: true };
 }
 
-/** Archive (or restore) a single package: it stops taking new bookings and drops
+/** Lock (or restore) a single package: it stops taking new bookings and drops
  *  off the packages pages, while stays already booked on it go ahead. Restoring
- *  a package on an archived villa won't make it bookable again — the villa's own
- *  archive still suppresses it until that is restored too. */
-export async function setPackageArchivedAction(
+ *  a package on a locked villa won't make it bookable again — the villa's own
+ *  lock still suppresses it until that is restored too. */
+export async function setPackageLockedAction(
   packageId: number,
-  archived: boolean,
+  locked: boolean,
 ): Promise<ActionResult> {
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in.");
   const res = await getDb()
-    .prepare("UPDATE packages SET archived_at = ? WHERE id = ? AND owner_id = ?")
-    .run(archived ? new Date().toISOString() : null, packageId, user.id);
+    .prepare("UPDATE packages SET locked_at = ? WHERE id = ? AND owner_id = ?")
+    .run(locked ? new Date().toISOString() : null, packageId, user.id);
   if (res.changes === 0) return fail("Package not found.");
   revalidatePackageViews();
   return { ok: true };
@@ -1016,9 +1016,9 @@ export async function createBookingAction(input: {
     if (!pkg) return fail("This package is no longer available.");
     if (pkg.villaId !== input.villaId)
       return fail("This package doesn't belong to that villa.");
-    // Archived (directly, or because its villa was archived) — stays already
+    // Locked (directly, or because its villa was locked) — stays already
     // booked still stand, but no new ones are taken.
-    if (pkg.archived)
+    if (pkg.locked)
       return fail("This package is no longer taking bookings.");
   }
 
@@ -1037,7 +1037,7 @@ export async function createBookingAction(input: {
 
   const villa = (await db
     .prepare(
-      `SELECT id, owner_id, kind, rooms, max_guests, people_per_room, services, archived_at
+      `SELECT id, owner_id, kind, rooms, max_guests, people_per_room, services, locked_at
        FROM villas WHERE id = ?`,
     )
     .get(input.villaId)) as
@@ -1049,15 +1049,15 @@ export async function createBookingAction(input: {
         max_guests: number;
         people_per_room: number;
         services: string;
-        archived_at: string | null;
+        locked_at: string | null;
       }
     | undefined;
   if (!villa) return fail("This villa no longer exists.");
   if (villa.owner_id === user.id)
     return fail("You cannot book your own villa.");
-  // The owner archived this listing: existing stays are honoured, new ones are
+  // The owner locked this listing: existing stays are honoured, new ones are
   // refused. This is the single gate every new booking passes through.
-  if (villa.archived_at !== null)
+  if (villa.locked_at !== null)
     return fail("This property is no longer taking bookings.");
 
   // Package occupancy is fixed at the package's max_guests; otherwise the guest
@@ -1177,18 +1177,33 @@ export async function createBookingAction(input: {
           user.id,
         );
         if (plan.length === 0) return { error: noRoomsMsg };
-        // Occupancy follows the rooms the stay PEAKS at, matching the booking
-        // card: an adjusted stay exists so a party isn't held to the leanest
-        // night, so capping guests there would defeat the offer. The guest sees
-        // the split before confirming.
-        const peak = planMaxRooms(plan);
-        const guestCap = peak * perRoom;
-        if (guests > guestCap)
-          return {
-            error: `This stay holds at most ${peak} room${peak === 1 ? "" : "s"}, sleeping up to ${guestCap} guest${guestCap === 1 ? "" : "s"}.`,
-          };
-        if (!(await isPlanAvailable(villa.id, plan))) return { error: noRoomsMsg };
-      } else if (!(await isVillaAvailable(villa.id, bookIn, bookOut, roomsNeeded))) {
+        if (!isGraduated(plan)) {
+          // Every night bottoms out at the same count, so flexing buys nothing
+          // — this is a plain flat stay and gets validated as one below. Never
+          // store the ASK against a flat plan: with 4 free a night, a stale
+          // flex submit for 9 must fail, not book 9.
+          const flatCap = plan[0].rooms * perRoom;
+          if (guests > flatCap)
+            return {
+              error: `${plan[0].rooms} room${plan[0].rooms === 1 ? "" : "s"} sleep${plan[0].rooms === 1 ? "s" : ""} up to ${flatCap} guest${flatCap === 1 ? "" : "s"}.`,
+            };
+          plan = [];
+        } else {
+          // Occupancy sums what EACH leg sleeps, matching the booking card — a
+          // 1-room leg plus a 6-room leg offers 2 + 12 guests, not the peak
+          // leg's 12. The guest sees the split before confirming.
+          const guestCap = plan.reduce((s, leg) => s + leg.rooms * perRoom, 0);
+          if (guests > guestCap)
+            return {
+              error: `Across its legs this stay sleeps up to ${guestCap} guest${guestCap === 1 ? "" : "s"}.`,
+            };
+          if (!(await isPlanAvailable(villa.id, plan))) return { error: noRoomsMsg };
+        }
+      }
+      if (
+        plan.length === 0 &&
+        !(await isVillaAvailable(villa.id, bookIn, bookOut, roomsNeeded))
+      ) {
         return { error: noRoomsMsg };
       }
       // No one guest may take more than MAX_ROOMS_PER_GUEST rooms on a night,
@@ -1197,9 +1212,12 @@ export async function createBookingAction(input: {
       // availability re-check, so two concurrent bookings can't each read a
       // stale count and land the guest over the cap between them.
       if (roomBased) {
-        const fits = flex
-          ? planFitsAllowance(plan, mine)
-          : allowanceFree(bookIn, bookOut, mine) >= roomsNeeded;
+        // Keyed on the plan actually in use, not the flex flag — a flex ask
+        // that degraded to flat above must take the flat allowance path.
+        const fits =
+          plan.length > 0
+            ? planFitsAllowance(plan, mine)
+            : allowanceFree(bookIn, bookOut, mine) >= roomsNeeded;
         if (!fits)
           return { error: roomAllowanceError(allowanceFree(bookIn, bookOut, mine)) };
       }
@@ -1330,8 +1348,8 @@ export async function updateBookingAction(
   const booking = (await db
     .prepare(
       `SELECT b.id, b.villa_id, b.status, b.rooms, b.room_plan, b.package, b.check_in, b.check_out,
-              v.kind, v.max_guests, v.people_per_room, v.archived_at,
-              pk.archived_at AS package_archived_at
+              v.kind, v.max_guests, v.people_per_room, v.locked_at,
+              pk.locked_at AS package_locked_at
        FROM bookings b
        JOIN villas v ON v.id = b.villa_id
        LEFT JOIN packages pk ON pk.id = b.package_id
@@ -1350,20 +1368,20 @@ export async function updateBookingAction(
         kind: string;
         max_guests: number;
         people_per_room: number;
-        archived_at: string | null;
-        package_archived_at: string | null;
+        locked_at: string | null;
+        package_locked_at: string | null;
       }
     | undefined;
   if (!booking) return fail("Booking not found.");
   if (booking.status !== "accepted")
     return fail("Only active bookings can be changed.");
-  // An archived listing (the villa, or the package this stay is on) is winding
+  // A locked listing (the villa, or the package this stay is on) is winding
   // down. The stay stands and everything else about it stays editable, but its
   // DATES are frozen: moving them would commit the place to fresh dates it has
   // stopped taking. This action only ever moves the start date, so on an
-  // archived listing it's the one thing refused. Cancelling stays available.
+  // locked listing it's the one thing refused. Cancelling stays available.
   if (
-    (booking.archived_at !== null || booking.package_archived_at !== null) &&
+    (booking.locked_at !== null || booking.package_locked_at !== null) &&
     input.checkIn !== booking.check_in
   )
     return fail(
@@ -1479,7 +1497,7 @@ export async function modifyBookingAction(
       `SELECT b.id, b.villa_id, b.status, b.package, b.room_plan,
               b.check_in, b.check_out,
               v.kind, v.max_guests, v.people_per_room, v.rooms AS total_rooms, v.services,
-              v.archived_at
+              v.locked_at
        FROM bookings b JOIN villas v ON v.id = b.villa_id
        WHERE b.id = ? AND b.guest_id = ?`,
     )
@@ -1497,18 +1515,18 @@ export async function modifyBookingAction(
         people_per_room: number;
         total_rooms: number;
         services: string;
-        archived_at: string | null;
+        locked_at: string | null;
       }
     | undefined;
   if (!booking) return fail("Booking not found.");
   if (booking.status !== "accepted")
     return fail("Only active bookings can be changed.");
-  // Archived: the dates are frozen, but nothing else is. Rooms, guests and
+  // Locked: the dates are frozen, but nothing else is. Rooms, guests and
   // add-ons can still move — those stay inside the nights the place is already
   // committed to, and they're re-checked against live availability below like
   // any other change. Only re-dating is refused. Cancelling stays available.
   if (
-    booking.archived_at !== null &&
+    booking.locked_at !== null &&
     (input.checkIn !== booking.check_in || input.checkOut !== booking.check_out)
   )
     return fail(
@@ -1859,6 +1877,14 @@ export async function createOwnerBookingAction(input: {
   guests: number;
   rooms?: number;
   services?: number[];
+  /** Owner-granted discount: % off the total, and/or a fixed amount off. Shown
+   *  to the guest at payment exactly as entered here. */
+  discPct?: number;
+  discFixed?: number;
+  /** The ask isn't free every night, and the owner chose to fulfil it with what
+   *  each night has — the same adjusted-stay shape guests can book themselves,
+   *  only bounded by inventory alone (no per-guest allowance for a host). */
+  flex?: boolean;
 }): Promise<BookingResult> {
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in.");
@@ -1866,7 +1892,7 @@ export async function createOwnerBookingAction(input: {
   const db = getDb();
   const villa = (await db
     .prepare(
-      "SELECT id, owner_id, kind, rooms, people_per_room, services FROM villas WHERE id = ?",
+      "SELECT id, owner_id, kind, rooms, max_guests, people_per_room, services, price, discount FROM villas WHERE id = ?",
     )
     .get(input.villaId)) as
     | {
@@ -1874,8 +1900,11 @@ export async function createOwnerBookingAction(input: {
         owner_id: number;
         kind: string;
         rooms: number;
+        max_guests: number;
         people_per_room: number;
         services: string;
+        price: number;
+        discount: number;
       }
     | undefined;
   if (!villa) return fail("This villa no longer exists.");
@@ -1901,7 +1930,8 @@ export async function createOwnerBookingAction(input: {
   if (checkIn < new Date().toISOString().slice(0, 10))
     return fail("Check-in cannot be in the past.");
 
-  // No occupancy cap either — the owner decides how many people they'll host.
+  // Occupancy IS capped — an owner can offer more rooms, not more beds. The
+  // exact ceiling depends on the rooms (or plan) resolved inside the tx below.
   const guests = Math.trunc(Number(input.guests));
   if (!(guests >= 1)) return fail("Guests must be at least 1.");
 
@@ -1927,19 +1957,152 @@ export async function createOwnerBookingAction(input: {
     .map((i) => villaServices[i])
     .filter((s) => s.price > 0);
 
-  let bookingId: number | null = null;
+  // Owner-granted discount, clamped to sane bounds and stored on the booking so
+  // the guest's payment page shows exactly what was promised on the phone.
+  const discPct = Math.min(90, Math.max(0, Math.trunc(Number(input.discPct ?? 0)) || 0));
+  const discFixed = Math.max(
+    0,
+    Math.round((Number(input.discFixed ?? 0) || 0) * 100) / 100,
+  );
+
+  let outcome: { id: number } | { error: string };
   try {
-    bookingId = await tx(async () => {
-      if (!(await isVillaAvailable(villa.id, checkIn, checkOut, roomsNeeded)))
-        return null;
+    outcome = await tx(async () => {
+      /* MERGE: if this guest already holds a stay here that overlaps the new
+         dates, this booking is an UPGRADE of that stay, not a second one — a
+         guest who paid for 5 rooms 24–26 and asked the host for 7 rooms 24–29
+         should end up with ONE booking of 7 rooms 24–29, not 5+7 overlapping.
+         The old row is grown in place (same id, still 'accepted' so the rooms
+         it already paid for stay held) and what was paid for it is stored as a
+         credit against the new total. */
+      const overlapping = (await db
+        .prepare(
+          `SELECT id, check_in, check_out, rooms, room_plan, extras FROM bookings
+           WHERE villa_id = ? AND guest_id = ? AND status = 'accepted'
+             AND package_id IS NULL AND check_in < ? AND check_out > ?`,
+        )
+        .all(villa.id, guestId, checkOut, checkIn)) as {
+        id: number;
+        check_in: string;
+        check_out: string;
+        rooms: number;
+        room_plan: string;
+        extras: string;
+      }[];
+
+      if (overlapping.length > 1)
+        return {
+          error:
+            "This guest has several overlapping stays here — cancel or adjust them from Rent Requests first, then book the combined stay.",
+        };
+      if (overlapping.length === 1 && parseRoomPlan(overlapping[0].room_plan))
+        return {
+          error:
+            "This guest's overlapping stay holds different rooms on different nights, so it can't be folded in automatically. Cancel it from Rent Requests first, then book the combined stay.",
+        };
+
+      // What the stay actually SLEEPS — the guests ceiling for both branches.
+      // Room-based: rooms × per-room occupancy (an adjusted plan sums its
+      // legs below); whole-villa kinds: the listing's own capacity. Enforced
+      // here like everywhere else — an owner can offer more rooms, not more
+      // beds, and a stale client mustn't oversell them.
+      const perRoom = Math.max(1, villa.people_per_room);
+      const flatCap = roomBased
+        ? roomsNeeded * perRoom
+        : Math.max(1, villa.max_guests);
+      const capError = (cap: number) => ({
+        error: `${roomBased ? `${roomsNeeded} room${roomsNeeded === 1 ? "" : "s"} sleep${roomsNeeded === 1 ? "s" : ""}` : "This villa sleeps"} up to ${cap} guest${cap === 1 ? "" : "s"}.`,
+      });
+
+      if (overlapping.length === 1) {
+        const old = overlapping[0];
+        // The upgraded stay covers everything either booking did.
+        const unionIn = old.check_in < checkIn ? old.check_in : checkIn;
+        const unionOut = old.check_out > checkOut ? old.check_out : checkOut;
+        // The old row's own rooms are being replaced, so they don't count
+        // against the upgrade's availability.
+        if (!(await isVillaAvailable(villa.id, unionIn, unionOut, roomsNeeded, old.id)))
+          return { error: "Those rooms aren't free across the combined dates." };
+        if (guests > flatCap) return capError(flatCap);
+
+        // What the guest already paid for the old stay, at the same quote its
+        // checkout used — credited against the upgraded total.
+        const oldExtras = parseServiceList(old.extras);
+        const oldNights = Math.max(1, nightsBetween(old.check_in, old.check_out));
+        const credit =
+          Math.round(
+            (quote(
+              villa.price * (roomBased ? Math.max(1, old.rooms) : 1),
+              oldNights,
+              villa.discount,
+            ).total +
+              oldExtras.reduce((s, e) => s + e.price, 0)) *
+              100,
+          ) / 100;
+
+        // Add-ons the old stay already paid for come along; new picks add to
+        // them (deduped by name — an add-on isn't bought twice).
+        const mergedExtras = [
+          ...oldExtras,
+          ...extras.filter((e) => !oldExtras.some((o) => o.name === e.name)),
+        ];
+
+        await db
+          .prepare(
+            `UPDATE bookings
+             SET dates = ?, check_in = ?, check_out = ?, guests = ?, rooms = ?,
+                 room_plan = '', extras = ?, payment_due = 1,
+                 disc_pct = ?, disc_fixed = ?, paid_credit = ?
+             WHERE id = ?`,
+          )
+          .run(
+            formatRange(unionIn, unionOut),
+            unionIn,
+            unionOut,
+            guests,
+            roomsNeeded,
+            JSON.stringify(mergedExtras),
+            discPct,
+            discFixed,
+            credit,
+            old.id,
+          );
+        return { id: old.id };
+      }
+
+      /* The ask can't be held every night, but the owner chose to give each
+         night what it has — the same room_plan shape guests book themselves,
+         re-derived HERE (inventory-only: a host has no per-guest allowance) so
+         a stale client can't submit legs the calendar has since outgrown. A
+         plan that comes back flat means flexing buys nothing — fall through to
+         the plain flat check below so a too-big ask still fails honestly. */
+      let plan: RoomSegment[] = [];
+      if (roomBased && input.flex) {
+        const offered = await getRoomPlan(villa.id, checkIn, checkOut, roomsNeeded, 0, 0);
+        if (isGraduated(offered) && (await isPlanAvailable(villa.id, offered)))
+          plan = offered;
+      }
+      if (plan.length === 0 && !(await isVillaAvailable(villa.id, checkIn, checkOut, roomsNeeded)))
+        return {
+          error: roomBased
+            ? "Those rooms aren't free for these dates. Try fewer rooms or different dates."
+            : "This villa is already booked for those dates. Try different dates.",
+        };
+      // An adjusted stay sleeps what its legs sleep, summed — same rule the
+      // guest flow enforces.
+      const cap =
+        plan.length > 0
+          ? plan.reduce((s, leg) => s + leg.rooms * perRoom, 0)
+          : flatCap;
+      if (guests > cap) return capError(cap);
       // 'pending' + payment_due = 1: nobody has paid, so this holds NOTHING —
       // only 'accepted' rows count towards availability. The rooms are reserved
       // at the moment the guest pays (payBookingAction), not now, so an unpaid
       // booking can never sit on inventory a paying guest could have had.
       const inserted = await db
         .prepare(
-          `INSERT INTO bookings (villa_id, guest_id, dates, check_in, check_out, guests, rooms, extras, package_id, package, payment_due, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, '', 1, 'pending') RETURNING id`,
+          `INSERT INTO bookings (villa_id, guest_id, dates, check_in, check_out, guests, rooms, room_plan, extras, package_id, package, payment_due, disc_pct, disc_fixed, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', 1, ?, ?, 'pending') RETURNING id`,
         )
         .run(
           villa.id,
@@ -1948,20 +2111,19 @@ export async function createOwnerBookingAction(input: {
           checkIn,
           checkOut,
           guests,
-          roomsNeeded,
+          plan.length > 0 ? planMaxRooms(plan) : roomsNeeded,
+          serializeRoomPlan(plan),
           JSON.stringify(extras),
+          discPct,
+          discFixed,
         );
-      return inserted.lastInsertRowid as number;
+      return { id: inserted.lastInsertRowid as number };
     });
   } catch {
     return fail("Something went wrong creating the booking. Please try again.");
   }
-  if (bookingId === null)
-    return fail(
-      roomBased
-        ? "Those rooms aren't free for these dates. Try fewer rooms or different dates."
-        : "This villa is already booked for those dates. Try different dates.",
-    );
+  if ("error" in outcome) return fail(outcome.error);
+  const bookingId = outcome.id;
 
   revalidatePath("/profile/bookings");
   revalidatePath("/profile/requests");
@@ -1995,7 +2157,7 @@ export async function payBookingAction(
   const db = getDb();
   const booking = (await db
     .prepare(
-      `SELECT id, villa_id, check_in, check_out, rooms, status, payment_due
+      `SELECT id, villa_id, check_in, check_out, rooms, room_plan, status, payment_due
        FROM bookings WHERE id = ? AND guest_id = ?`,
     )
     .get(bookingId, user.id)) as
@@ -2005,11 +2167,19 @@ export async function payBookingAction(
         check_in: string;
         check_out: string;
         rooms: number;
+        room_plan: string;
         status: string;
         payment_due: number;
       }
     | undefined;
-  if (!booking || booking.status !== "pending" || booking.payment_due !== 1)
+  // Two payable shapes: a fresh owner-made booking ('pending', holds nothing
+  // until paid) and a merged UPGRADE of an already-paid stay ('accepted' with a
+  // balance due — its rooms are held; paying settles the difference).
+  if (
+    !booking ||
+    booking.payment_due !== 1 ||
+    (booking.status !== "pending" && booking.status !== "accepted")
+  )
     return fail("This booking isn't awaiting payment any more.");
   if (booking.check_in < new Date().toISOString().slice(0, 10))
     return fail("This stay has already started and can no longer be paid for.");
@@ -2019,21 +2189,25 @@ export async function payBookingAction(
     ok = await tx(async () => {
       // Excluding this booking is a no-op today (a pending row is invisible to
       // the availability engine) but is the honest thing to ask: "is there room
-      // for this stay, ignoring itself?"
-      if (
-        !(await isVillaAvailable(
-          booking.villa_id,
-          booking.check_in,
-          booking.check_out,
-          Math.max(1, booking.rooms),
-          booking.id,
-        ))
-      )
-        return false;
+      // for this stay, ignoring itself?" A stay that holds different rooms on
+      // different nights is checked leg by leg — its peak count would wrongly
+      // fail on nights it only takes a few.
+      const payPlan = parseRoomPlan(booking.room_plan);
+      const free = payPlan
+        ? await isPlanAvailable(booking.villa_id, payPlan, booking.id)
+        : await isVillaAvailable(
+            booking.villa_id,
+            booking.check_in,
+            booking.check_out,
+            Math.max(1, booking.rooms),
+            booking.id,
+          );
+      if (!free) return false;
       const res = await db
         .prepare(
           `UPDATE bookings SET payment_due = 0, status = 'accepted'
-           WHERE id = ? AND guest_id = ? AND status = 'pending' AND payment_due = 1`,
+           WHERE id = ? AND guest_id = ? AND payment_due = 1
+             AND status IN ('pending', 'accepted')`,
         )
         .run(bookingId, user.id);
       return res.changes > 0;

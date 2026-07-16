@@ -691,7 +691,9 @@ export default function PaymentForm({
           ? "Processing…"
           : modify
             ? `Pay $${modify.amountDue.toFixed(2)}`
-            : "Confirm and Pay"}
+            : pay
+              ? `Pay $${pay.amountDue.toFixed(2)}`
+              : "Confirm and Pay"}
       </button>
     </form>
   );

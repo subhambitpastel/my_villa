@@ -118,7 +118,53 @@ export default async function ManageBookingPage({
             </span>
           }
           rightColumn={
-            <ManageBookingCard
+            /* One flex child only: the two-column layout sizes the right rail
+               as a single unit, so the banner and card must share a wrapper —
+               side by side as siblings they'd split the rail. The card brings
+               its own lg top margin; the wrapper takes it over instead. */
+            <div className="flex w-full min-w-0 flex-col gap-5 lg:mt-[60px] lg:[&>aside]:mt-0">
+              {/* An open balance outranks everything else on this page — the
+                  stay reads "Confirmed" below, and without this box nothing
+                  here would say money is still owed or why. */}
+              {booking.paymentDue && booking.pay && (
+                <aside className="w-full max-w-[576px] rounded-[10px] border border-[#e8d5a3] bg-[#fdf9f0] p-5">
+                  <p className="text-[15px] font-semibold text-[#8a6a1f]">
+                    {booking.status === "pending"
+                      ? "Payment pending — this stay isn't reserved yet"
+                      : "Balance due — your host upgraded this stay"}
+                  </p>
+                  <dl className="mt-3 space-y-1.5 text-[13px] leading-[1.5] text-[#7a6a45]">
+                    <div className="flex items-center justify-between gap-4">
+                      <dt>Full stay</dt>
+                      <dd>${booking.pay.fullStay.toFixed(2)}</dd>
+                    </div>
+                    {booking.pay.hostDiscount > 0 && (
+                      <div className="flex items-center justify-between gap-4 text-brand">
+                        <dt>Host&rsquo;s discount</dt>
+                        <dd>−${booking.pay.hostDiscount.toFixed(2)}</dd>
+                      </div>
+                    )}
+                    {booking.pay.alreadyPaid > 0 && (
+                      <div className="flex items-center justify-between gap-4 text-[#1c7d5c]">
+                        <dt>You already paid</dt>
+                        <dd>−${booking.pay.alreadyPaid.toFixed(2)}</dd>
+                      </div>
+                    )}
+                  </dl>
+                  <div className="mt-3 flex items-center justify-between gap-4 border-t border-[#e8d5a3] pt-3">
+                    <p className="text-[14px] font-semibold text-[#121212]">
+                      Due now ${booking.pay.due.toFixed(2)}
+                    </p>
+                    <Link
+                      href={`/payment?pay=${booking.id}`}
+                      className="rounded-[8px] bg-brand px-5 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-brand-dark"
+                    >
+                      Pay now
+                    </Link>
+                  </div>
+                </aside>
+              )}
+              <ManageBookingCard
               bookingId={booking.id}
               villaId={villa.id}
               price={villa.price}
@@ -138,13 +184,15 @@ export default async function ManageBookingPage({
               services={villa.serviceList}
               originalExtras={originalExtras}
               originalTotal={originalTotal}
-              archived={booking.archived}
+              locked={booking.locked}
+              roomPlan={booking.roomPlan}
               packageStay={
                 booking.package
                   ? { nights: booking.package.nights, price: booking.package.price }
                   : null
               }
-            />
+              />
+            </div>
           }
         />
       </main>

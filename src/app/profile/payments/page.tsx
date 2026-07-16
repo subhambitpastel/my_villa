@@ -21,7 +21,13 @@ export default async function PaymentsPage() {
   if (!user) return null; // layout renders the sign-in gate
 
   const bookings = await getBookingsForGuest(user.id);
-  const due = bookings.filter((b) => b.status === "pending" && b.paymentDue);
+  // Two payable shapes, and the page must show BOTH: 'pending' stays the host
+  // arranged (unpaid, holding nothing), and 'accepted' stays with a balance —
+  // upgrades that absorbed an already-paid booking, whose rooms ARE held.
+  const due = bookings.filter(
+    (b) => b.paymentDue && (b.status === "pending" || b.status === "accepted"),
+  );
+  const unheld = due.filter((b) => b.status === "pending");
   const total = due.reduce((sum, b) => sum + b.amountPaid, 0);
 
   if (due.length === 0) {
@@ -75,16 +81,28 @@ export default async function PaymentsPage() {
         </p>
       </div>
 
-      {/* The whole point of this page: these are not reservations yet. */}
-      <p className="mt-3 rounded-[8px] border border-[#e8d5a3] bg-[#fdf9f0] px-4 py-3 text-[13px] leading-[1.6] text-[#7a6a45]">
-        Your host booked {due.length === 1 ? "this stay" : "these stays"} for
-        you.{" "}
-        <span className="font-semibold text-[#8a6a1f]">
-          The room{due.length === 1 ? " isn't" : "s aren't"} held until you pay
-        </span>{" "}
-        — the booking stays pending, and someone else can still take{" "}
-        {due.length === 1 ? "it" : "them"} in the meantime.
-      </p>
+      {/* The whole point of this page: pending ones are not reservations yet. */}
+      {unheld.length > 0 && (
+        <p className="mt-3 rounded-[8px] border border-[#e8d5a3] bg-[#fdf9f0] px-4 py-3 text-[13px] leading-[1.6] text-[#7a6a45]">
+          Your host booked {unheld.length === 1 ? "this stay" : "these stays"}{" "}
+          for you.{" "}
+          <span className="font-semibold text-[#8a6a1f]">
+            The room{unheld.length === 1 ? " isn't" : "s aren't"} held until you
+            pay
+          </span>{" "}
+          — the booking stays pending, and someone else can still take{" "}
+          {unheld.length === 1 ? "it" : "them"} in the meantime.
+        </p>
+      )}
+      {due.length > unheld.length && (
+        <p className="mt-3 rounded-[8px] border border-[#bfe0d2] bg-[#f1faf6] px-4 py-3 text-[13px] leading-[1.6] text-[#3d6b58]">
+          Upgraded stays keep their rooms —{" "}
+          <span className="font-semibold text-[#1c7d5c]">
+            your host grew a booking you already paid for
+          </span>
+          , so what you paid is taken off and only the difference is owed.
+        </p>
+      )}
 
       <ul className="mt-5 space-y-4">
         {due.map((b) => (
@@ -99,9 +117,15 @@ export default async function PaymentsPage() {
                   <span className="rounded-[3px] bg-[#e9e8fd] px-1.5 py-0.5 text-brand">
                     {b.kind}
                   </span>
-                  <span className="rounded-[3px] bg-[#fff3d6] px-1.5 py-0.5 font-semibold text-[#a06a00]">
-                    Payment pending
-                  </span>
+                  {b.status === "pending" ? (
+                    <span className="rounded-[3px] bg-[#fff3d6] px-1.5 py-0.5 font-semibold text-[#a06a00]">
+                      Payment pending · rooms not held yet
+                    </span>
+                  ) : (
+                    <span className="rounded-[3px] bg-[#e5f4ee] px-1.5 py-0.5 font-semibold text-[#1c7d5c]">
+                      Balance due · your rooms are held
+                    </span>
+                  )}
                   <span>{bookingReference(b.id)}</span>
                 </p>
                 <dl className="mt-3 flex flex-wrap gap-x-8 gap-y-2 text-[13px]">
@@ -147,6 +171,28 @@ export default async function PaymentsPage() {
               </div>
 
               <div className="flex shrink-0 flex-col items-start gap-2 sm:items-end">
+                {/* The receipt behind the figure — the same three rows the host
+                    saw when arranging it, so the number is never a surprise. */}
+                {b.pay && (b.pay.hostDiscount > 0 || b.pay.alreadyPaid > 0) && (
+                  <dl className="space-y-1 text-[12px] leading-[1.4] text-[#6a6a72]">
+                    <div className="flex justify-between gap-6">
+                      <dt>Full stay</dt>
+                      <dd>${b.pay.fullStay.toFixed(2)}</dd>
+                    </div>
+                    {b.pay.hostDiscount > 0 && (
+                      <div className="flex justify-between gap-6 text-brand">
+                        <dt>Host&rsquo;s discount</dt>
+                        <dd>−${b.pay.hostDiscount.toFixed(2)}</dd>
+                      </div>
+                    )}
+                    {b.pay.alreadyPaid > 0 && (
+                      <div className="flex justify-between gap-6 text-[#1c7d5c]">
+                        <dt>You already paid</dt>
+                        <dd>−${b.pay.alreadyPaid.toFixed(2)}</dd>
+                      </div>
+                    )}
+                  </dl>
+                )}
                 <p className="text-[20px] font-semibold leading-none text-[#121212]">
                   ${b.amountPaid.toFixed(2)}
                 </p>
@@ -163,8 +209,9 @@ export default async function PaymentsPage() {
       </ul>
 
       <p className="mt-6 text-[12px] leading-[1.6] text-[#a1a1a2]">
-        Don&rsquo;t recognise one of these? Leave it unpaid — nothing is reserved
-        and you won&rsquo;t be charged. Ask your host to withdraw it.
+        Don&rsquo;t recognise one of these? You won&rsquo;t be charged for
+        anything you leave unpaid — ask your host about it
+        {unheld.length > 0 ? "; pending stays reserve nothing until paid" : ""}.
       </p>
     </div>
   );

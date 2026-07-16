@@ -8,6 +8,7 @@ import VillaDetailView from "@/components/place/VillaDetailView";
 import { getCurrentUser } from "@/lib/session";
 import {
   getBookedRanges,
+  getGuestRoomBookings,
   getRoomBookings,
   getGuestOption,
   getVillaDetail,
@@ -68,6 +69,20 @@ export default async function OwnerBookingPage({
   const roomBased = isRoomBased(villa.kind);
   const roomBookings = roomBased ? await getRoomBookings(villa.id) : [];
   const bookedRanges = roomBased ? [] : await getBookedRanges(villa.id);
+
+  // When this fulfils a specific guest's request, their own stays here aren't
+  // obstacles — an overlapping one gets folded into the new booking (upgraded in
+  // place, what they paid credited). The card needs both views: availability
+  // with their rooms freed, and their holdings to preview the fold.
+  const prefillGuestId = Number(guestParam);
+  const roomBookingsExclGuest =
+    roomBased && Number.isInteger(prefillGuestId) && prefillGuestId > 0
+      ? await getRoomBookings(villa.id, 0, prefillGuestId)
+      : undefined;
+  const guestHeld =
+    roomBased && Number.isInteger(prefillGuestId) && prefillGuestId > 0
+      ? await getGuestRoomBookings(villa.id, prefillGuestId)
+      : undefined;
 
   // Dates may be carried in the URL (same as the guest's /place page), so a
   // booking can be linked to already scoped to the dates in question. No upper
@@ -137,9 +152,9 @@ export default async function OwnerBookingPage({
                 The usual limits on length, headcount and rooms don&rsquo;t apply
                 here — only what&rsquo;s actually free does.
               </div>
-              {villa.archived_at !== null && (
+              {villa.locked_at !== null && (
                 <p className="mb-4 rounded-[10px] bg-[#fff6e5] px-5 py-4 text-[14px] leading-[1.5] text-[#a06a00]">
-                  This listing is <span className="font-semibold">archived</span>,
+                  This listing is <span className="font-semibold">locked</span>,
                   so guests can&rsquo;t book it themselves. You can still book it
                   for someone directly.
                 </p>
@@ -156,6 +171,8 @@ export default async function OwnerBookingPage({
                 totalRooms={villa.rooms}
                 roomBookings={roomBookings}
                 peoplePerRoom={villa.people_per_room}
+                roomBookingsExclGuest={roomBookingsExclGuest}
+                guestHeld={guestHeld}
                 defaultServices={prefillServices}
                 defaultCheckIn={carriedDates ? inParam! : dayFromNow(0)}
                 defaultCheckOut={carriedDates ? outParam! : dayFromNow(1)}

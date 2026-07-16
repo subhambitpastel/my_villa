@@ -170,17 +170,17 @@ export default async function PackagePage({ searchParams }: Search) {
                 >
                   Manage packages
                 </Link>
-                {pkg.archived && (
+                {pkg.locked && (
                   <p className="mt-4 rounded-[10px] bg-[#fff6e5] px-4 py-3 text-[14px] leading-[1.5] text-[#a06a00]">
                     This package is{" "}
-                    <span className="font-semibold">archived</span> — it&rsquo;s
+                    <span className="font-semibold">locked</span> — it&rsquo;s
                     hidden from guests and takes no new bookings. Stays already
                     booked still go ahead.
                   </p>
                 )}
               </aside>
-            ) : pkg.archived ? (
-              /* Archived package (or its villa is) — still viewable for guests
+            ) : pkg.locked ? (
+              /* Locked package (or its villa is) — still viewable for guests
                  who already booked it, but there's nothing to book. */
               <aside className="h-fit w-full min-w-0 max-w-[576px] rounded-[20px] bg-white px-[41px] py-[40px] shadow-[0px_15px_50px_0px_rgba(0,0,0,0.18)] lg:mt-[60px]">
                 <p className="text-[24px] font-semibold text-black">

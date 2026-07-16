@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { addMonths, nightsBetween } from "@/lib/dates";
-import { MAX_ROOMS_PER_GUEST } from "@/lib/rooms";
 
 /* eslint-disable @next/next/no-img-element */
 
@@ -75,9 +74,10 @@ export default function DateRangeField({
    *  check-in + maxNights are disabled while picking check-out. */
   maxNights?: number;
   /** Rooms still free on a given night (room-based stays only). When set, each
-   *  bookable day shows that count under it, capped at MAX_ROOMS_PER_GUEST —
-   *  past the cap the exact number doesn't help, since it's the most one guest
-   *  can book online anyway. Omit for whole-villa stays, which have no rooms. */
+   *  bookable day shows that count under it, and a legend below the grid says
+   *  what the number means. It's the PROPERTY's availability — not a per-guest
+   *  allowance — so it's shown in full. Omit for whole-villa stays, which have
+   *  no rooms to count. */
   roomsFreeOn?: (dateKey: string) => number;
 }) {
   const [active, setActive] = useState<Field | null>(null);
@@ -391,11 +391,20 @@ export default function DateRangeField({
                 key > checkIn &&
                 !isEdge &&
                 tooLong(checkIn, key);
+              // Dates can arrive PRESELECTED (search params, a shared link) on
+              // days that are fully booked — often by a stay the owner arranged
+              // for someone else. Being "the selection" must not dress such a
+              // day up as a bookable purple edge: a stay can never START on a
+              // booked day, and can only END on one when it's a turnover
+              // morning. Everything else renders as what it is — crossed out.
+              const deadEdge =
+                booked &&
+                (key === checkIn || (key === checkOut && !checkoutOnly));
               const disabled =
                 key < today ||
                 (maxDate !== null && key > maxDate) ||
                 exceedsMaxStay ||
-                (booked && !turnoverCheckout && !isEdge);
+                (booked && !turnoverCheckout && (!isEdge || deadEdge));
               const inRange =
                 !isEdge &&
                 checkIn !== null &&
@@ -408,10 +417,13 @@ export default function DateRangeField({
               // as the hotel filling up.
               const outOfWindow =
                 key < today || (maxDate !== null && key > maxDate);
+              // The property's real free count, uncapped. It used to be clamped
+              // to MAX_ROOMS_PER_GUEST on the grounds that one guest can't book
+              // more — but this number answers "how full is the hotel that
+              // night", not "how many may I have". Clamping it made a 48-room
+              // night and a 6-room night look identical.
               const roomsLeft =
-                roomsFreeOn && !outOfWindow
-                  ? Math.min(MAX_ROOMS_PER_GUEST, roomsFreeOn(key))
-                  : 0;
+                roomsFreeOn && !outOfWindow ? roomsFreeOn(key) : 0;
               const dayButton = (
                 <button
                   key={key}
@@ -437,17 +449,21 @@ export default function DateRangeField({
                           : "Already booked"
                   }
                   className={`mx-auto flex h-9 w-9 items-center justify-center rounded-full text-[14px] transition-colors ${
+                    /* Every fully-booked day reads as full — CROSSED — even a
+                       turnover day a stay may still END on (kept clickable,
+                       dark ink + tooltip say so). "Plain text with a tooltip"
+                       looked available, and guests don't hover. */
                     disabled
                       ? booked
-                        ? checkoutOnly
-                          ? "cursor-default text-ink"
-                          : "cursor-default text-soft/70 line-through"
+                        ? "cursor-default text-soft/70 line-through"
                         : "cursor-default text-soft/70"
                       : isEdge
                         ? "bg-brand font-semibold text-white"
                         : inRange
                           ? "bg-[rgba(123,97,255,0.15)] text-ink"
-                          : "text-ink hover:bg-[rgba(123,97,255,0.12)]"
+                          : booked
+                            ? "text-ink line-through hover:bg-[rgba(123,97,255,0.12)]"
+                            : "text-ink hover:bg-[rgba(123,97,255,0.12)]"
                   }`}
                 >
                   {day}
@@ -481,6 +497,17 @@ export default function DateRangeField({
                 ? "Now select your check-out date"
                 : "Select your check-out date"}
           </p>
+          {/* A bare "48" under a date says nothing on its own, and the day cell
+              is far too narrow to carry the word "rooms" with it — so the unit
+              is spelled out here, once, for the whole grid. Written as a plain
+              sentence: a sample number with an "=" beside it reads like data,
+              not like a key. */}
+          {roomsFreeOn && (
+            <p className="mt-1 text-[13px] text-soft">
+              The number under each date is how many rooms are still free that
+              night.
+            </p>
+          )}
           {monthHasBooked && (
             <p className="mt-1 text-[13px] text-soft">
               Crossed-out dates are unavailable — they are already booked.
