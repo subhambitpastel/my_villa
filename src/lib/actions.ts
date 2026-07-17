@@ -401,11 +401,14 @@ function normalizeMaxGuests(value: number): number {
   return Math.min(30, Math.max(1, Math.trunc(value) || 1));
 }
 
-/** Owner's per-guest night budget, clamped to a sane 0–365 range (0 = no limit).
+/** Owner's per-guest night budget, clamped to a sane 1–80 range (0 = no limit).
  *  A cumulative budget across a guest's stays, so it may exceed a single stay's
- *  MAX_STAY_NIGHTS; a year is a generous ceiling that still rules out nonsense. */
+ *  MAX_STAY_NIGHTS; 80 still rules out nonsense while allowing long budgets. */
 function clampBookingDays(value: number | undefined): number {
-  return Math.min(365, Math.max(0, Math.trunc(value ?? 0) || 0));
+  const n = Math.trunc(value ?? 0) || 0;
+  // 0/blank = no limit; a set cap is bounded to 1–80 nights (the wizard
+  // refuses out-of-range input with a message; this is the backstop).
+  return n <= 0 ? 0 : Math.min(80, n);
 }
 
 /** What to store for people_per_room + max_guests + max_booking_days given the

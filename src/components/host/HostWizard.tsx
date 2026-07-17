@@ -416,6 +416,15 @@ function StepVilla({
     } else if (!villa.maxGuests || !/^\d+$/.test(villa.maxGuests) || Number(villa.maxGuests) < 1) {
       next.maxGuests = "Enter the maximum number of guests (at least 1).";
     }
+    // Blank = no limit; a filled value must be a sensible cap of 1–80 nights.
+    if (
+      villa.maxBookingDays &&
+      (!/^\d+$/.test(villa.maxBookingDays) ||
+        Number(villa.maxBookingDays) < 1 ||
+        Number(villa.maxBookingDays) > 80)
+    )
+      next.maxBookingDays =
+        "Enter between 1 and 80 nights, or leave blank for no limit.";
     setErrors(next);
     if (Object.keys(next).length > 0) return;
     onNext({ villa });
@@ -566,12 +575,17 @@ function StepVilla({
                 pattern="[0-9]*"
                 onChange={onlyDigits}
                 placeholder="Leave blank for no limit — e.g. 30"
+                aria-invalid={!!errors.maxBookingDays}
                 className={input}
               />
+              {errors.maxBookingDays && (
+                <ErrorText>{errors.maxBookingDays}</ErrorText>
+              )}
               <p className="mt-1 text-xs text-body">
-                The most nights one guest can book here across all their stays.
-                They can take any number of rooms on those nights; beyond the
-                limit they ask you to arrange it. Leave blank for no limit.
+                The most nights one guest can book here across all their stays
+                (1–80). They can take any number of rooms on those nights;
+                beyond the limit they ask you to arrange it. Leave blank for no
+                limit.
               </p>
             </div>
           </>
@@ -609,12 +623,16 @@ function StepVilla({
                 pattern="[0-9]*"
                 onChange={onlyDigits}
                 placeholder="Leave blank for no limit — e.g. 30"
+                aria-invalid={!!errors.maxBookingDays}
                 className={input}
               />
+              {errors.maxBookingDays && (
+                <ErrorText>{errors.maxBookingDays}</ErrorText>
+              )}
               <p className="mt-1 text-xs text-body">
-                The most nights one guest can book here across all their stays.
-                Beyond the limit they ask you to arrange it. Leave blank for no
-                limit.
+                The most nights one guest can book here across all their stays
+                (1–80). Beyond the limit they ask you to arrange it. Leave
+                blank for no limit.
               </p>
             </div>
           </div>
