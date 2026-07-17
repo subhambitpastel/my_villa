@@ -111,6 +111,7 @@ export default function PaymentForm({
   rooms = 1,
   roomBased = false,
   flex = false,
+  add = false,
   services = [],
   packageId,
   couponCode,
@@ -132,6 +133,9 @@ export default function PaymentForm({
   roomBased?: boolean;
   /** The guest opted into an adjusted stay (rooms vary night to night). */
   flex?: boolean;
+  /** `rooms` counts rooms to ADD on top of ones the guest already holds on
+   *  these dates — booked as a new, separate stay. */
+  add?: boolean;
   /** Chosen paid add-ons, as indices into the villa's service list. */
   services?: number[];
   /** Set when booking a fixed package instead of a nightly stay. */
@@ -272,6 +276,8 @@ export default function PaymentForm({
         guests,
         rooms,
         serviceIdx: services,
+        // The adjusted split is re-derived server-side; this only opts in.
+        flex,
       });
       if (!result.ok) {
         setSubmitting(false);
@@ -289,6 +295,7 @@ export default function PaymentForm({
     // per-night split from live availability and prices it from that.
     const result = await createBookingAction({
       flex,
+      add,
       villaId,
       checkIn,
       checkOut,

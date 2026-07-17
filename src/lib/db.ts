@@ -56,6 +56,7 @@ export type VillaRow = {
   rooms: number;
   max_guests: number; // max guests the owner allows this villa to sleep
   people_per_room: number; // hotels/resorts: max occupancy of one room (0 = n/a)
+  max_booking_days: number; // most distinct nights one guest may book here (default 30; 0 = no limit)
   featured: number; // 1 = paid promotion, shown in the home "Featured villas" row
   facilities: string; // JSON string[]
   services: string; // JSON string[]
@@ -179,6 +180,9 @@ CREATE TABLE IF NOT EXISTS villas (
   rooms       INTEGER NOT NULL DEFAULT 1,
   max_guests  INTEGER NOT NULL DEFAULT 8,
   people_per_room INTEGER NOT NULL DEFAULT 0,
+  -- Most distinct nights one guest may book here across all their stays
+  -- (hotels/resorts). 0 = no limit. Beyond it the guest asks the host on a call.
+  max_booking_days INTEGER NOT NULL DEFAULT 30,
   featured    INTEGER NOT NULL DEFAULT 0,
   facilities  TEXT NOT NULL DEFAULT '[]',
   services    TEXT NOT NULL DEFAULT '[]',
@@ -302,9 +306,10 @@ CREATE TABLE IF NOT EXISTS packages (
 );
 
 -- A guest asking the host to ring them about a booking the self-serve flow
--- won't take — in practice, a room block bigger than the per-guest cap (see
--- MAX_ROOMS_PER_GUEST in rooms.ts). The dates and room count they wanted are
--- kept so the host can act on the request without a back-and-forth.
+-- won't take — in practice, a stay longer than MAX_STAY_NIGHTS or one that
+-- exceeds the property's per-guest day budget (villas.max_booking_days). The
+-- dates and room count they wanted are kept so the host can act on the request
+-- without a back-and-forth.
 -- Things that HAPPENED, addressed to one person: a stay booked, cancelled or
 -- changed, a review left, a call asked for, a payment requested.
 --
@@ -384,6 +389,12 @@ CREATE TABLE IF NOT EXISTS images (
 -- Additive migrations for databases created before a column existed. Postgres
 -- makes ADD COLUMN IF NOT EXISTS a no-op when the column is already present.
 ALTER TABLE villas ADD COLUMN IF NOT EXISTS people_per_room INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE villas ADD COLUMN IF NOT EXISTS max_booking_days INTEGER NOT NULL DEFAULT 30;
+-- Every listing defaults to a 30-night per-guest cap (owners can change or
+-- clear it); align the column default on databases created when it was 0.
+-- Deliberately no data backfill here: 0 is a valid owner choice ("no limit"),
+-- and rewriting it on every boot would clobber that choice.
+ALTER TABLE villas ALTER COLUMN max_booking_days SET DEFAULT 30;
 ALTER TABLE villas ADD COLUMN IF NOT EXISTS featured INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE villas ADD COLUMN IF NOT EXISTS discount INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rooms INTEGER NOT NULL DEFAULT 1;
@@ -461,6 +472,33 @@ CREATE INDEX IF NOT EXISTS idx_reviews_villa ON reviews(villa_id);
 CREATE INDEX IF NOT EXISTS idx_packages_owner ON packages(owner_id);
 CREATE INDEX IF NOT EXISTS idx_packages_villa ON packages(villa_id);
 CREATE INDEX IF NOT EXISTS idx_call_requests_villa ON call_requests(villa_id);
+
+-- One coupon, one use per guest — for good. A UNIQUE index over (guest, code)
+-- across EVERY booking that carries the coupon, whatever its status: a code is
+-- spent the moment it's applied, and cancelling the booking (guest- or
+-- owner-side) does not return it. The race-proof backstop to the check in
+-- createBookingAction (READ COMMITTED lets two concurrent checkouts both read
+-- "unused"; this stops the second INSERT).
+--
+-- Migrates the older index that excluded cancelled/declined rows: a
+-- CREATE ... IF NOT EXISTS can't widen an existing index, so drop the old shape
+-- first — but only when that older, status-filtered shape is actually what's
+-- there, so steady-state boots don't rebuild the index every time. Wrapped so
+-- pre-existing data that already reused a coupon under the old rule can't stop
+-- the app from starting: the drop rolls back together with the failed create,
+-- leaving the previous index in place; the app-level check still holds.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE indexname = 'bookings_coupon_once' AND indexdef LIKE '%status%'
+  ) THEN
+    DROP INDEX bookings_coupon_once;
+  END IF;
+  CREATE UNIQUE INDEX IF NOT EXISTS bookings_coupon_once
+    ON bookings (guest_id, UPPER(coupon_code))
+    WHERE coupon_code <> '';
+EXCEPTION WHEN others THEN NULL;
+END $$;
 
 -- Keep each villa's denormalized rating/reviews true to the reviews table.
 -- rateStayAction maintains these on new reviews; this corrects any villa that

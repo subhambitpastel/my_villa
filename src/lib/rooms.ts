@@ -67,26 +67,65 @@ export function roomsFreeForRange(
   return Math.max(0, free);
 }
 
-/* --------------------------- per-guest room cap ---------------------------
- * One guest may not take a whole hotel through the self-serve flow. The cap is
- * per NIGHT and counts every room that guest already holds at the property, so
- * it can't be side-stepped by splitting a block across several bookings. Beyond
- * it, the guest asks the host to arrange the block on a call.
+/* --------------------------- per-guest day budget ---------------------------
+ * Rooms are no longer rationed — a guest may take as many as the property has.
+ * Instead a property may cap how many DISTINCT NIGHTS one guest can book across
+ * all their stays there (the owner's `maxBookingDays`; 0 = no limit). The budget
+ * is spent in calendar nights, not rooms or bookings: extra rooms on a night the
+ * guest already holds, or a second booking on that same night, cost no further
+ * nights. Beyond the budget the guest asks the host to arrange the stay, exactly
+ * as an over-long stay does.
  * -------------------------------------------------------------------------- */
 
-/** The most rooms one guest may hold at a property on any single night. */
-export const MAX_ROOMS_PER_GUEST = 6;
+/** True when the owner set a finite per-guest night budget for a property. */
+export const hasDayLimit = (limit: number): boolean =>
+  Number.isFinite(limit) && limit > 0;
 
-/** How much of a guest's per-night allowance is still free across
- *  [checkIn, checkOut), given the rooms `held` they already have there.
- *  Deliberately the same maths as availability — the "capacity" being consumed
- *  is just the personal cap instead of the hotel's inventory. */
-export const allowanceFree = (
+/** The distinct nights (YYYY-MM-DD) a guest already occupies across `bookings`
+ *  — the unit the day budget is spent in. A night with any room counts once. */
+export function bookedNights(bookings: RoomBooking[]): Set<string> {
+  const nights = new Set<string>();
+  for (const b of bookings)
+    for (const night of nightsInRange(b.checkIn, b.checkOut)) nights.add(night);
+  return nights;
+}
+
+/**
+ * Measure a property's per-guest night budget against a prospective stay, so the
+ * booking card and the server agree on one picture. `held` are the guest's
+ * existing stays here; the range is what they now want to cover.
+ *   • used       — distinct nights they already hold
+ *   • added      — nights in the range they don't already hold (what this books)
+ *   • remaining  — nights still open under the limit (Infinity when unlimited)
+ *   • overBudget — booking it would push them past the limit
+ */
+export function dayBudget(
+  limit: number,
+  held: RoomBooking[],
   checkIn: string,
   checkOut: string,
-  held: RoomBooking[],
-  allowance: number = MAX_ROOMS_PER_GUEST,
-): number => roomsFreeForRange(checkIn, checkOut, held, allowance);
+): {
+  limited: boolean;
+  used: number;
+  added: number;
+  remaining: number;
+  overBudget: boolean;
+} {
+  const limited = hasDayLimit(limit);
+  const nights = bookedNights(held);
+  const used = nights.size;
+  let added = 0;
+  for (const night of nightsInRange(checkIn, checkOut))
+    if (!nights.has(night)) added++;
+  const remaining = limited ? Math.max(0, limit - used) : Infinity;
+  return {
+    limited,
+    used,
+    added,
+    remaining,
+    overBudget: limited && used + added > limit,
+  };
+}
 
 /**
  * The stretch of [checkIn, checkOut) a NEW booking must actually cover for the
@@ -145,11 +184,10 @@ export type RoomSegment = { checkIn: string; checkOut: string; rooms: number };
  * ask 5 while holding 4 and that night adds 1, not 2. Booking someone up to the
  * cap when they asked for less would sell them rooms they never wanted.
  *
- * Each night takes the tightest of three limits:
+ * Each night takes the tighter of two limits:
  *   • what's still needed  — `wanted` less what they already hold that night;
- *   • the hotel's free inventory — `totalRooms` less everyone's bookings;
- *   • this guest's own cap — `allowance` less what they hold that night.
- * Omit `held`/`allowance` and it's inventory-only, exactly as before.
+ *   • the hotel's free inventory — `totalRooms` less everyone's bookings.
+ * Omit `held` and it's inventory-only.
  *
  * Returns [] when no plan is possible — an empty range, or a night that can add
  * nothing (a stay can't have a roomless gap in the middle). Note that "needs
@@ -163,7 +201,6 @@ export function roomPlanFor(
   totalRooms: number,
   wanted: number,
   held: RoomBooking[] = [],
-  allowance: number = Infinity,
 ): RoomSegment[] {
   const want = Math.max(1, Math.trunc(wanted) || 1);
   const plan: RoomSegment[] = [];
@@ -172,7 +209,6 @@ export function roomPlanFor(
     const free = Math.min(
       want - mine,
       totalRooms - roomsBookedOn(night, bookings),
-      allowance - mine,
     );
     if (free < 1) return [];
     const last = plan[plan.length - 1];
@@ -202,19 +238,6 @@ export const planMinRooms = (plan: RoomSegment[]): number =>
 /** True when the plan changes room count mid-stay, i.e. it's an "adjusted" stay
  *  the guest has to opt into. (Merging means >1 segment ⇒ counts differ.) */
 export const isGraduated = (plan: RoomSegment[]): boolean => plan.length > 1;
-
-/** True when every leg of `plan` fits inside the guest's remaining allowance.
- *  Checked leg-by-leg rather than against the plan's peak: each leg spans
- *  different nights, so it's measured against what the guest holds on those
- *  nights specifically. */
-export const planFitsAllowance = (
-  plan: RoomSegment[],
-  held: RoomBooking[],
-  allowance: number = MAX_ROOMS_PER_GUEST,
-): boolean =>
-  plan.every(
-    (s) => roomsFreeForRange(s.checkIn, s.checkOut, held, allowance) >= s.rooms,
-  );
 
 /** Serialize a plan for the booking's room_plan column ('' when it's a plain
  *  flat stay, so normal bookings stay exactly as they were). */

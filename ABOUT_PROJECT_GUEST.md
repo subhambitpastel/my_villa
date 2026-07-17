@@ -24,7 +24,7 @@ owner/host does is mentioned only where it affects you.
 6. [The villa detail page](#6-the-villa-detail-page)
 7. [Booking a nightly stay](#7-booking-a-nightly-stay)
 8. [Rooms at a hotel or resort](#8-rooms-at-a-hotel-or-resort)
-9. [The 6-room limit — and how to book more](#9-the-6-room-limit--and-how-to-book-more)
+9. [The booking-days limit — and how to book more](#9-the-booking-days-limit--and-how-to-book-more)
 10. [Adjusted stays (rooms that change mid-stay)](#10-adjusted-stays-rooms-that-change-mid-stay)
 11. [Overlapping your own bookings](#11-overlapping-your-own-bookings)
 12. [Packages](#12-packages)
@@ -231,7 +231,8 @@ are actually buying.
 | **Capacity limit** | rooms × people-per-room | The property's total guest cap |
 | **Price scales with** | rooms × nights | nights only |
 | **Calendar blocks a date when** | **every** room is taken | **any** booking exists |
-| **Per-guest room cap** | 6 rooms per night | Not applicable |
+| **Per-guest room cap** | None — book as many rooms as exist | Not applicable |
+| **Per-guest day limit** | Optional, host-set (max nights per guest) | Not applicable |
 | **Rooms can vary mid-stay** | Yes ("adjusted stay") | No |
 
 ### ⚠️ There are no room numbers
@@ -346,15 +347,12 @@ booked go ahead as normal.
 
 ## 8. Rooms at a hotel or resort
 
-The Rooms picker offers **the property's entire inventory** — not just what's free,
-and not just what you're allowed to book. That's deliberate: asking for more than
-you can self-serve is a legitimate request, and you can't ask for it if the picker
-won't let you say it.
+The Rooms picker offers **the property's entire inventory** — every room it has, since
+rooms aren't rationed per guest. Asking for the whole building is a legitimate request.
 
 Next to your choice you'll see live context:
 
 - `3 rooms · 5 available` — how many are free on every night of your range
-- `· ☎ over the 6-room online limit` — you've gone past the self-serve cap
 - `· only 2 bookable by you` — your ask is short, and evenly so
 - `Sold out for these dates` — no rooms at all
 
@@ -368,37 +366,44 @@ free that night. A date is only blocked (struck through) when **every** room is 
 
 ---
 
-## 9. The 6-room limit — and how to book more
+## 9. The booking-days limit — and how to book more
+
+There is **no cap on rooms.** A hotel or resort lets you book **as many rooms as it
+physically has** for your dates — pick 1, 9, or the whole building.
 
 ### The rule
 
-> **One guest may hold at most 6 rooms at a property on any single night.**
+What a property *can* limit is **how many nights** one guest books there:
+
+> **A property may set a maximum number of booking days per guest — the most distinct
+> nights one guest can hold across all their stays there. 0 (blank) means no limit.**
 
 Three details matter:
 
-1. **It's per night, not per booking.** Six rooms on the 14th and six on the 20th is
-   fine — those are different nights.
-2. **It counts rooms you already hold there.** If you already have 4 rooms for a
-   night, you can add 2 more, not 6. This is why the limit **can't be side-stepped by
-   splitting a big block across several bookings** — the app adds up everything you
-   hold on each night before deciding.
-3. **It's a limit on you, not on the building.** Being told "only 2 bookable by you"
-   when 9 rooms are free means you've used your own allowance, not that the hotel is
-   full. The app deliberately words these two situations differently, because they
-   look identical on a calendar and mean completely different things.
+1. **It's counted in distinct nights, not rooms or bookings.** Taking more rooms on a
+   night you already hold — or making a second booking on that night — costs **no
+   extra days**. Booking the 22nd and 23rd uses 2 of your nights however many rooms
+   you take.
+2. **It counts nights you already hold there.** With a 4-night limit, booking the
+   22nd–25th uses all 4; after that you can't book another date at that property.
+   Book only the 22nd–23rd and you have **2 nights left** to book later — but no more
+   than that. Splitting across several bookings can't beat it: the app adds up every
+   night you already hold before deciding.
+3. **Most properties set no limit at all.** When they don't, you book freely up to the
+   30-night per-stay ceiling.
 
-### So how do you book more than 6 rooms?
+### So how do you book more nights than the limit?
 
-**You ask the host to arrange it.** This is a first-class flow, not a workaround.
+**You ask the host to arrange it.** This is a first-class flow, not a workaround —
+exactly the same one used for over-long stays.
 
-1. On the booking card, **pick the number of rooms you actually want** — 9, 14,
-   whatever. Options past 6 are marked ☎ but fully selectable.
-2. The Reserve button is replaced by a panel: *"The host arranges this one with you
-   directly"*, listing exactly why (e.g. "9 rooms — one guest can book at most 6
-   online").
-3. Optionally add a note (up to 500 characters) — *"Anything else the host should
+1. Pick the dates you actually want. When they'd put you over the property's day
+   limit, the Reserve button is replaced by a panel: *"The host arranges this one with
+   you directly"*, listing exactly why (e.g. "5 nights at this property — the host
+   lets one guest book at most 4 online").
+2. Optionally add a note (up to 500 characters) — *"Anything else the host should
    know?"*
-4. Press **"Request a call from the host"**.
+3. Press **"Request a call from the host"**.
 
 **What's sent with the request:** your dates, your room count, your party size, any
 paid extras you'd already ticked, and your note. The card tells you this explicitly
@@ -436,19 +441,19 @@ so you don't waste the note retyping dates:
 
 ### The other reason you'd be routed to a call
 
-Same flow, different trigger: **a stay longer than 30 nights**. Both reasons can apply
-at once, and the panel lists each one.
+Same flow, different trigger: **a single stay longer than 30 nights**. Both reasons can
+apply at once, and the panel lists each one.
 
 ### What a call *can't* fix
 
 **A call cannot conjure rooms that don't exist.** If the property is genuinely sold
 out, you get "Sold out for these dates", not a call offer. The call route exists for
-limits *the host can waive* — your personal 6-room cap and the 30-night ceiling — not
-for physical inventory.
+limits *the host can waive* — the property's per-guest day limit and the 30-night
+ceiling — not for physical inventory.
 
-**Packages are exempt from the 6-room cap entirely.** A package's size is the host's
-own design — a Monthly Retreat that sleeps 18 needs its 9 rooms, and refusing the
-host's own bundle would be absurd. Only real inventory limits it.
+**Packages are exempt from the day limit entirely.** A package's length is the host's
+own design — a Monthly Retreat runs its full 28 nights — and refusing the host's own
+bundle would be absurd. Only real inventory limits it.
 
 ---
 
@@ -562,7 +567,7 @@ The defining traits:
 
 **The rooms are worked out for you.** A package that sleeps 12 at a hotel with 2
 people per room automatically reserves 6 rooms. You never pick a room count, and the
-6-room personal cap doesn't apply.
+property's per-guest day limit doesn't apply.
 
 ### Other package facts
 
@@ -1007,10 +1012,10 @@ the app doesn't do.
    rooms you get is arranged with the host.
 2. **A villa books whole; a hotel books by the room.** That's why villa calendars
    block entirely and hotel calendars count down.
-3. **The 6-room cap is yours, not the hotel's.** "Only 2 bookable by you" with 9 rooms
-   free means you've used your allowance.
-4. **To book more than 6 rooms, pick the number you want anyway** and press "Request a
-   call from the host". It's the intended route, not a failure.
+3. **There's no room cap — book as many rooms as the hotel has.** What a property can
+   limit is your total *nights* there (an optional host-set booking-days limit).
+4. **To book more nights than a property's day limit, pick the dates you want anyway**
+   and press "Request a call from the host". It's the intended route, not a failure.
 5. **A package's price is the whole price** — no service fee, no extras, no per-head
    charge, and the inclusions can't be split apart.
 

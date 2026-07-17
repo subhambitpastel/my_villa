@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { addMonths, nightsBetween } from "@/lib/dates";
+import { addDays, addMonths, nightsBetween } from "@/lib/dates";
 
 /* eslint-disable @next/next/no-img-element */
 
@@ -58,6 +58,8 @@ export default function DateRangeField({
   windowMonths,
   maxNights,
   roomsFreeOn,
+  bookableCap: bookableCapProp,
+  nightBudget,
 }: {
   checkIn: string | null;
   checkOut: string | null;
@@ -74,12 +76,26 @@ export default function DateRangeField({
    *  check-in + maxNights are disabled while picking check-out. */
   maxNights?: number;
   /** Rooms still free on a given night (room-based stays only). When set, each
-   *  bookable day shows that count under it, and a legend below the grid says
-   *  what the number means. It's the PROPERTY's availability — not a per-guest
-   *  allowance — so it's shown in full. Omit for whole-villa stays, which have
-   *  no rooms to count. */
+   *  bookable day shows that count under it as "NR", and a legend below the grid
+   *  says what it means. Omit for whole-villa stays, which have no rooms to
+   *  count. */
   roomsFreeOn?: (dateKey: string) => number;
+  /** The most rooms bookable ONLINE per night — the guest flow's per-guest cap.
+   *  A night with more free than this shows the cap as "NR ☎", the phone
+   *  meaning "more are free; request a call for the rest". Omit (default no
+   *  cap) for the owner's own booking flow, which has no per-guest limit. */
+  bookableCap?: number;
+  /** The guest's per-night budget for this property, once a check-in is picked.
+   *  `remaining` = nights still open under the limit; `limit` = the owner's cap.
+   *  `held` = nights the guest already holds here (YYYY-MM-DD) — they never
+   *  count against the budget again, so a span crossing an existing stay only
+   *  spends budget on its NEW nights. Nights beyond the remaining budget render
+   *  yellow with a "request a call" note. Omit when the property has no limit
+   *  (or on the owner's own flow). */
+  nightBudget?: { remaining: number; limit: number; held?: string[] } | null;
 }) {
+  // No cap given → the count is uncapped and no phone ever shows.
+  const bookableCap = bookableCapProp ?? Infinity;
   const [active, setActive] = useState<Field | null>(null);
   const [view, setView] = useState({ year: 0, month: 0 });
   const [hover, setHover] = useState<string | null>(null);
@@ -183,6 +199,20 @@ export default function DateRangeField({
     !tooLong(checkIn, hover)
       ? hover
       : null);
+
+  // Budget spent by each night of the previewed span: how many NEW nights (not
+  // already held by this guest) come before it, night by night from check-in.
+  // A night the guest already holds spends nothing — extending across an
+  // existing stay only counts the added nights, same as the server's gate.
+  const heldNights = new Set(nightBudget?.held ?? []);
+  const budgetSpentAt = new Map<string, number>();
+  let budgetSpentTotal = 0;
+  if (nightBudget != null && checkIn && previewEnd) {
+    for (let d = checkIn; d < previewEnd; d = addDays(d, 1)) {
+      budgetSpentAt.set(d, budgetSpentTotal);
+      if (!heldNights.has(d)) budgetSpentTotal += 1;
+    }
+  }
 
   const fields: { field: Field; label: string; value: string | null }[] = [
     { field: "checkin", label: "Check In", value: checkIn },
@@ -417,13 +447,36 @@ export default function DateRangeField({
               // as the hotel filling up.
               const outOfWindow =
                 key < today || (maxDate !== null && key > maxDate);
-              // The property's real free count, uncapped. It used to be clamped
-              // to MAX_ROOMS_PER_GUEST on the grounds that one guest can't book
-              // more — but this number answers "how full is the hotel that
-              // night", not "how many may I have". Clamping it made a 48-room
-              // night and a 6-room night look identical.
+              // The property's real free count, uncapped — this answers "how
+              // full is the hotel that night", so it shows every free room.
               const roomsLeft =
                 roomsFreeOn && !outOfWindow ? roomsFreeOn(key) : 0;
+              // When a per-guest online cap is set (guest booking flow), a night
+              // with more free rooms than the cap can only take `cap` online —
+              // the rest are arranged on a call. The "R" count shows what's
+              // bookable here, and a phone marks that more are available beyond.
+              const bookableHere = Math.min(roomsLeft, bookableCap);
+              const overCap = roomsLeft > bookableCap;
+              // A night that pushes the stay past the guest's per-night budget.
+              // Gated on `inRange` so it behaves like the range preview: yellow
+              // shows only on nights inside the span they're hovering/selecting
+              // once it crosses the threshold — never a blanket fill the moment
+              // a check-in is picked. The night stays clickable (picking it
+              // routes to "request a call").
+              // The hovered/selected check-out day is a boundary, not a night
+              // stayed, so it never counts toward the budget or shows amber —
+              // and a night the guest already holds spends no budget, so it
+              // never marks either.
+              const overBudgetNight =
+                nightBudget != null &&
+                inRange &&
+                key !== previewEnd &&
+                !booked &&
+                !heldNights.has(key) &&
+                (budgetSpentAt.get(key) ?? 0) >= nightBudget.remaining;
+              const budgetTip = overBudgetNight
+                ? `The host lets one guest book at most ${nightBudget!.limit} nights online here${nightBudget!.remaining < nightBudget!.limit ? ` (${nightBudget!.remaining} left for you)` : ""} — request a call to stay longer.`
+                : null;
               const dayButton = (
                 <button
                   key={key}
@@ -434,36 +487,41 @@ export default function DateRangeField({
                   aria-label={
                     // The count is rendered aria-hidden (a bare "3" says
                     // nothing on its own), so it rides along here instead.
-                    roomsLeft > 0
-                      ? `${day} ${MONTH_NAMES[view.month]} ${view.year}, ${roomsLeft} room${roomsLeft === 1 ? "" : "s"} left`
-                      : `${day} ${MONTH_NAMES[view.month]} ${view.year}`
+                    (roomsLeft > 0
+                      ? `${day} ${MONTH_NAMES[view.month]} ${view.year}, ${bookableHere} room${bookableHere === 1 ? "" : "s"} bookable${overCap ? " online — request a call for more" : ""}`
+                      : `${day} ${MONTH_NAMES[view.month]} ${view.year}`) +
+                    (overBudgetNight ? " — over your night limit, request a call" : "")
                   }
                   aria-pressed={isEdge}
                   title={
-                    !booked
+                    budgetTip ??
+                    (!booked
                       ? undefined
                       : !disabled
                         ? "Available as check-out"
                         : checkoutOnly
                           ? "Check-out only — a stay can end here, not start here"
-                          : "Already booked"
+                          : "Already booked")
                   }
                   className={`mx-auto flex h-9 w-9 items-center justify-center rounded-full text-[14px] transition-colors ${
                     /* Every fully-booked day reads as full — CROSSED — even a
                        turnover day a stay may still END on (kept clickable,
                        dark ink + tooltip say so). "Plain text with a tooltip"
-                       looked available, and guests don't hover. */
+                       looked available, and guests don't hover. Over-budget
+                       nights read amber so the threshold is visible at a glance. */
                     disabled
                       ? booked
                         ? "cursor-default text-soft/70 line-through"
                         : "cursor-default text-soft/70"
                       : isEdge
                         ? "bg-brand font-semibold text-white"
-                        : inRange
-                          ? "bg-[rgba(123,97,255,0.15)] text-ink"
-                          : booked
-                            ? "text-ink line-through hover:bg-[rgba(123,97,255,0.12)]"
-                            : "text-ink hover:bg-[rgba(123,97,255,0.12)]"
+                        : overBudgetNight
+                          ? "bg-[#fbe9c4] text-[#8a6a1f] hover:bg-[#f8dfa8]"
+                          : inRange
+                            ? "bg-[rgba(123,97,255,0.15)] text-ink"
+                            : booked
+                              ? "text-ink line-through hover:bg-[rgba(123,97,255,0.12)]"
+                              : "text-ink hover:bg-[rgba(123,97,255,0.12)]"
                   }`}
                 >
                   {day}
@@ -476,14 +534,23 @@ export default function DateRangeField({
                 <span key={key} className="flex flex-col items-center">
                   {dayButton}
                   {/* Fixed height whether or not there's a number, so rows don't
-                      jump between months. */}
+                      jump between months. "3R" = 3 rooms bookable; a ☎ means
+                      more are free but need a call (over the online cap). */}
                   <span
                     aria-hidden
-                    className={`mt-0.5 h-[12px] text-[10px] font-semibold leading-[12px] ${
-                      roomsLeft > 0 ? roomsTone(roomsLeft) : ""
+                    className={`mt-0.5 flex h-[12px] items-center gap-[1px] text-[10px] font-semibold leading-[12px] ${
+                      roomsLeft > 0 ? roomsTone(bookableHere) : ""
                     }`}
                   >
-                    {roomsLeft > 0 ? roomsLeft : ""}
+                    {roomsLeft > 0 ? `${bookableHere}R` : ""}
+                    {overCap && (
+                      <span
+                        className="text-[8px] text-[#8a6a1f]"
+                        title={`More than ${bookableCap} rooms are free — book ${bookableCap} online, request a call for the rest.`}
+                      >
+                        ☎
+                      </span>
+                    )}
                   </span>
                 </span>
               );
@@ -504,8 +571,15 @@ export default function DateRangeField({
               not like a key. */}
           {roomsFreeOn && (
             <p className="mt-1 text-[13px] text-soft">
-              The number under each date is how many rooms are still free that
+              &ldquo;3R&rdquo; under a date means 3 rooms are bookable that
               night.
+              {bookableCapProp != null && (
+                <>
+                  {" "}
+                  A <span aria-hidden>☎</span> means more are free than you can
+                  book online ({bookableCap}) — request a call for the rest.
+                </>
+              )}
             </p>
           )}
           {monthHasBooked && (
@@ -513,6 +587,15 @@ export default function DateRangeField({
               Crossed-out dates are unavailable — they are already booked.
             </p>
           )}
+          {nightBudget != null &&
+            checkIn !== null &&
+            previewEnd !== null &&
+            budgetSpentTotal > nightBudget.remaining && (
+              <p className="mt-1 text-[13px] text-[#8a6a1f]">
+                Yellow nights are past the {nightBudget.limit}-night limit one
+                guest can book online here — request a call to stay longer.
+              </p>
+            )}
         </div>
       )}
     </div>

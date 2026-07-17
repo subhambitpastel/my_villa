@@ -22,13 +22,15 @@ import PickerField from "@/components/ui/PickerField";
 import type { BookedRange } from "@/lib/queries";
 import type { VillaService } from "@/components/host/draft";
 import {
-  allowanceFree,
+  dayBudget,
   fullyBookedRanges,
-  MAX_ROOMS_PER_GUEST,
+  isGraduated,
+  nightsInRange,
+  planRoomNights,
+  roomPlanFor,
   roomsBookedOn,
   roomsFreeForRange,
   type RoomBooking,
-  type RoomSegment,
 } from "@/lib/rooms";
 
 
@@ -78,6 +80,7 @@ export default function ManageBookingCard({
   roomBased = false,
   totalRooms = 1,
   peoplePerRoom = 0,
+  maxBookingDays = 0,
   rooms = 1,
   roomBookings = [],
   myRoomBookings = [],
@@ -87,7 +90,6 @@ export default function ManageBookingCard({
   originalExtras = [],
   originalTotal = 0,
   locked = false,
-  roomPlan = null,
   couponCode = "",
   discPct = 0,
   discFixed = 0,
@@ -112,19 +114,18 @@ export default function ManageBookingCard({
   roomBased?: boolean;
   totalRooms?: number;
   peoplePerRoom?: number;
+  /** Most distinct nights one guest may book here across all their stays
+   *  (hotels/resorts). 0 = no limit. Re-dating past it is refused. */
+  maxBookingDays?: number;
   rooms?: number;
   roomBookings?: RoomBooking[];
-  /** This guest's OTHER rooms at the villa (this booking excluded). The per-guest
-   *  cap counts against them here exactly as it does when booking, so editing
-   *  can't offer rooms modifyBookingAction would refuse. */
+  /** This guest's OTHER stays at the villa (this booking excluded). The per-guest
+   *  day budget counts against them here exactly as it does when booking, so
+   *  editing can't offer dates modifyBookingAction would refuse. */
   myRoomBookings?: RoomBooking[];
   /** Set when this booking is a package: its length, occupancy and price are
    *  fixed, so the guest may only shift the start date. */
   packageStay?: { nights: number; price: number } | null;
-  /** Set when the stay holds different rooms on different nights (host
-   *  arranged it leg by leg). The editors here only speak one flat count and
-   *  the server refuses modifying such a stay, so it renders read-only. */
-  roomPlan?: RoomSegment[] | null;
   /** The booking's own discount, re-applied to every re-priced total so an
    *  edit never silently drops it: the coupon it was bought with (labelled by
    *  `couponCode`, price floored at $1) or the owner's promised discount. */
@@ -275,25 +276,10 @@ export default function ManageBookingCard({
     locked,
   };
 
-  // A stay the host arranged night by night can't be reshaped here — every
-  // editor below speaks one flat room count, and the server refuses re-dating
-  // or modifying it. Show it faithfully; changes go through the host, and
-  // cancelling (the footer) still works.
-  if (roomBased && roomPlan && roomPlan.length > 0) {
-    return (
-      <PlanStayCard
-        checkIn={checkIn}
-        checkOut={checkOut}
-        guests={guests}
-        roomPlan={roomPlan}
-        extras={originalExtras
-          .map((i) => services[i])
-          .filter((s): s is VillaService => !!s)}
-        footer={footer}
-      />
-    );
-  }
-
+  // A night-by-night stay (host-arranged or the guest's own adjusted booking)
+  // is edited like any other: the room count below is an ASK, and the stay is
+  // re-derived night by night — the `rooms` prop carries its peak, so opening
+  // the editor unchanged re-derives the very same legs and prices to $0 delta.
   if (packageStay) {
     return (
       <PackageManageCard
@@ -326,6 +312,7 @@ export default function ManageBookingCard({
       roomBased={roomBased}
       totalRooms={totalRooms}
       peoplePerRoom={peoplePerRoom}
+      maxBookingDays={maxBookingDays}
       rooms={rooms}
       roomBookings={roomBookings}
       myRoomBookings={myRoomBookings}
@@ -337,86 +324,6 @@ export default function ManageBookingCard({
       discPct={discPct}
       discFixed={discFixed}
     />
-  );
-}
-
-/* ──────────────────── Night-by-night stay: view only ──────────────────── */
-// The host fulfilled this ask with different rooms on different nights. There
-// is nothing here a flat rooms-picker could edit without lying about at least
-// one night, so the stay is shown exactly as arranged and changes are routed
-// back through the host. Cancelling stays available via the shared footer.
-function PlanStayCard({
-  checkIn,
-  checkOut,
-  guests,
-  roomPlan,
-  extras,
-  footer,
-}: {
-  checkIn: string;
-  checkOut: string;
-  guests: number;
-  roomPlan: RoomSegment[];
-  extras: VillaService[];
-  footer: React.ReactNode;
-}) {
-  const nights = Math.max(1, nightsBetween(checkIn, checkOut));
-  return (
-    <aside className="h-fit w-full min-w-0 max-w-[576px] rounded-[20px] bg-white px-[41px] py-[48px] shadow-[0px_15px_50px_0px_rgba(0,0,0,0.18)] lg:mt-[60px]">
-      <p className="text-[22px] font-semibold leading-[1.2] text-[#121212]">
-        Your stay
-      </p>
-      <dl className="mt-6 space-y-4 text-[16px] leading-[1.4] text-[#121212]">
-        <div className="flex items-start justify-between gap-4">
-          <dt className="text-[#7a7a85]">Dates</dt>
-          <dd className="text-right font-medium">
-            {formatRange(checkIn, checkOut)}
-            <span className="block text-[13px] font-normal text-[#7a7a85]">
-              {nights} night{nights === 1 ? "" : "s"}
-            </span>
-          </dd>
-        </div>
-        <div>
-          <dt className="text-[#7a7a85]">Rooms by night</dt>
-          <dd>
-            <ul className="mt-1.5 space-y-1.5">
-              {roomPlan.map((seg) => (
-                <li
-                  key={seg.checkIn}
-                  className="flex items-center justify-between gap-4"
-                >
-                  <span className="text-[15px] text-[#3a3a44]">
-                    {formatRange(seg.checkIn, seg.checkOut)}
-                  </span>
-                  <span className="font-semibold">
-                    {seg.rooms} room{seg.rooms === 1 ? "" : "s"}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </dd>
-        </div>
-        <div className="flex items-center justify-between gap-4">
-          <dt className="text-[#7a7a85]">Guests</dt>
-          <dd className="font-medium">{guests}</dd>
-        </div>
-        {extras.length > 0 && (
-          <div className="flex items-start justify-between gap-4">
-            <dt className="text-[#7a7a85]">Add-ons</dt>
-            <dd className="text-right font-medium">
-              {extras.map((e) => e.name).join(", ")}
-            </dd>
-          </div>
-        )}
-      </dl>
-      <p className="mt-6 rounded-[10px] bg-[#fff6e5] px-4 py-3 text-[14px] leading-[1.5] text-[#a06a00]">
-        Your host arranged this stay night by night to fit the calendar, so it
-        can&apos;t be edited online — ask your host to change the dates, rooms
-        or guests and they&apos;ll rearrange it for you. You can still cancel
-        below.
-      </p>
-      {footer}
-    </aside>
   );
 }
 
@@ -437,6 +344,7 @@ function NightlyManageCard({
   roomBased,
   totalRooms,
   peoplePerRoom,
+  maxBookingDays,
   rooms: initialRooms,
   roomBookings,
   myRoomBookings,
@@ -465,6 +373,7 @@ function NightlyManageCard({
   roomBased: boolean;
   totalRooms: number;
   peoplePerRoom: number;
+  maxBookingDays: number;
   rooms: number;
   roomBookings: RoomBooking[];
   myRoomBookings: RoomBooking[];
@@ -504,37 +413,76 @@ function NightlyManageCard({
       ? roomsFreeForRange(checkIn, checkOut, roomBookings, totalRooms)
       : totalRooms
     : 1;
-  // What's left of this guest's per-night allowance, counting their OTHER stays
-  // here (this booking is excluded, so re-saving its own rooms never counts
-  // against itself — same exclusion modifyBookingAction uses).
-  const allowanceLeft = roomBased
+  // Rooms aren't rationed per guest any more — the ceiling is the BEST night's
+  // free inventory, not the bottleneck: an ask above the bottleneck re-derives
+  // the stay night by night (min(ask, free) per night), exactly how a
+  // night-by-night booking was created in the first place.
+  const bestNightFree = roomBased
     ? datesReady
-      ? allowanceFree(checkIn, checkOut, myRoomBookings)
-      : MAX_ROOMS_PER_GUEST
+      ? Math.max(
+          0,
+          ...nightsInRange(checkIn, checkOut).map(
+            (n) => totalRooms - roomsBookedOn(n, roomBookings),
+          ),
+        )
+      : totalRooms
     : 1;
-  // The ceiling is the SAME here as when booking: the hotel's free inventory and
-  // the guest's own allowance, whichever is tighter. Offering the full inventory
-  // would let someone edit their way to 12 rooms when booking caps them at 6 —
-  // and modifyBookingAction would refuse it anyway.
-  const roomsMax = roomBased
-    ? Math.max(1, Math.min(roomsFree, allowanceLeft))
-    : 1;
-  const rooms = roomBased ? Math.min(roomsSel, roomsMax) : 1;
-  // They're pinned below the inventory by their own rooms elsewhere — say so,
-  // rather than letting the picker just stop for no visible reason.
-  const cappedByAllowance = roomBased && datesReady && allowanceLeft < roomsFree;
-  const soldOut = roomBased && datesReady && roomsFree === 0;
+  const roomsMax = roomBased ? Math.max(1, bestNightFree) : 1;
+  const rooms = roomBased ? Math.min(Math.max(1, roomsSel), roomsMax) : 1;
+  const soldOut = roomBased && datesReady && bestNightFree === 0;
+  // What the edited stay would hold each night. This booking's own rooms are
+  // excluded from `roomBookings`, so they're back in the pool — re-asking for
+  // the stored peak re-derives the very same legs. Flat plans price as flat;
+  // a graduated one is previewed below and saved with the flex opt-in.
+  const plan =
+    roomBased && datesReady && !soldOut
+      ? roomPlanFor(checkIn, checkOut, roomBookings, totalRooms, rooms, [])
+      : [];
+  const graduated = isGraduated(plan);
+  // The property's per-guest NIGHT budget, counting this guest's OTHER stays
+  // here (this booking excluded, so re-saving its own dates never counts against
+  // itself). Re-dating past it is refused by modifyBookingAction — mirror that
+  // here so the guest sees why before they try to save.
+  const budget =
+    roomBased && datesReady
+      ? dayBudget(maxBookingDays, myRoomBookings, checkIn, checkOut)
+      : null;
+  const overBudget = !!budget?.overBudget;
+  // A graduated stay sleeps what its legs sleep, summed — the same rule the
+  // booking flow and modifyBookingAction enforce.
   const guestCap = roomBased
-    ? Math.max(1, rooms * peoplePerRoom)
+    ? Math.max(
+        1,
+        graduated
+          ? plan.reduce((s, leg) => s + leg.rooms * peoplePerRoom, 0)
+          : rooms * peoplePerRoom,
+      )
     : Math.max(1, maxGuests);
   const guests = Math.min(Math.max(1, guestsSel), guestCap);
 
+  // Room-based: an empty plan means some night has nothing free at all —
+  // asks the plan CAN meet (even with fewer rooms on some nights) are fine.
   const unavailable =
     datesReady &&
-    (calendarBlocked.some((r) => r.checkIn < checkOut && r.checkOut > checkIn) ||
-      (roomBased && roomsFree < rooms));
+    (overBudget ||
+      (roomBased
+        ? plan.length === 0
+        : calendarBlocked.some(
+            (r) => r.checkIn < checkOut && r.checkOut > checkIn,
+          )));
 
-  const q = quote(roomBased ? price * rooms : price, nights, discount);
+  // Priced by ROOM-NIGHTS so graduated legs charge exactly what they hold —
+  // the same figures the payment page and receipts compute.
+  const roomNights = roomBased
+    ? graduated
+      ? planRoomNights(plan)
+      : rooms * nights
+    : nights;
+  const q = quote(
+    nights > 0 ? (price * roomNights) / nights : 0,
+    nights,
+    discount,
+  );
   const chosenTotal = chosen.reduce((sum, i) => sum + (services[i]?.price ?? 0), 0);
   // The booking's own discount rides every re-priced total: a percentage
   // scales with the new stay, a fixed amount comes off once — and a coupon
@@ -574,7 +522,7 @@ function NightlyManageCard({
       const svc = chosen.length > 0 ? `&svc=${chosen.join(",")}` : "";
       router.push(
         `/payment?villa=${villaId}&in=${checkIn}&out=${checkOut}&guests=${guests}` +
-          `${roomBased ? `&rooms=${rooms}` : ""}${svc}&modify=${bookingId}`,
+          `${roomBased ? `&rooms=${rooms}` : ""}${graduated ? "&flex=1" : ""}${svc}&modify=${bookingId}`,
       );
       return;
     }
@@ -586,6 +534,8 @@ function NightlyManageCard({
         guests,
         rooms,
         serviceIdx: chosen,
+        // The split previewed above; the server re-derives it on save.
+        flex: graduated,
       });
       if (!res.ok) {
         setMessage({ ok: false, text: res.error });
@@ -688,13 +638,11 @@ function NightlyManageCard({
               <span className="text-[#4a4a4a]">
                 {rooms} {rooms === 1 ? "room" : "rooms"}
                 {datesReady && (
-                  <span className="text-[#8a8a94]"> · {roomsFree} available</span>
-                )}
-                {/* Say WHY the picker stops short of the inventory. */}
-                {cappedByAllowance && (
-                  <span className="text-[#8a6a1f]">
+                  <span className="text-[#8a8a94]">
                     {" "}
-                    · you can hold {allowanceLeft} more here
+                    {graduated
+                      ? "· varies by night — see below"
+                      : `· ${roomsFree} available`}
                   </span>
                 )}
               </span>
@@ -746,6 +694,35 @@ function NightlyManageCard({
         </div>
       )}
 
+      {/* The ask isn't free every night, so the stay flexes — show exactly
+          which nights hold how many rooms before anything is saved, the same
+          preview the booking card gives before an adjusted stay is bought. */}
+      {graduated && (
+        <div className="mt-[22px] rounded-[10px] border-[1.5px] border-[#e8d5a3] bg-[#fdf9f0] p-[15px]">
+          <p className="text-[15px] font-semibold leading-[1.3] text-[#8a6a1f]">
+            Your rooms change during this stay
+          </p>
+          <ul className="mt-2 space-y-1.5">
+            {plan.map((seg) => (
+              <li
+                key={seg.checkIn}
+                className="flex items-center justify-between gap-3 text-[14px] leading-[1.3]"
+              >
+                <span className="text-[#121212]">
+                  {formatRange(seg.checkIn, seg.checkOut)}
+                </span>
+                <span className="shrink-0 font-semibold text-[#8a6a1f]">
+                  {seg.rooms} {seg.rooms === 1 ? "room" : "rooms"}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-[13px] leading-[1.4] text-[#7a6a45]">
+            You&apos;re only charged for the rooms you have each night.
+          </p>
+        </div>
+      )}
+
       {/* Same line the booking card draws: online stays cap at MAX_STAY_NIGHTS.
           A silent disabled button reads as broken — say why, and where a longer
           stay CAN be arranged. */}
@@ -781,9 +758,11 @@ function NightlyManageCard({
             !
           </span>
           <span>
-            {roomBased
-              ? `No rooms left for ${formatRange(checkIn, checkOut)}. Try fewer rooms or different dates.`
-              : `This villa is already booked for ${formatRange(checkIn, checkOut)}. Please choose different dates.`}
+            {overBudget && budget
+              ? `This property lets one guest book at most ${maxBookingDays} night${maxBookingDays === 1 ? "" : "s"} — these dates would put you at ${budget.used + budget.added}. Pick a shorter stay, or ask the host to arrange more.`
+              : roomBased
+                ? `No rooms left for ${formatRange(checkIn, checkOut)}. Try fewer rooms or different dates.`
+                : `This villa is already booked for ${formatRange(checkIn, checkOut)}. Please choose different dates.`}
           </span>
         </p>
       )}
@@ -793,9 +772,9 @@ function NightlyManageCard({
       <dl className="mt-[40px] space-y-[18px] text-[20px] leading-[1.2] text-black">
         <div className="flex items-center justify-between">
           <dt>
-            ${price}
-            {roomBased ? ` × ${rooms} room${rooms === 1 ? "" : "s"}` : ""} ×{" "}
-            {nights} night{nights === 1 ? "" : "s"}
+            {graduated
+              ? `$${price} × ${roomNights} room-night${roomNights === 1 ? "" : "s"}`
+              : `$${price}${roomBased ? ` × ${rooms} room${rooms === 1 ? "" : "s"}` : ""} × ${nights} night${nights === 1 ? "" : "s"}`}
           </dt>
           <dd className="font-light">${q.subtotal.toFixed(2)}</dd>
         </div>

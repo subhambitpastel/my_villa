@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
-  allowanceFree,
+  bookedNights,
+  dayBudget,
+  hasDayLimit,
   isGraduated,
-  MAX_ROOMS_PER_GUEST,
   neededSpan,
   parseRoomPlan,
-  planFitsAllowance,
   planMaxRooms,
   planMinRooms,
   planRoomNights,
@@ -23,9 +23,6 @@ const EXISTING: RoomBooking[] = [
   { checkIn: "2026-07-16", checkOut: "2026-07-18", rooms: 2 },
 ];
 
-// A guest's OWN rooms limit them too, not just the hotel's inventory: they may
-// hold MAX_ROOMS_PER_GUEST a night, so nights they're already on cost them
-// allowance. A roomy hotel isolates that from any inventory shortfall.
 // Extending a stay: rooms already held satisfy the ask on their nights, so the
 // new booking covers only the nights that still need rooms.
 describe("neededSpan", () => {
@@ -93,13 +90,13 @@ describe("neededSpan", () => {
   });
 });
 
-describe("roomPlanFor (per-guest allowance)", () => {
+describe("roomPlanFor (top-up against held rooms)", () => {
   const BIG_HOTEL = 20;
 
   it("tops up to the ask on nights the guest already holds rooms", () => {
     // Holds 4 rooms Jul 24–26; now wants to hold 5 a night, Jul 24–29. Those
-    // first nights need ONE more (not two — the cap has 2 spare, but they only
-    // asked for 5); from the 26th they hold nothing, so all 5 are needed.
+    // first nights need ONE more (they only asked for 5); from the 26th they
+    // hold nothing, so all 5 are needed.
     const mine: RoomBooking[] = [
       { checkIn: "2026-07-24", checkOut: "2026-07-26", rooms: 4 },
     ];
@@ -110,23 +107,20 @@ describe("roomPlanFor (per-guest allowance)", () => {
       BIG_HOTEL,
       5,
       mine,
-      MAX_ROOMS_PER_GUEST,
     );
     expect(plan).toEqual([
       { checkIn: "2026-07-24", checkOut: "2026-07-26", rooms: 1 },
       { checkIn: "2026-07-26", checkOut: "2026-07-29", rooms: 5 },
     ]);
     expect(isGraduated(plan)).toBe(true);
-    // Never over the cap: 4 held + 1 new = 5.
-    expect(planFitsAllowance(plan, mine)).toBe(true);
   });
 
-  it("never books past the ask, even when the cap has room to spare", () => {
-    // Holds 2, asks 3 → adds exactly 1, though the cap would allow 4 more.
+  it("never books past the ask", () => {
+    // Holds 2, asks 3 → adds exactly 1.
     const mine: RoomBooking[] = [
       { checkIn: "2026-07-24", checkOut: "2026-07-26", rooms: 2 },
     ];
-    const plan = roomPlanFor("2026-07-24", "2026-07-26", mine, BIG_HOTEL, 3, mine, MAX_ROOMS_PER_GUEST);
+    const plan = roomPlanFor("2026-07-24", "2026-07-26", mine, BIG_HOTEL, 3, mine);
     expect(plan).toEqual([
       { checkIn: "2026-07-24", checkOut: "2026-07-26", rooms: 1 },
     ]);
@@ -138,34 +132,33 @@ describe("roomPlanFor (per-guest allowance)", () => {
       { checkIn: "2026-07-24", checkOut: "2026-07-26", rooms: 4 },
     ];
     expect(
-      roomPlanFor("2026-07-24", "2026-07-26", mine, BIG_HOTEL, 4, mine, MAX_ROOMS_PER_GUEST),
+      roomPlanFor("2026-07-24", "2026-07-26", mine, BIG_HOTEL, 4, mine),
     ).toEqual([]);
   });
 
-  it("returns no plan when the allowance is spent on every night", () => {
+  it("returns no plan when the ask is at or below what's already held", () => {
     const mine: RoomBooking[] = [
       { checkIn: "2026-07-24", checkOut: "2026-07-26", rooms: 6 },
     ];
     expect(
-      roomPlanFor("2026-07-24", "2026-07-26", mine, BIG_HOTEL, 1, mine, MAX_ROOMS_PER_GUEST),
+      roomPlanFor("2026-07-24", "2026-07-26", mine, BIG_HOTEL, 1, mine),
     ).toEqual([]);
   });
 
-  it("takes the TIGHTER of inventory and allowance", () => {
-    // 3-room hotel with 2 sold to someone else: inventory allows 1, and the
-    // guest's untouched allowance would allow 6 — inventory must win.
+  it("is capped by free inventory", () => {
+    // 3-room hotel with 2 sold to someone else: only 1 room is free, so an ask
+    // for 6 books just the 1 available.
     const others: RoomBooking[] = [
       { checkIn: "2026-07-24", checkOut: "2026-07-26", rooms: 2 },
     ];
-    const plan = roomPlanFor("2026-07-24", "2026-07-26", others, 3, 6, [], MAX_ROOMS_PER_GUEST);
+    const plan = roomPlanFor("2026-07-24", "2026-07-26", others, 3, 6, []);
     expect(plan).toEqual([
       { checkIn: "2026-07-24", checkOut: "2026-07-26", rooms: 1 },
     ]);
   });
 
-  it("is inventory-only when no allowance is passed (unchanged callers)", () => {
-    // Same shape as the case above but without held/allowance: a 10-room hotel
-    // must still offer all 8 asked for, i.e. the cap must NOT sneak in.
+  it("offers the whole ask when the hotel has room (no held rooms)", () => {
+    // A 10-room hotel must offer all 8 asked for.
     const plan = roomPlanFor("2026-07-24", "2026-07-26", [], 10, 8);
     expect(plan).toEqual([
       { checkIn: "2026-07-24", checkOut: "2026-07-26", rooms: 8 },
@@ -276,82 +269,76 @@ describe("booked plan segments consume inventory per night", () => {
   });
 });
 
-describe("allowanceFree (per-guest room cap)", () => {
-  it("gives a guest with nothing booked the full allowance", () => {
-    expect(allowanceFree("2026-07-10", "2026-07-12", [])).toBe(MAX_ROOMS_PER_GUEST);
-  });
-
-  it("counts rooms the guest already holds on the same nights", () => {
-    const held: RoomBooking[] = [
-      { checkIn: "2026-07-10", checkOut: "2026-07-12", rooms: 4 },
-    ];
-    expect(allowanceFree("2026-07-10", "2026-07-12", held)).toBe(2);
-  });
-
-  it("is exhausted once the guest holds the full allowance", () => {
-    const held: RoomBooking[] = [
-      { checkIn: "2026-07-10", checkOut: "2026-07-12", rooms: 6 },
-    ];
-    expect(allowanceFree("2026-07-10", "2026-07-12", held)).toBe(0);
-  });
-
-  it("adds up across SEPARATE bookings on the same night (can't be split)", () => {
-    const held: RoomBooking[] = [
-      { checkIn: "2026-07-10", checkOut: "2026-07-12", rooms: 3 },
-      { checkIn: "2026-07-10", checkOut: "2026-07-12", rooms: 3 },
-    ];
-    expect(allowanceFree("2026-07-10", "2026-07-12", held)).toBe(0);
-  });
-
-  it("bites on the worst night, not the average", () => {
-    // 6 rooms held on Jul 11 only; a Jul 10–12 stay overlaps that night.
-    const held: RoomBooking[] = [
-      { checkIn: "2026-07-11", checkOut: "2026-07-12", rooms: 6 },
-    ];
-    expect(allowanceFree("2026-07-10", "2026-07-12", held)).toBe(0);
-    // Jul 10–11 misses it entirely, so the allowance is untouched.
-    expect(allowanceFree("2026-07-10", "2026-07-11", held)).toBe(6);
-  });
-
-  it("ignores rooms held on nights that don't overlap", () => {
-    const held: RoomBooking[] = [
-      { checkIn: "2026-08-01", checkOut: "2026-08-03", rooms: 6 },
-    ];
-    expect(allowanceFree("2026-07-10", "2026-07-12", held)).toBe(6);
-  });
-
-  it("treats a check-out day as free (half-open range)", () => {
-    const held: RoomBooking[] = [
-      { checkIn: "2026-07-08", checkOut: "2026-07-10", rooms: 6 },
-    ];
-    // The held stay ends the morning of the 10th, so a 10th–12th stay is clear.
-    expect(allowanceFree("2026-07-10", "2026-07-12", held)).toBe(6);
+describe("hasDayLimit", () => {
+  it("is false for 0 (no limit) and negatives, true for a positive cap", () => {
+    expect(hasDayLimit(0)).toBe(false);
+    expect(hasDayLimit(-1)).toBe(false);
+    expect(hasDayLimit(Infinity)).toBe(false);
+    expect(hasDayLimit(4)).toBe(true);
   });
 });
 
-describe("planFitsAllowance", () => {
-  const plan = [
-    { checkIn: "2026-07-10", checkOut: "2026-07-12", rooms: 2 },
-    { checkIn: "2026-07-12", checkOut: "2026-07-14", rooms: 5 },
-  ];
-
-  it("passes when every leg fits", () => {
-    expect(planFitsAllowance(plan, [])).toBe(true);
-  });
-
-  it("fails when a SINGLE leg busts the allowance", () => {
-    // 2 held Jul 12–14 → that leg needs 5 but only 4 remain.
-    const held: RoomBooking[] = [
-      { checkIn: "2026-07-12", checkOut: "2026-07-14", rooms: 2 },
-    ];
-    expect(planFitsAllowance(plan, held)).toBe(false);
-  });
-
-  it("passes when the held rooms only touch a leg with room to spare", () => {
-    // 3 held Jul 10–12 → that leg needs 2 and 3 remain; the other leg is clear.
+describe("bookedNights", () => {
+  it("collects the distinct nights across a guest's stays", () => {
     const held: RoomBooking[] = [
       { checkIn: "2026-07-10", checkOut: "2026-07-12", rooms: 3 },
+      { checkIn: "2026-07-15", checkOut: "2026-07-16", rooms: 1 },
     ];
-    expect(planFitsAllowance(plan, held)).toBe(true);
+    expect([...bookedNights(held)].sort()).toEqual([
+      "2026-07-10",
+      "2026-07-11",
+      "2026-07-15",
+    ]);
+  });
+
+  it("counts a night once no matter how many rooms or bookings touch it", () => {
+    const held: RoomBooking[] = [
+      { checkIn: "2026-07-10", checkOut: "2026-07-11", rooms: 5 },
+      { checkIn: "2026-07-10", checkOut: "2026-07-11", rooms: 2 },
+    ];
+    expect(bookedNights(held).size).toBe(1);
+  });
+});
+
+describe("dayBudget (per-guest night budget)", () => {
+  const HELD: RoomBooking[] = [
+    { checkIn: "2026-07-22", checkOut: "2026-07-24", rooms: 3 }, // nights 22, 23
+  ];
+
+  it("is never over budget when the owner set no limit", () => {
+    const b = dayBudget(0, HELD, "2026-07-24", "2026-08-24");
+    expect(b.limited).toBe(false);
+    expect(b.overBudget).toBe(false);
+    expect(b.remaining).toBe(Infinity);
+  });
+
+  it("spends the budget in distinct nights, counting held stays", () => {
+    // Limit 4, already holds 2 nights (22, 23). Booking 24→26 adds 24, 25.
+    const b = dayBudget(4, HELD, "2026-07-24", "2026-07-26");
+    expect(b.used).toBe(2);
+    expect(b.added).toBe(2);
+    expect(b.remaining).toBe(2);
+    expect(b.overBudget).toBe(false);
+  });
+
+  it("flags a booking that would push the guest past the limit", () => {
+    // Holds 2, limit 4, but this books 3 new nights (24, 25, 26) → 5 total.
+    const b = dayBudget(4, HELD, "2026-07-24", "2026-07-27");
+    expect(b.added).toBe(3);
+    expect(b.overBudget).toBe(true);
+  });
+
+  it("charges no nights for extra rooms on nights already held", () => {
+    // The whole range is nights the guest already occupies — 0 added, fits.
+    const b = dayBudget(2, HELD, "2026-07-22", "2026-07-24");
+    expect(b.added).toBe(0);
+    expect(b.overBudget).toBe(false);
+  });
+
+  it("is already spent once the guest holds the whole budget", () => {
+    const b = dayBudget(2, HELD, "2026-07-24", "2026-07-25");
+    expect(b.used).toBe(2);
+    expect(b.remaining).toBe(0);
+    expect(b.overBudget).toBe(true); // any new night busts it
   });
 });

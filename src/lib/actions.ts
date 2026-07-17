@@ -23,6 +23,8 @@ import { parsePackageType, presetNights, presetDiscount } from "./packageTypes";
 import {
   findCoupon,
   getCouponCodesLike,
+  hasRedeemedCoupon,
+  isCouponInUse,
   getGuestRoomBookings,
   getPackageBookingLock,
   getPackageById,
@@ -36,13 +38,12 @@ import {
   type BookingLock,
 } from "./queries";
 import {
-  allowanceFree,
+  dayBudget,
+  hasDayLimit,
   isGraduated,
   isRoomBased,
-  MAX_ROOMS_PER_GUEST,
   neededSpan,
   parseRoomPlan,
-  planFitsAllowance,
   planMaxRooms,
   roomCapacity,
   roomsForGuests,
@@ -322,6 +323,9 @@ type VillaInput = {
   maxGuests: number;
   /** Hotels/resorts: max occupancy of one room (0 for whole-villa kinds). */
   peoplePerRoom?: number;
+  /** Hotels/resorts: most distinct nights one guest may book across all their
+   *  stays here (0 = no limit). Ignored for whole-villa kinds. */
+  maxBookingDays?: number;
   facilities: string[];
   /** Extra services with the per-stay price the owner charges (0 = free). */
   services: { name: string; price: number }[];
@@ -397,16 +401,37 @@ function normalizeMaxGuests(value: number): number {
   return Math.min(30, Math.max(1, Math.trunc(value) || 1));
 }
 
-/** What to store for people_per_room + max_guests given the villa kind.
- *  Hotels/resorts sell by the room, so capacity = rooms × people-per-room and
- *  people_per_room is kept; other kinds keep 0 and the owner's guest cap. */
-function roomFields(input: VillaInput): { peoplePerRoom: number; maxGuests: number } {
+/** Owner's per-guest night budget, clamped to a sane 0–365 range (0 = no limit).
+ *  A cumulative budget across a guest's stays, so it may exceed a single stay's
+ *  MAX_STAY_NIGHTS; a year is a generous ceiling that still rules out nonsense. */
+function clampBookingDays(value: number | undefined): number {
+  return Math.min(365, Math.max(0, Math.trunc(value ?? 0) || 0));
+}
+
+/** What to store for people_per_room + max_guests + max_booking_days given the
+ *  villa kind. Hotels/resorts sell by the room, so capacity = rooms ×
+ *  people-per-room; other kinds keep 0 per-room and the owner's guest cap. The
+ *  per-guest day budget applies to EVERY kind — a whole-villa listing can cap a
+ *  guest's total nights just as a hotel can. */
+function roomFields(input: VillaInput): {
+  peoplePerRoom: number;
+  maxGuests: number;
+  maxBookingDays: number;
+} {
   if (isRoomBased(input.kind)) {
     const rooms = Math.max(1, Math.trunc(input.rooms) || 1);
     const perRoom = Math.max(1, Math.trunc(input.peoplePerRoom ?? 0) || 1);
-    return { peoplePerRoom: perRoom, maxGuests: Math.max(1, rooms * perRoom) };
+    return {
+      peoplePerRoom: perRoom,
+      maxGuests: Math.max(1, rooms * perRoom),
+      maxBookingDays: clampBookingDays(input.maxBookingDays),
+    };
   }
-  return { peoplePerRoom: 0, maxGuests: normalizeMaxGuests(input.maxGuests) };
+  return {
+    peoplePerRoom: 0,
+    maxGuests: normalizeMaxGuests(input.maxGuests),
+    maxBookingDays: clampBookingDays(input.maxBookingDays),
+  };
 }
 
 /** Host discount as a whole percent, clamped to a sane 0–90 range. */
@@ -459,8 +484,8 @@ export async function createVillaAction(
       await db.prepare(
         `INSERT INTO villas
            (owner_id, name, kind, description, area, address, city, rooms,
-            max_guests, people_per_room, facilities, services, price, discount, image, images)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            max_guests, people_per_room, max_booking_days, facilities, services, price, discount, image, images)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         user.id,
         input.name.trim(),
@@ -472,6 +497,7 @@ export async function createVillaAction(
         Math.max(1, Math.trunc(input.rooms) || 1),
         caps.maxGuests,
         caps.peoplePerRoom,
+        caps.maxBookingDays,
         JSON.stringify(input.facilities ?? []),
         JSON.stringify(normalizeServices(input.services)),
         input.price,
@@ -547,7 +573,7 @@ export async function updateVillaAction(
       .prepare(
         `UPDATE villas
          SET name = ?, kind = ?, description = ?, area = ?, address = ?, city = ?,
-             rooms = ?, max_guests = ?, people_per_room = ?,
+             rooms = ?, max_guests = ?, people_per_room = ?, max_booking_days = ?,
              facilities = ?, services = ?, price = ?, discount = ?, image = ?, images = ?
          WHERE id = ? AND owner_id = ?`,
       )
@@ -561,6 +587,7 @@ export async function updateVillaAction(
         rooms,
         caps.maxGuests,
         caps.peoplePerRoom,
+        caps.maxBookingDays,
         JSON.stringify(input.facilities ?? []),
         JSON.stringify(normalizeServices(input.services)),
         input.price,
@@ -1210,21 +1237,24 @@ export async function markCallChatReadAction(
   return { ok: true };
 }
 
-/** Why a room request busts the guest's own per-night cap, phrased for them.
- *  `free` is how much of the allowance is still open across the dates. Both
- *  wordings point at the call request — that's how a bigger block gets made. */
-function roomAllowanceError(free: number): string {
+/** Why a booking busts the property's per-guest night budget, phrased for the
+ *  guest. `limit` is the owner's cap; `b` is the budget picture from dayBudget.
+ *  Both wordings point at the call request — that's how a bigger stay gets made. */
+function dayBudgetError(
+  limit: number,
+  b: { used: number; remaining: number },
+): string {
+  const nights = (n: number) => `${n} night${n === 1 ? "" : "s"}`;
   const ask =
-    " To book more rooms for the same dates, request a call from the host and they'll arrange it for you.";
-  if (free <= 0)
+    " To book more nights at this property, request a call from the host and they'll arrange it for you.";
+  if (b.remaining <= 0)
     return (
-      `You've already booked ${MAX_ROOMS_PER_GUEST} rooms for these dates, which is the most one guest can book online.` +
+      `You've already booked ${nights(b.used)} here, which is the most one guest can book online for this property (${nights(limit)}).` +
       ask
     );
-  const held = MAX_ROOMS_PER_GUEST - free;
   return (
-    `You already have ${held} room${held === 1 ? "" : "s"} booked for these dates, so you can book at most ${free} more — ` +
-    `one guest can hold ${MAX_ROOMS_PER_GUEST} rooms a night.` +
+    `You already have ${nights(b.used)} booked here, so you can book at most ${nights(b.remaining)} more — ` +
+    `this property allows ${nights(limit)} per guest online.` +
     ask
   );
 }
@@ -1241,6 +1271,11 @@ export async function createBookingAction(input: {
    *  bottleneck (hotels/resorts, nightly stays only). The plan is recomputed
    *  server-side — the client only asks for the flexibility, never sets it. */
   flex?: boolean;
+  /** The guest already holds rooms on these dates and `rooms` counts rooms to
+   *  ADD on top — booked as a NEW, SEPARATE stay (never merged into the held
+   *  one). Skips the covered-nights trim; each night adds at most what it has
+   *  free, the guest's own rooms counting as taken. Hotels/resorts only. */
+  add?: boolean;
   /** Chosen paid add-ons, as indices into the villa's service list. */
   services?: number[];
   /** Booking a fixed package instead of a nightly stay. */
@@ -1284,7 +1319,7 @@ export async function createBookingAction(input: {
 
   const villa = (await db
     .prepare(
-      `SELECT id, owner_id, name, kind, rooms, max_guests, people_per_room, services, locked_at
+      `SELECT id, owner_id, name, kind, rooms, max_guests, people_per_room, max_booking_days, services, locked_at
        FROM villas WHERE id = ?`,
     )
     .get(input.villaId)) as
@@ -1296,6 +1331,7 @@ export async function createBookingAction(input: {
         rooms: number;
         max_guests: number;
         people_per_room: number;
+        max_booking_days: number;
         services: string;
         locked_at: string | null;
       }
@@ -1319,6 +1355,7 @@ export async function createBookingAction(input: {
   // guest cap depends on the live plan — validated inside the transaction below
   // rather than against a single flat room count here.
   const flex = roomBased && !pkg && input.flex === true;
+  const addMode = roomBased && !pkg && input.add === true;
   let roomsNeeded = 1;
   let extras: { name: string; price: number }[] = [];
 
@@ -1344,11 +1381,11 @@ export async function createBookingAction(input: {
     // kinds book the whole place (1 unit, guests capped at max_guests).
     if (roomBased) {
       const capacity = roomCapacity(villa.kind, villa.rooms);
-      // Capped by the hotel's inventory AND by what one guest may take through
-      // self-serve — a bigger block goes through the host on a call.
+      // Capped only by the hotel's inventory now — a guest may take as many
+      // rooms as the property has. What's rationed is NIGHTS, not rooms (the
+      // per-guest day budget below), and a bigger stay goes through the host.
       roomsNeeded = Math.min(
         capacity,
-        MAX_ROOMS_PER_GUEST,
         Math.max(1, Math.trunc(input.rooms ?? 1) || 1),
       );
       const guestCap = roomsNeeded * perRoom;
@@ -1390,12 +1427,16 @@ export async function createBookingAction(input: {
       // holds satisfy the ask on their nights, so a range that overlaps an
       // existing stay books only the missing part — the same trim the booking
       // card applied, re-derived here so a stale client can't book nights the
-      // guest already has. Packages keep their fixed span.
+      // guest already has. Packages keep their fixed span. Add mode skips the
+      // trim: the ask is rooms ON TOP of the held ones, wanted on every picked
+      // night, and books as its own separate stay.
       let bookIn = checkIn;
       let bookOut = checkOut;
-      const mine =
-        roomBased ? await getGuestRoomBookings(villa.id, user.id) : [];
-      if (roomBased && !pkg) {
+      // The guest's own stays here — the day budget counts nights across ALL of
+      // them, so it's fetched for every kind (the room-trim logic below still
+      // only uses it for room-based stays).
+      const mine = await getGuestRoomBookings(villa.id, user.id);
+      if (roomBased && !pkg && !addMode) {
         const span = neededSpan(bookIn, bookOut, roomsNeeded, mine);
         if (!span)
           return {
@@ -1414,15 +1455,17 @@ export async function createBookingAction(input: {
       let plan: RoomSegment[] = [];
       if (flex) {
         // Passing the guest makes this the SAME plan the booking card offered:
-        // each night limited by free inventory AND by what's left of this
-        // guest's own per-night allowance.
+        // each night limited by free inventory, with rooms the guest already
+        // holds here topping up toward the ask. In add mode the ask is rooms
+        // to ADD, so the plan is inventory-only (guest 0): min(add, free) per
+        // night, the guest's held rooms already counting as taken.
         plan = await getRoomPlan(
           villa.id,
           bookIn,
           bookOut,
           roomsNeeded,
           0,
-          user.id,
+          addMode ? 0 : user.id,
         );
         if (plan.length === 0) return { error: noRoomsMsg };
         if (!isGraduated(plan)) {
@@ -1454,24 +1497,21 @@ export async function createBookingAction(input: {
       ) {
         return { error: noRoomsMsg };
       }
-      // No one guest may take more than MAX_ROOMS_PER_GUEST rooms on a night,
-      // counting every room they ALREADY hold here — so a big block can't be
-      // assembled by booking six at a time. Inside the tx next to the
-      // availability re-check, so two concurrent bookings can't each read a
-      // stale count and land the guest over the cap between them.
-      // PACKAGES are exempt: the cap is an anti-hoarding guard on self-serve
-      // asks, but a package's size is the HOST's own design — a Monthly
-      // Retreat that seats 18 needs its 9 rooms, and refusing the host's own
-      // bundle would be absurd. Inventory (checked above) is the only limit.
-      if (roomBased && !pkg) {
-        // Keyed on the plan actually in use, not the flex flag — a flex ask
-        // that degraded to flat above must take the flat allowance path.
-        const fits =
-          plan.length > 0
-            ? planFitsAllowance(plan, mine)
-            : allowanceFree(bookIn, bookOut, mine) >= roomsNeeded;
-        if (!fits)
-          return { error: roomAllowanceError(allowanceFree(bookIn, bookOut, mine)) };
+      // A property may cap how many DISTINCT NIGHTS one guest can book across
+      // all their stays here (villas.max_booking_days). It counts every night
+      // they already hold, so it can't be side-stepped by splitting the stay
+      // across several bookings. Inside the tx next to the availability
+      // re-check, so two concurrent bookings can't each read a stale footprint
+      // and land the guest over budget between them.
+      // PACKAGES are exempt: the budget guards self-serve nightly asks, but a
+      // package's length is the HOST's own design and refusing their own bundle
+      // would be absurd. Inventory (checked above) still applies to both.
+      // Applies to whole-villa listings too — the cap is on the guest's nights,
+      // not on rooms, so the property kind doesn't matter.
+      if (!pkg && hasDayLimit(villa.max_booking_days)) {
+        const budget = dayBudget(villa.max_booking_days, mine, checkIn, checkOut);
+        if (budget.overBudget)
+          return { error: dayBudgetError(villa.max_booking_days, budget) };
       }
       // The coupon is resolved HERE, inside the transaction, never from the
       // displayed price: it must exist and belong to THIS property. Its
@@ -1483,6 +1523,12 @@ export async function createBookingAction(input: {
         const found = await findCoupon(input.couponCode);
         if (!found || found.villaId !== villa.id)
           return { error: "That coupon isn't valid for this property." };
+        // One coupon, one use per guest. Checked inside the tx (the real
+        // authority; the payment page's check is only UX), and backstopped by a
+        // partial unique index for the double-submit race READ COMMITTED leaves
+        // open — see bookings_coupon_once in db.ts.
+        if (await hasRedeemedCoupon(user.id, found.code))
+          return { error: "You've already used this coupon code." };
         coupon = { code: found.code, pct: found.pct, fixed: found.fixed };
       }
       // A flat stay stores '' and its single room count; an adjusted one stores
@@ -1819,6 +1865,11 @@ export async function modifyBookingAction(
     guests: number;
     rooms: number;
     serviceIdx: number[];
+    /** Opt-in to an adjusted stay: when `rooms` aren't free for the whole new
+     *  range, hold what each night allows instead of failing. The per-night
+     *  plan is re-derived server-side with this booking's own rooms returned
+     *  to the pool — the client only asks for the flexibility. */
+    flex?: boolean;
   },
 ): Promise<ActionResult> {
   const user = await getCurrentUser();
@@ -1838,8 +1889,8 @@ export async function modifyBookingAction(
     .prepare(
       `SELECT b.id, b.villa_id, b.status, b.package, b.room_plan,
               b.check_in, b.check_out,
-              v.kind, v.max_guests, v.people_per_room, v.rooms AS total_rooms, v.services,
-              v.locked_at
+              v.kind, v.max_guests, v.people_per_room, v.max_booking_days,
+              v.rooms AS total_rooms, v.services, v.locked_at
        FROM bookings b JOIN villas v ON v.id = b.villa_id
        WHERE b.id = ? AND b.guest_id = ?`,
     )
@@ -1855,6 +1906,7 @@ export async function modifyBookingAction(
         kind: string;
         max_guests: number;
         people_per_room: number;
+        max_booking_days: number;
         total_rooms: number;
         services: string;
         locked_at: string | null;
@@ -1878,29 +1930,22 @@ export async function modifyBookingAction(
   // reconcile — they use the start-date-only manage flow instead.
   if (parsePackage(booking.package))
     return fail("Package stays can't be modified here.");
-  // An adjusted stay's room count is tied leg-by-leg to the exact nights it was
-  // booked for, so there's no honest way to re-price it against new dates here.
-  // It stays cancellable — the guest cancels and rebooks instead.
-  if (parseRoomPlan(booking.room_plan))
-    return fail(
-      "This stay has a different number of rooms on different nights, so its dates can't be changed. Please cancel it and book again.",
-    );
 
   const roomBased = isRoomBased(booking.kind);
+  const perRoom = Math.max(1, booking.people_per_room);
+  const flex = roomBased && input.flex === true;
   const roomsHeld = roomBased ? Math.max(1, Math.trunc(input.rooms) || 1) : 1;
   if (roomBased && roomsHeld > Math.max(1, booking.total_rooms))
     return fail("That's more rooms than this property has.");
-  if (roomBased && roomsHeld > MAX_ROOMS_PER_GUEST)
-    return fail(roomAllowanceError(0));
 
   const guests = Math.trunc(input.guests);
   if (!(guests >= 1)) return fail("Guests must be at least 1.");
-  const guestCap = roomBased
-    ? roomsHeld * Math.max(1, booking.people_per_room)
-    : Math.max(1, booking.max_guests);
-  if (guests > guestCap)
+  // Room-based guest caps depend on the room plan the new stay derives —
+  // graduated legs can sleep more than the flat ask — so they're validated
+  // inside the transaction below, against the live plan.
+  if (!roomBased && guests > Math.max(1, booking.max_guests))
     return fail(
-      `This selection sleeps up to ${guestCap} guest${guestCap === 1 ? "" : "s"}.`,
+      `This villa sleeps up to ${booking.max_guests} guest${booking.max_guests === 1 ? "" : "s"}.`,
     );
 
   // Paid add-ons resolved server-side from the villa's services by index, with
@@ -1922,8 +1967,43 @@ export async function modifyBookingAction(
   let txError: string | null = null;
   try {
     txError = await tx(async () => {
-      // Exclude THIS booking so its own current dates never count as a clash.
-      if (
+      // What the new stay holds each night, with THIS booking's own rooms
+      // returned to the pool (excluded), so re-saving the same shape never
+      // clashes with itself. A night-by-night booking is re-derived the same
+      // way it was created: min(ask, free) per night. Flat if it fits flat;
+      // graduated only when the guest opted in (flex).
+      let newPlan: RoomSegment[] = [];
+      if (roomBased) {
+        const derived = await getRoomPlan(
+          booking.villa_id,
+          input.checkIn,
+          input.checkOut,
+          roomsHeld,
+          booking.id,
+          0,
+        );
+        if (derived.length === 0)
+          return "Those dates are already booked. Please choose different dates.";
+        if (isGraduated(derived)) {
+          if (!flex)
+            return `${roomsHeld} rooms aren't free on every one of those nights. Ask for fewer rooms, or accept the per-night adjustment.`;
+          newPlan = derived;
+        } else if (derived[0].rooms < roomsHeld) {
+          // Every night bottoms out below the ask — flexing buys nothing, and
+          // silently holding fewer rooms than asked is never done.
+          return "Those dates are already booked. Please choose different dates.";
+        }
+        // The stay sleeps what its shape sleeps: graduated legs summed (same
+        // rule the booking flow enforces), a flat stay rooms × per-room.
+        const guestCap = Math.max(
+          1,
+          newPlan.length > 0
+            ? newPlan.reduce((s, leg) => s + leg.rooms * perRoom, 0)
+            : roomsHeld * perRoom,
+        );
+        if (guests > guestCap)
+          return `This selection sleeps up to ${guestCap} guest${guestCap === 1 ? "" : "s"}.`;
+      } else if (
         !(await isVillaAvailable(
           booking.villa_id,
           input.checkIn,
@@ -1931,29 +2011,41 @@ export async function modifyBookingAction(
           roomsHeld,
           booking.id,
         ))
-      )
+      ) {
         return "Those dates are already booked. Please choose different dates.";
-      // Per-guest cap, counting the guest's OTHER rooms here — this booking is
-      // excluded, so the rooms it already holds don't count against its own new
-      // figure (otherwise re-saving 6 rooms would fail against itself).
-      if (roomBased) {
+      }
+      // Per-guest day budget, counting the guest's OTHER stays here — this
+      // booking is excluded, so the nights it already holds don't count against
+      // its own new dates (otherwise re-saving the same dates would fail against
+      // itself). Every kind, including whole-villa stays.
+      if (hasDayLimit(booking.max_booking_days)) {
         const mine = await getGuestRoomBookings(
           booking.villa_id,
           user.id,
           booking.id,
         );
-        const free = allowanceFree(input.checkIn, input.checkOut, mine);
-        if (roomsHeld > free) return roomAllowanceError(free);
+        const budget = dayBudget(
+          booking.max_booking_days,
+          mine,
+          input.checkIn,
+          input.checkOut,
+        );
+        if (budget.overBudget)
+          return dayBudgetError(booking.max_booking_days, budget);
       }
+      // A graduated stay stores its legs with `rooms` carrying the peak for
+      // display; a flat one stores '' — including a plan booking edited down
+      // to a shape that now fits flat.
       await db.prepare(
-        `UPDATE bookings SET check_in = ?, check_out = ?, dates = ?, guests = ?, rooms = ?, extras = ?
+        `UPDATE bookings SET check_in = ?, check_out = ?, dates = ?, guests = ?, rooms = ?, room_plan = ?, extras = ?
          WHERE id = ? AND guest_id = ? AND status = 'accepted'`,
       ).run(
         input.checkIn,
         input.checkOut,
         formatRange(input.checkIn, input.checkOut),
         guests,
-        roomsHeld,
+        newPlan.length > 0 ? planMaxRooms(newPlan) : roomsHeld,
+        serializeRoomPlan(newPlan),
         JSON.stringify(extras),
         bookingId,
         user.id,
@@ -2735,13 +2827,27 @@ export async function updateCouponAction(input: {
   // it's being (re)attached to.
   const coupon = (await db
     .prepare(
-      `SELECT c.id FROM coupons c JOIN villas v ON v.id = c.villa_id
+      `SELECT c.id, c.code FROM coupons c JOIN villas v ON v.id = c.villa_id
        WHERE c.id = ? AND v.owner_id = ?`,
     )
     .get(Math.trunc(Number(input.couponId)), user.id)) as
-    | { id: number }
+    | { id: number; code: string }
     | undefined;
   if (!coupon) return { ok: false, error: "Coupon not found." };
+
+  // A coupon that an in-flight booking is riding on is frozen: the owner can't
+  // change its code, discount or property while a stay that redeemed it is still
+  // pending or yet to complete. The lock lifts on its own once every such stay
+  // completes. Checked against the coupon's CURRENT code — that's what bookings
+  // snapshotted — so a rename can't slip the lock. (Existing bookings keep their
+  // own snapshot regardless; this is about not moving the goalposts mid-stay.)
+  if (await isCouponInUse(coupon.code))
+    return {
+      ok: false,
+      error:
+        "This coupon is being used by a booking. You can edit it once that stay is completed.",
+    };
+
   const villa = (await db
     .prepare("SELECT id, owner_id FROM villas WHERE id = ?")
     .get(Math.trunc(Number(input.villaId)))) as
@@ -2803,18 +2909,38 @@ export async function updateCouponAction(input: {
   return { ok: true };
 }
 
-/** Delete one of the owner's coupons. Bookings that already redeemed it keep
- *  their snapshotted discount — deleting only stops NEW redemptions. */
+/**
+ * Delete one of the owner's coupons.
+ *
+ * Refused while the coupon is in use — a still-standing booking (pending, or
+ * accepted and not yet completed) redeemed it — mirroring the edit lock, so an
+ * owner can't yank a code out from under an in-flight stay. The block lifts on
+ * its own once every such stay completes. Bookings that already redeemed it keep
+ * their snapshotted discount regardless, so deleting only stops NEW redemptions.
+ */
 export async function deleteCouponAction(couponId: number): Promise<ActionResult> {
   const user = await getCurrentUser();
   if (!user) return fail("You must be signed in.");
-  const res = await getDb()
+
+  const db = getDb();
+  // Scope to the owner AND read the code, so the in-use check runs against the
+  // exact code bookings snapshotted — the same authority the edit lock uses.
+  const coupon = (await db
     .prepare(
-      `DELETE FROM coupons
-       WHERE id = ? AND villa_id IN (SELECT id FROM villas WHERE owner_id = ?)`,
+      `SELECT c.id, c.code FROM coupons c JOIN villas v ON v.id = c.villa_id
+       WHERE c.id = ? AND v.owner_id = ?`,
     )
-    .run(Math.trunc(Number(couponId)), user.id);
-  if (res.changes === 0) return fail("Coupon not found.");
+    .get(Math.trunc(Number(couponId)), user.id)) as
+    | { id: number; code: string }
+    | undefined;
+  if (!coupon) return fail("Coupon not found.");
+
+  if (await isCouponInUse(coupon.code))
+    return fail(
+      "This coupon is being used by a booking. You can delete it once that stay is completed.",
+    );
+
+  await db.prepare("DELETE FROM coupons WHERE id = ?").run(coupon.id);
   revalidatePath("/profile/coupons");
   return { ok: true };
 }

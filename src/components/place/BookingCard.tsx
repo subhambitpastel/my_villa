@@ -18,9 +18,11 @@ import PickerField from "@/components/ui/PickerField";
 import type { BookedRange } from "@/lib/queries";
 import type { VillaService } from "@/components/host/draft";
 import {
+  bookedNights,
+  dayBudget,
   fullyBookedRanges,
+  hasDayLimit,
   isGraduated,
-  MAX_ROOMS_PER_GUEST,
   neededSpan,
   nightsInRange,
   planMaxRooms,
@@ -52,6 +54,7 @@ export default function BookingCard({
   roomBased = false,
   totalRooms = 1,
   peoplePerRoom = 0,
+  maxBookingDays = 0,
   roomBookings = [],
   myRoomBookings = [],
   discount = 0,
@@ -82,6 +85,9 @@ export default function BookingCard({
   roomBased?: boolean;
   totalRooms?: number;
   peoplePerRoom?: number;
+  /** Most distinct nights one guest may book here across all their stays
+   *  (hotels/resorts). 0 = no limit. Beyond it the stay goes through the host. */
+  maxBookingDays?: number;
   /** Accepted reservations (with room counts) used to compute availability. */
   roomBookings?: RoomBooking[];
   /** Just THIS guest's own rooms here — what the per-guest cap counts against,
@@ -146,11 +152,42 @@ export default function BookingCard({
   // applied per NIGHT by `plan` below, not as one flat ceiling here.
   const roomsOfferable = roomBased ? Math.max(1, totalRooms) : 1;
 
-  // What the guest wants to HOLD each night, counting rooms they already have
-  // here — not an amount to add on top. Can exceed what a night has free, which
-  // is what opens the adjusted stay.
+  /* Rooms this guest already holds on EVERY night of the PICKED dates. When
+     that's a uniform count (one earlier booking — the common case), the picker
+     flips to "rooms to ADD": a guest holding 3 of a hotel's 4 rooms sees ONE
+     option, "1 room", not a list of totals that reads as four bookable rooms.
+     Internally the ask stays a TOTAL (held + added), so the top-up pricing,
+     trimming and plan flows are untouched. */
+  const heldNights =
+    roomBased && datesReady ? nightsInRange(checkIn, checkOut) : [];
+  const heldPerNight = heldNights.map((n) => roomsBookedOn(n, myRoomBookings));
+  const heldMinOnSpan = heldPerNight.length ? Math.min(...heldPerNight) : 0;
+  const heldMaxOnSpan = heldPerNight.length ? Math.max(...heldPerNight) : 0;
+  // Uniform holdings let options be exact "add N" counts. Varying holds (an
+  // extension past an existing stay) keep totals — "add 1" isn't one number
+  // when different nights hold different counts.
+  const heldUniform = heldMinOnSpan === heldMaxOnSpan ? heldMinOnSpan : null;
+  // Free inventory on EACH picked night (the guest's own rooms already count as
+  // taken in roomBookings). The most a single night could ADD.
+  const freePerNight = heldNights.map((n) =>
+    Math.max(0, totalRooms - roomsBookedOn(n, roomBookings)),
+  );
+  const maxAddable = freePerNight.length
+    ? Math.max(...freePerNight)
+    : totalRooms;
+  /* ADD mode: the guest already holds rooms on the picked span, so the picker
+     means "rooms to ADD" and each night takes as many of them as it has free —
+     +4 where only 4 are free, +10 where 10 are. The result is a NEW, SEPARATE
+     booking (never merged with the held one). A fresh guest (holds nothing) is
+     the ordinary total flow, untouched. */
+  const addMode = roomBased && datesReady && heldMaxOnSpan > 0;
+
+  // What the guest wants each night: rooms to ADD (add mode) or the total (a
+  // fresh booking). Both feed the plan below the same way.
   const roomsWanted = roomBased
-    ? Math.min(Math.max(1, roomsSel), roomsOfferable)
+    ? addMode
+      ? Math.min(Math.max(1, roomsSel), Math.max(1, maxAddable))
+      : Math.min(Math.max(1, roomsSel), roomsOfferable)
     : 1;
   /* The nights this booking must actually COVER. Rooms the guest already holds
      satisfy the ask on their nights, so a range that overlaps an existing stay
@@ -159,7 +196,7 @@ export default function BookingCard({
      refusal. Nights that only need a TOP-UP (ask 5 while holding 4) are kept;
      the plan below adds the difference there. */
   const span =
-    roomBased && datesReady
+    roomBased && datesReady && !addMode
       ? neededSpan(checkIn, checkOut, roomsWanted, myRoomBookings)
       : { checkIn, checkOut, gap: false };
   // Every picked night is already covered — there is nothing to book. The
@@ -198,26 +235,46 @@ export default function BookingCard({
      either: a call can't conjure rooms the hotel doesn't have (that's soldOut).
      Both are backstopped server-side; this only picks the button. */
   const overStay = datesReady && !covered && effNights > MAX_STAY_NIGHTS;
-  const overRoomCap = roomBased && datesReady && roomsWanted > MAX_ROOMS_PER_GUEST;
-  const needsCall = overStay || overRoomCap;
+  // The property's per-guest night budget, measured against the PICKED dates and
+  // what this guest already holds here. Over it, the stay is arranged by the
+  // host on a call — exactly like an over-long stay. It caps NIGHTS, not rooms,
+  // so it applies to every kind (whole-villa listings included), keyed off the
+  // picked dates rather than any room math.
+  const budget =
+    datesReady && !covered
+      ? dayBudget(maxBookingDays, myRoomBookings, checkIn, checkOut)
+      : null;
+  const overBudget = !!budget?.overBudget;
+  const needsCall = overStay || overBudget;
 
-  // How the stay splits if the guest takes as many rooms as each night allows.
-  // Within self-serve, each night is limited by free inventory AND their own
-  // remaining allowance. Past the cap (needsCall) the HOST arranges the stay
-  // and the allowance doesn't bind — only the building does — so the preview
-  // (rooms, guests, price sent with the request) shows what the host would set
-  // up, not a meaningless allowance-clamped sliver.
+  // What the calendar needs to paint over-budget nights yellow: how many more
+  // nights this guest may still book here, measured off what they already hold
+  // (independent of the in-progress selection). Null when the property has no
+  // per-guest night limit.
+  const nightBudget = hasDayLimit(maxBookingDays)
+    ? {
+        limit: maxBookingDays,
+        remaining: Math.max(0, maxBookingDays - bookedNights(myRoomBookings).size),
+        // Nights already theirs spend no budget again — a span crossing an
+        // existing stay only pays for its NEW nights, matching the server.
+        held: [...bookedNights(myRoomBookings)],
+      }
+    : null;
+
+  // How the stay splits if the guest takes as many rooms as each night allows —
+  // each night limited only by free inventory (rooms already theirs top up
+  // toward the ask). When the stay needs the host (over the night budget or too
+  // long), this preview still shows what would be booked so the request carries
+  // real rooms/guests/price.
   const plan =
     roomBased && datesReady && !covered && !gapSplit && !soldOut
-      ? roomPlanFor(
-          effIn,
-          effOut,
-          roomBookings,
-          totalRooms,
-          roomsWanted,
-          myRoomBookings,
-          needsCall ? Infinity : MAX_ROOMS_PER_GUEST,
-        )
+      ? addMode
+        ? // ADD: legs are the rooms ADDED each night — min(add, free), free
+          // already excluding the guest's held rooms (held=[] here, since
+          // roomBookings counts them). No neededSpan trim: we add on every
+          // picked night, so a partly-held night still gets its top-up.
+          roomPlanFor(checkIn, checkOut, roomBookings, totalRooms, roomsWanted, [])
+        : roomPlanFor(effIn, effOut, roomBookings, totalRooms, roomsWanted, myRoomBookings)
       : [];
 
   // Rooms the guest already holds on the nights being priced — shown alongside
@@ -266,7 +323,9 @@ export default function BookingCard({
   // Show the receipt the way the payment page and the owner's preview show it:
   // full stay (fee included) minus the amount actually paid before. One story
   // on every surface, and the deduction matches the guest's bank statement.
-  const paidFraming = adjusted && heldWithin;
+  // NOT in add mode: that's a separate new booking whose legs are already just
+  // the added rooms, so there is nothing to subtract.
+  const paidFraming = adjusted && heldWithin && !addMode;
 
   // The most a FLAT stay can hold: the same count every night, so it's the
   // tightest night once BOTH the hotel's inventory and this guest's own
@@ -330,9 +389,12 @@ export default function BookingCard({
   // the rooms the guest ASKED for plus the opt-in; the server re-derives the
   // per-night plan from live availability, so the split (and its price) is
   // never taken from the client.
+  // Add mode sends the rooms to ADD plus `add=1`, so the server books them as
+  // a new separate stay (min(add, free) per night) instead of reading the
+  // count as a total and refusing "you already hold these dates".
   const paymentUrl = `/payment?villa=${villaId}&in=${effIn}&out=${effOut}&guests=${guests}${
     roomBased ? `&rooms=${adjusted ? roomsWanted : rooms}` : ""
-  }${adjusted ? "&flex=1" : ""}`;
+  }${adjusted ? "&flex=1" : ""}${addMode ? "&add=1" : ""}`;
 
   // Checkout carries the picked services as indices; prices are re-read from
   // the villa on the server, so the client can never set its own amounts.
@@ -463,6 +525,7 @@ export default function BookingCard({
               ? (key) => Math.max(0, totalRooms - roomsBookedOn(key, roomBookings))
               : undefined
           }
+          nightBudget={nightBudget}
           checkIn={checkIn || null}
           checkOut={checkOut || null}
           bookedRanges={calendarBlocked}
@@ -477,10 +540,9 @@ export default function BookingCard({
       {/* Hotels/resorts sell individual rooms — pick how many, then guests.
           The whole inventory is offered, not just what's free every night —
           asking for more is what surfaces the adjusted-stay option below,
-          instead of silently capping the guest at the leanest night. It's
-          not capped by the per-guest allowance either: going past that is a
-          legitimate ask, it just gets arranged on a call — those counts read
-          different before they're picked: dimmed, ☎-marked, tooltipped. */}
+          instead of silently capping the guest at the leanest night. Rooms are
+          never rationed per guest, so every count up to the inventory is a plain
+          bookable option (rooms already theirs read dimmed). */}
       {roomBased && (
         <PickerField
           label="Rooms"
@@ -489,20 +551,25 @@ export default function BookingCard({
           onChange={(n) => setRoomsSel(n)}
           disabled={soldOut}
           boxClassName={soldOut ? "border-[#f0c4c0]" : "border-[#ddd]"}
-          options={Array.from({ length: roomsOfferable }, (_, i) => i + 1).map(
-            (n) => {
-              const viaHost = n > MAX_ROOMS_PER_GUEST;
-              return {
-                value: n,
-                label: `${n} ${n === 1 ? "room" : "rooms"}`,
-                hint: viaHost ? "☎ host arranges" : undefined,
-                dimmed: viaHost,
-                title: viaHost
-                  ? `More than ${MAX_ROOMS_PER_GUEST} rooms can't be booked online — pick this and request a call, and the host will arrange it with you.`
-                  : undefined,
-              };
-            },
-          )}
+          options={
+            addMode
+              ? /* Adding to an existing stay — the picker counts ROOMS TO ADD.
+                   Each night takes as many as it has free, so the max is the
+                   best night's free inventory. */
+                Array.from({ length: Math.max(1, maxAddable) }, (_, i) => i + 1).map(
+                  (n) => ({
+                    value: n,
+                    label: `${n} ${n === 1 ? "room" : "rooms"}`,
+                    hint: "to add",
+                  }),
+                )
+              : Array.from({ length: roomsOfferable }, (_, i) => i + 1).map(
+                  (n) => ({
+                    value: n,
+                    label: `${n} ${n === 1 ? "room" : "rooms"}`,
+                  }),
+                )
+          }
           display={
             soldOut ? (
               <span className="font-medium text-[#c0392b]">
@@ -511,34 +578,35 @@ export default function BookingCard({
             ) : (
               <span className="text-[#4a4a4a]">
                 {roomsWanted} {roomsWanted === 1 ? "room" : "rooms"}
+                {addMode ? " to add" : ""}
                 {datesReady && (
                   <span className="text-[#8a8a94]">
                     {" "}
-                    · {roomsFree} available
-                    {canAdjust ? " all nights" : ""}
+                    {addMode ? (
+                      <>
+                        · you hold{" "}
+                        {heldUniform ?? `up to ${heldMaxOnSpan}`} here · up to{" "}
+                        {maxAddable} more free
+                      </>
+                    ) : (
+                      <>
+                        · {roomsFree} available
+                        {canAdjust ? " all nights" : ""}
+                      </>
+                    )}
                   </span>
                 )}
-                {/* Not an error — it just means this ask goes via the host.
-                    Same ☎ mark the dropdown option carried, so the closed box
-                    keeps telling the same story. */}
-                {overRoomCap && (
-                  <span
-                    className="font-medium text-[#8a6a1f]"
-                    title={`More than ${MAX_ROOMS_PER_GUEST} rooms can't be booked online — request a call below and the host will arrange it with you.`}
-                  >
-                    {" "}
-                    · ☎ over the {MAX_ROOMS_PER_GUEST}-room online limit
-                  </span>
-                )}
-                {/* The ask is short but evenly so, i.e. there's no split to
-                    offer — say what they'd actually get rather than quietly
-                    booking them fewer rooms than the picker shows. */}
-                {!overRoomCap && !canAdjust && !soldOut && flatRooms < roomsWanted && (
-                  <span className="font-medium text-[#8a6a1f]">
-                    {" "}
-                    · only {flatRooms} bookable by you
-                  </span>
-                )}
+                {/* The ask can't be met flat and there's no split to offer —
+                    say what they'd actually get before the price shows it. */}
+                {!needsCall &&
+                  !canAdjust &&
+                  !soldOut &&
+                  flatRooms < roomsWanted && (
+                    <span className="font-medium text-[#8a6a1f]">
+                      {" "}
+                      · only {flatRooms} bookable by you
+                    </span>
+                  )}
               </span>
             )
           }
@@ -563,7 +631,7 @@ export default function BookingCard({
             </p>
             <p className="mt-1">
               {rooms < roomsFree
-                ? `Rooms already booked in your name leave you ${rooms} more a night here — one guest can hold ${MAX_ROOMS_PER_GUEST}.`
+                ? `Some of these nights already have rooms booked in your name, so this stay adds ${rooms} a night.`
                 : `You asked for ${roomsWanted}, but every night of ${formatRange(
                     effIn,
                     effOut,
@@ -583,10 +651,10 @@ export default function BookingCard({
             We can&apos;t hold {roomsWanted} rooms for every night
           </p>
           <p className="mt-1 text-[14px] leading-[1.4] text-[#7a6a45]">
-            {/* Say which limit bit. "Sold out" and "you've used your six" look
-                identical on the calendar but mean very different things. */}
+            {/* Say which limit bit: rooms already theirs vs the hotel simply
+                not having them free every night. */}
             {planMaxRooms(plan) < roomsFree
-              ? `Some of these nights already have rooms booked in your name — one guest can hold ${MAX_ROOMS_PER_GUEST} a night. Here's what you can add:`
+              ? "Some of these nights already have rooms booked in your name — here's what you can add:"
               : "Here's what's free across your dates:"}
           </p>
           <ul className="mt-2.5 space-y-1.5">
@@ -646,19 +714,11 @@ export default function BookingCard({
             </label>
           </fieldset>
 
-          {/* Both options above are compromises. A guest who actually needs all
-              {roomsWanted} rooms on every night shouldn't have to accept one of
-              them or walk — the host can arrange it, so offer that right here
-              rather than making them go hunting for it. */}
-          <div className="mt-3.5 border-t border-[#e8d5a3] pt-3">
-            <p className="text-[14px] font-medium leading-[1.35] text-[#8a6a1f]">
-              Need all {roomsWanted} rooms for every night?
-            </p>
-            <p className="mt-0.5 text-[13px] leading-[1.4] text-[#7a6a45]">
-              Ask the host to set it up for you instead.
-            </p>
-            <div className="mt-2">{callAsk}</div>
-          </div>
+          {/* No "ask the host" escape hatch here: rooms aren't rationed per
+              guest, so this shortage is physical inventory — the missing rooms
+              are genuinely booked (often by this guest), and no call can free
+              them. The call flow belongs to POLICY limits only (night budget,
+              too-long stays), which replace Reserve with it elsewhere. */}
         </div>
       )}
 
@@ -725,10 +785,11 @@ export default function BookingCard({
                 {MAX_STAY_NIGHTS} nights is the longest stay bookable online.
               </li>
             )}
-            {overRoomCap && (
+            {overBudget && budget && (
               <li>
-                {roomsWanted} rooms — one guest can book at most{" "}
-                {MAX_ROOMS_PER_GUEST} online.
+                {budget.used + budget.added} night
+                {budget.used + budget.added === 1 ? "" : "s"} at this property —
+                the host lets one guest book at most {maxBookingDays} online.
               </li>
             )}
           </ul>
@@ -831,13 +892,18 @@ export default function BookingCard({
                 nightsBetween(seg.checkIn, seg.checkOut),
               );
               const held = roomsBookedOn(seg.checkIn, myRoomBookings);
-              const combined = held + seg.rooms;
+              // Add mode: the leg IS the new rooms, billed on its own — no held
+              // rooms folded in, nothing to subtract. Otherwise the leg is the
+              // combined total and the held value comes off below.
+              const combined = addMode ? seg.rooms : held + seg.rooms;
               return (
                 <div key={seg.checkIn} className="flex items-start justify-between gap-4">
                   <dt className="min-w-0">
                     <span className="block text-[16px] text-[#7a7a85]">
                       {formatRange(seg.checkIn, seg.checkOut)}
-                      {held > 0 && ` · ${held} of these are yours already`}
+                      {addMode
+                        ? " · added to your stay"
+                        : held > 0 && ` · ${held} of these are yours already`}
                     </span>
                     ${price} × {combined} room{combined === 1 ? "" : "s"} ×{" "}
                     {legNights} night{legNights === 1 ? "" : "s"}
@@ -852,8 +918,9 @@ export default function BookingCard({
                 deducted at its full charged amount without the rows no longer
                 adding up — deduct the in-span room value instead, which stays
                 exact. Fully-covered stays take the clearer paid-amount rows
-                after the fee below. */}
-            {!heldWithin && heldValue > 0 && (
+                after the fee below. Add mode bills the new rooms directly, so
+                there is nothing to subtract. */}
+            {!addMode && !heldWithin && heldValue > 0 && (
               <div className="flex items-start justify-between gap-4 text-[#1c7d5c]">
                 <dt className="min-w-0">
                   Already paid — your {heldOverlaps[0]?.rooms ?? 0} room

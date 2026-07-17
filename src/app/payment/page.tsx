@@ -19,13 +19,14 @@ import {
   parseServiceList,
   type PackageForBooking,
 } from "@/lib/queries";
-import { findCoupon } from "@/lib/queries";
+import { findCoupon, hasRedeemedCoupon } from "@/lib/queries";
 import type { VillaService } from "@/components/host/draft";
 import { getCurrentUser } from "@/lib/session";
 import {
+  dayBudget,
+  hasDayLimit,
   isGraduated,
   isRoomBased,
-  MAX_ROOMS_PER_GUEST,
   neededSpan,
   planMaxRooms,
   planRoomNights,
@@ -303,6 +304,9 @@ export default async function PaymentPage({
     rooms?: string;
     /** "1" when the guest opted into an adjusted stay (rooms vary per night). */
     flex?: string;
+    /** "1" when the guest already holds rooms on these dates and `rooms`
+     *  counts rooms to ADD — booked as a new, separate stay. */
+    add?: string;
     svc?: string;
     pkg?: string;
     /** Set when this checkout is the top-up for modifying an existing booking. */
@@ -320,7 +324,7 @@ export default async function PaymentPage({
   const user = await getCurrentUser();
   if (!user) {
     const qs = new URLSearchParams();
-    for (const key of ["villa", "in", "out", "guests", "rooms", "flex", "svc", "pkg", "modify", "pay"] as const) {
+    for (const key of ["villa", "in", "out", "guests", "rooms", "flex", "add", "svc", "pkg", "modify", "pay"] as const) {
       if (params[key]) qs.set(key, params[key]!);
     }
     redirect(loginHref(`/payment${qs.size ? "?" + qs.toString() : ""}`));
@@ -402,14 +406,13 @@ export default async function PaymentPage({
     rooms = roomsForGuests(villa.kind, guests, villa.people_per_room);
   } else {
     // Hotels/resorts reserve rooms (each sleeping people_per_room); other kinds
-    // book the whole place. Clamp the ask to the inventory AND to the per-guest
-    // cap — the same clamp createBookingAction applies, so the price quoted here
-    // is for exactly the rooms that end up booked.
+    // book the whole place. Clamp the ask to the inventory — rooms aren't
+    // rationed per guest, so this is the same clamp createBookingAction applies
+    // and the price quoted here is for exactly the rooms that end up booked.
     const roomsParam = Number(params.rooms);
     const roomsWanted = roomBased
       ? Math.min(
           Math.max(1, villa.rooms),
-          MAX_ROOMS_PER_GUEST,
           Number.isInteger(roomsParam) && roomsParam >= 1 ? roomsParam : 1,
         )
       : 1;
@@ -435,13 +438,43 @@ export default async function PaymentPage({
     // guest back to the villa page, which explains why.
     if (roomBased && !params.modify) {
       const mine = await getGuestRoomBookings(villa.id, user.id);
-      const span = neededSpan(checkIn, checkOut, roomsWanted, mine);
-      if (!span || span.gap)
+      // Over the property's per-guest night budget this isn't a checkout but a
+      // host-arranged stay — bounce back to the villa page, which offers the
+      // call. createBookingAction is the authority; this keeps the guest off a
+      // checkout that would only be refused.
+      if (
+        hasDayLimit(villa.max_booking_days) &&
+        dayBudget(villa.max_booking_days, mine, checkIn, checkOut).overBudget
+      )
         redirect(
           `/place?id=${villa.id}&in=${checkIn}&out=${checkOut}&guests=${guestsWanted}`,
         );
-      checkIn = span.checkIn;
-      checkOut = span.checkOut;
+      // Add mode: the ask is rooms ON TOP of ones the guest already holds,
+      // wanted on every picked night — nothing to trim, the whole range books
+      // as its own separate stay.
+      if (params.add !== "1") {
+        const span = neededSpan(checkIn, checkOut, roomsWanted, mine);
+        if (!span || span.gap)
+          redirect(
+            `/place?id=${villa.id}&in=${checkIn}&out=${checkOut}&guests=${guestsWanted}`,
+          );
+        checkIn = span.checkIn;
+        checkOut = span.checkOut;
+      }
+    }
+
+    // Whole-villa listings enforce the same per-guest night budget, minus the
+    // room-trim machinery above (a villa is one unit — no per-room top-ups).
+    // Over budget it's a host-arranged stay, so bounce to the villa page.
+    if (!roomBased && !params.modify) {
+      const mine = await getGuestRoomBookings(villa.id, user.id);
+      if (
+        hasDayLimit(villa.max_booking_days) &&
+        dayBudget(villa.max_booking_days, mine, checkIn, checkOut).overBudget
+      )
+        redirect(
+          `/place?id=${villa.id}&in=${checkIn}&out=${checkOut}&guests=${guestsWanted}`,
+        );
     }
 
     // Adjusted stay: the guest asked for more rooms than are free on every
@@ -449,17 +482,23 @@ export default async function PaymentPage({
     // only the ask and the opt-in — the actual split (and therefore the price)
     // is re-derived here from live availability, never trusted from the client.
     // Modifying an existing booking can't produce one, so it's excluded.
-    if (roomBased && params.flex === "1" && !params.modify) {
+    if (roomBased && params.flex === "1") {
       // Passing the guest applies their own per-night allowance too, so the
       // split priced here is the one the booking card offered — and the one
-      // createBookingAction will re-derive on submit.
+      // createBookingAction will re-derive on submit. Add mode prices rooms
+      // to ADD, so the plan is inventory-only (guest 0): min(add, free) per
+      // night, the guest's held rooms already counting as taken. Modify mode
+      // is inventory-only too, with the booking being edited excluded so its
+      // own rooms return to the pool — the same plan modifyBookingAction will
+      // re-derive on submit.
+      const editingId = Number(params.modify);
       const derived = await getRoomPlan(
         villa.id,
         checkIn,
         checkOut,
         roomsWanted,
-        0,
-        user.id,
+        Number.isInteger(editingId) && editingId > 0 ? editingId : 0,
+        params.add === "1" || params.modify ? 0 : user.id,
       );
       // If the count doesn't actually change, it's just a normal flat stay.
       if (isGraduated(derived)) plan = derived;
@@ -543,19 +582,30 @@ export default async function PaymentPage({
     };
     if (mb.discPct > 0 || mb.discFixed > 0)
       modifyDiscount = { code: mb.couponCode, pct: mb.discPct, fixed: mb.discFixed };
+    // Both sides priced by ROOM-NIGHTS so a night-by-night stay reconciles
+    // honestly: the old side sums the legs it actually held (flat stays are
+    // just rooms × nights), the new side prices the freshly derived plan the
+    // same way the plan block above and modifyBookingAction do.
+    const oldNights = Math.max(1, nightsBetween(mb.checkIn, mb.checkOut));
+    const oldRoomNights = mb.roomPlan
+      ? planRoomNights(mb.roomPlan)
+      : (roomBased ? mb.bookingRooms : 1) * oldNights;
     alreadyPaid = withBookingDiscount(
       round2(
         quote(
-          villa.price * (roomBased ? mb.bookingRooms : 1),
-          Math.max(1, nightsBetween(mb.checkIn, mb.checkOut)),
+          (villa.price * oldRoomNights) / oldNights,
+          oldNights,
           villa.discount,
         ).total + oldExtrasTotal,
       ),
     );
     const newTotal = withBookingDiscount(
       round2(
-        quote(villa.price * (roomBased ? rooms : 1), nights, villa.discount).total +
-          extras.reduce((sum, e) => sum + e.price, 0),
+        quote(
+          nights > 0 ? (villa.price * roomNights) / nights : 0,
+          nights,
+          villa.discount,
+        ).total + extras.reduce((sum, e) => sum + e.price, 0),
       ),
     );
     balanceDue = round2(newTotal - alreadyPaid);
@@ -572,6 +622,13 @@ export default async function PaymentPage({
     couponAllowed && couponParam ? await findCoupon(couponParam) : null;
   const couponValid = !!foundCoupon && foundCoupon.villaId === villa.id;
   const couponInvalid = couponAllowed && !!couponParam && !couponValid;
+  // One coupon, one use per guest — for good: a code that's real and for this
+  // property but which this guest has ever applied to a booking doesn't apply,
+  // even if that booking was later cancelled. It's its own state, not "invalid"
+  // — the code is fine, they've just spent it.
+  const couponUsed = couponValid && (await hasRedeemedCoupon(user.id, couponParam));
+  // Only a coupon that's valid AND unspent actually discounts the checkout.
+  const couponRedeemable = couponValid && !couponUsed;
 
   // The guest's own booking is excluded when modifying so its current dates never
   // read as a clash against the (possibly overlapping) new range. An adjusted
@@ -596,7 +653,7 @@ export default async function PaymentPage({
           payBooking.id,
         )
     : plan.length > 0
-      ? await isPlanAvailable(villa.id, plan)
+      ? await isPlanAvailable(villa.id, plan, isModify ? modifyId : 0)
       : await isVillaAvailable(
           villa.id,
           checkIn,
@@ -702,10 +759,13 @@ export default async function PaymentPage({
                     rooms={rooms}
                     roomBased={roomBased}
                     flex={plan.length > 0}
+                    /* Rooms to ADD to a stay the guest already holds here —
+                       booked as its own separate stay, never merged. */
+                    add={!payBooking && !pkg && !isModify && params.add === "1"}
                     services={svcIndices}
                     packageId={pkg ? pkg.id : undefined}
                     couponCode={
-                      couponValid && foundCoupon ? foundCoupon.code : undefined
+                      couponRedeemable && foundCoupon ? foundCoupon.code : undefined
                     }
                     modify={
                       isModify ? { bookingId: modifyId, amountDue: balanceDue } : undefined
@@ -800,7 +860,7 @@ export default async function PaymentPage({
               plan={plan}
               pkg={pkg}
               coupon={
-                couponValid && foundCoupon
+                couponRedeemable && foundCoupon
                   ? {
                       code: foundCoupon.code,
                       pct: foundCoupon.pct,
@@ -811,8 +871,11 @@ export default async function PaymentPage({
               couponSlot={
                 couponAllowed ? (
                   <CouponField
-                    applied={couponValid && foundCoupon ? foundCoupon.code : null}
+                    applied={
+                      couponRedeemable && foundCoupon ? foundCoupon.code : null
+                    }
                     invalid={couponInvalid}
+                    alreadyUsed={couponUsed}
                   />
                 ) : null
               }

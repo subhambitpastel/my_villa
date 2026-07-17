@@ -152,18 +152,18 @@ export default function OwnerBookingCard({
       : totalRooms
     : 1;
   const soldOut = roomBased && datesReady && roomsFree === 0;
-  // The whole property is offerable — the per-guest allowance that limits guests
-  // doesn't apply to the owner.
+  // The whole property is offerable — the per-guest night budget that gates
+  // self-serve stays doesn't apply to an owner arranging a booking.
   const rooms = roomBased ? Math.min(Math.max(1, roomsSel), Math.max(1, totalRooms)) : 1;
 
   /* The ask isn't free every night but each night still has SOMETHING: the same
-     graduated plan a guest can self-serve, bounded by inventory alone (a host
-     has no per-guest allowance). Left out while a fold is in play — an upgrade
-     replaces the guest's stay with one flat count, and stacking a varying plan
-     on top would change what the merge stores. */
+     graduated plan a guest can self-serve, bounded by inventory. Left out while
+     a fold is in play — an upgrade replaces the guest's stay with one flat
+     count, and stacking a varying plan on top would change what the merge
+     stores. */
   const plan =
     roomBased && datesReady && !soldOut && folded.length === 0
-      ? roomPlanFor(checkIn, checkOut, bookings, totalRooms, rooms, [], Infinity)
+      ? roomPlanFor(checkIn, checkOut, bookings, totalRooms, rooms, [])
       : [];
   const canAdjust = isGraduated(plan);
   const adjusted = canAdjust && flexSel;

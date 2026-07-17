@@ -12,16 +12,25 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 export default function CouponField({
   applied,
   invalid,
+  alreadyUsed = false,
 }: {
   /** The code currently applied (server-validated), or null. */
   applied: string | null;
   /** A code is in the URL but doesn't exist / belongs to another property. */
   invalid: boolean;
+  /** The code is real and for this property, but this guest already redeemed it
+   *  — one coupon, one use. A separate message from `invalid`: nothing's wrong
+   *  with the code, they've just spent it. */
+  alreadyUsed?: boolean;
 }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const [code, setCode] = useState(invalid ? (searchParams.get("coupon") ?? "") : "");
+  // Keep the tried code in the box when it didn't apply (unknown/foreign, or
+  // already used), so the message beneath it refers to something visible.
+  const [code, setCode] = useState(
+    invalid || alreadyUsed ? (searchParams.get("coupon") ?? "") : "",
+  );
   const [pending, startTransition] = useTransition();
 
   function setParam(value: string | null) {
@@ -83,10 +92,16 @@ export default function CouponField({
           {pending ? "Checking…" : "Apply"}
         </button>
       </div>
-      {invalid && (
+      {alreadyUsed ? (
         <p role="alert" className="mt-2 text-[13px] font-medium text-[#c0392b]">
-          That coupon isn&rsquo;t valid for this property.
+          You have already used this coupon code.
         </p>
+      ) : (
+        invalid && (
+          <p role="alert" className="mt-2 text-[13px] font-medium text-[#c0392b]">
+            That coupon isn&rsquo;t valid for this property.
+          </p>
+        )
       )}
     </div>
   );

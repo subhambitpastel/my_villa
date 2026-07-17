@@ -15,7 +15,7 @@ import {
   getVillaReviews,
   getVillaReviewDistribution,
 } from "@/lib/queries";
-import { isRoomBased } from "@/lib/rooms";
+import { isRoomBased, planRoomNights } from "@/lib/rooms";
 import { dayFromNow, nightsBetween } from "@/lib/dates";
 import { quote } from "@/lib/pricing";
 import { loginHref } from "@/lib/returnTo";
@@ -88,9 +88,14 @@ export default async function ManageBookingPage({
     (sum, i) => sum + (villa.serviceList[i]?.price ?? 0),
     0,
   );
+  // Room-nights, so a night-by-night stay reconciles against what its legs
+  // actually held — a flat stay is just rooms × nights.
+  const oldRoomNights = booking.roomPlan
+    ? planRoomNights(booking.roomPlan)
+    : (roomBased ? booking.bookingRooms : 1) * oldNights;
   const originalBase =
     quote(
-      villa.price * (roomBased ? booking.bookingRooms : 1),
+      (villa.price * oldRoomNights) / oldNights,
       oldNights,
       villa.discount,
     ).total + oldExtrasTotal;
@@ -188,6 +193,7 @@ export default async function ManageBookingPage({
               roomBased={roomBased}
               totalRooms={villa.rooms}
               peoplePerRoom={villa.people_per_room}
+              maxBookingDays={villa.max_booking_days}
               rooms={booking.bookingRooms}
               roomBookings={roomBookings}
               myRoomBookings={myRoomBookings}
@@ -196,7 +202,6 @@ export default async function ManageBookingPage({
               originalExtras={originalExtras}
               originalTotal={originalTotal}
               locked={booking.locked}
-              roomPlan={booking.roomPlan}
               couponCode={booking.couponCode}
               discPct={booking.discPct}
               discFixed={booking.discFixed}

@@ -398,6 +398,8 @@ function StepVilla({
         ? String((Number(rooms) || 0) * (Number(peoplePerRoom) || 0))
         : get("maxGuests"),
       peoplePerRoom: roomBased ? peoplePerRoom : "",
+      // An optional per-guest night budget, on every kind ("" = no limit).
+      maxBookingDays: get("maxBookingDays"),
       // Facilities are picked on the Extra Services step.
       facilities: draft.villa.facilities,
     };
@@ -524,49 +526,97 @@ function StepVilla({
           {errors.rooms && <ErrorText>{errors.rooms}</ErrorText>}
         </div>
         {roomBased ? (
-          <div>
-            <label htmlFor="v-peoplePerRoom" className={label}>
-              Guests per Room
-            </label>
-            <input
-              id="v-peoplePerRoom"
-              name="peoplePerRoom"
-              key="peoplePerRoom"
-              defaultValue={draft.villa.peoplePerRoom}
-              inputMode="numeric"
-              pattern="[0-9]*"
-              onChange={onlyDigits}
-              placeholder="How many guests fit in one room? e.g. 2"
-              aria-invalid={!!errors.peoplePerRoom}
-              className={input}
-            />
-            {errors.peoplePerRoom ? (
-              <ErrorText>{errors.peoplePerRoom}</ErrorText>
-            ) : (
+          <>
+            <div>
+              <label htmlFor="v-peoplePerRoom" className={label}>
+                Guests per Room
+              </label>
+              <input
+                id="v-peoplePerRoom"
+                name="peoplePerRoom"
+                key="peoplePerRoom"
+                defaultValue={draft.villa.peoplePerRoom}
+                inputMode="numeric"
+                pattern="[0-9]*"
+                onChange={onlyDigits}
+                placeholder="How many guests fit in one room? e.g. 2"
+                aria-invalid={!!errors.peoplePerRoom}
+                className={input}
+              />
+              {errors.peoplePerRoom ? (
+                <ErrorText>{errors.peoplePerRoom}</ErrorText>
+              ) : (
+                <p className="mt-1 text-xs text-body">
+                  Guests book individual rooms — total capacity is rooms × guests
+                  per room.
+                </p>
+              )}
+            </div>
+            <div>
+              <label htmlFor="v-maxBookingDays" className={label}>
+                Max Booking Days per Guest{" "}
+                <span className="font-normal text-body">(optional)</span>
+              </label>
+              <input
+                id="v-maxBookingDays"
+                name="maxBookingDays"
+                key="maxBookingDays"
+                defaultValue={draft.villa.maxBookingDays}
+                inputMode="numeric"
+                pattern="[0-9]*"
+                onChange={onlyDigits}
+                placeholder="Leave blank for no limit — e.g. 30"
+                className={input}
+              />
               <p className="mt-1 text-xs text-body">
-                Guests book individual rooms — total capacity is rooms × guests
-                per room.
+                The most nights one guest can book here across all their stays.
+                They can take any number of rooms on those nights; beyond the
+                limit they ask you to arrange it. Leave blank for no limit.
               </p>
-            )}
-          </div>
+            </div>
+          </>
         ) : (
-          <div>
-            <label htmlFor="v-maxGuests" className={label}>
-              Maximum Number of Guests
-            </label>
-            <input
-              id="v-maxGuests"
-              name="maxGuests"
-              key="maxGuests"
-              defaultValue={draft.villa.maxGuests}
-              inputMode="numeric"
-              pattern="[0-9]*"
-              onChange={onlyDigits}
-              placeholder="How many guests can stay? e.g. 6"
-              aria-invalid={!!errors.maxGuests}
-              className={input}
-            />
-            {errors.maxGuests && <ErrorText>{errors.maxGuests}</ErrorText>}
+          <div className="grid gap-5 sm:grid-cols-2">
+            <div>
+              <label htmlFor="v-maxGuests" className={label}>
+                Maximum Number of Guests
+              </label>
+              <input
+                id="v-maxGuests"
+                name="maxGuests"
+                key="maxGuests"
+                defaultValue={draft.villa.maxGuests}
+                inputMode="numeric"
+                pattern="[0-9]*"
+                onChange={onlyDigits}
+                placeholder="How many guests can stay? e.g. 6"
+                aria-invalid={!!errors.maxGuests}
+                className={input}
+              />
+              {errors.maxGuests && <ErrorText>{errors.maxGuests}</ErrorText>}
+            </div>
+            <div>
+              <label htmlFor="v-maxBookingDays" className={label}>
+                Max Booking Days per Guest{" "}
+                <span className="font-normal text-body">(optional)</span>
+              </label>
+              <input
+                id="v-maxBookingDays"
+                name="maxBookingDays"
+                key="maxBookingDays"
+                defaultValue={draft.villa.maxBookingDays}
+                inputMode="numeric"
+                pattern="[0-9]*"
+                onChange={onlyDigits}
+                placeholder="Leave blank for no limit — e.g. 30"
+                className={input}
+              />
+              <p className="mt-1 text-xs text-body">
+                The most nights one guest can book here across all their stays.
+                Beyond the limit they ask you to arrange it. Leave blank for no
+                limit.
+              </p>
+            </div>
           </div>
         )}
       </div>
@@ -1289,6 +1339,7 @@ export default function HostWizard({
     rooms: parseInt(m.villa.rooms, 10) || 1,
     maxGuests: parseInt(m.villa.maxGuests, 10) || 1,
     peoplePerRoom: parseInt(m.villa.peoplePerRoom, 10) || 0,
+    maxBookingDays: parseInt(m.villa.maxBookingDays, 10) || 0,
     facilities: m.villa.facilities,
     services: m.services.selected.map((name) => ({
       name,

@@ -6,7 +6,6 @@ import type { ChatMessage } from "./callRequest";
 import { FACILITY_CHIPS, type VillaService } from "@/components/host/draft";
 import {
   isRoomBased,
-  MAX_ROOMS_PER_GUEST,
   parseRoomPlan,
   planRoomNights,
   roomCapacity,
@@ -1015,8 +1014,9 @@ export async function getRoomPlan(
   checkOut: string,
   wanted: number,
   excludeBookingId = 0,
-  /** When given, the plan also respects THIS guest's per-night allowance — the
-   *  same plan the booking card showed them. Omit for an inventory-only plan. */
+  /** When given, rooms the guest already holds here top up toward the ask
+   *  (nights they're already on only book the difference) — the same plan the
+   *  booking card showed them. Omit for an inventory-only plan. */
   guestId = 0,
 ): Promise<RoomSegment[]> {
   const capacity = await villaCapacity(villaId);
@@ -1030,15 +1030,7 @@ export async function getRoomPlan(
   const held = guestId
     ? await getGuestRoomBookings(villaId, guestId, excludeBookingId)
     : [];
-  return roomPlanFor(
-    checkIn,
-    checkOut,
-    bookings,
-    capacity,
-    wanted,
-    held,
-    guestId ? MAX_ROOMS_PER_GUEST : Infinity,
-  );
+  return roomPlanFor(checkIn, checkOut, bookings, capacity, wanted, held);
 }
 
 /** Date ranges that block new bookings for a villa (confirmed stays).
@@ -2422,18 +2414,33 @@ export type CouponItem = {
   /** Fixed amount off (> 0) — 0 when the coupon is a percentage. */
   fixed: number;
   createdAt: string;
+  /** Locked to editing: a still-standing booking redeemed this code and that
+   *  stay hasn't completed yet. The owner can't change it out from under an
+   *  in-flight booking — editing reopens once every such stay completes.
+   *  See {@link isCouponInUse} for exactly what counts. */
+  inUse: boolean;
 };
 
 export async function getCouponsForOwner(ownerId: number): Promise<CouponItem[]> {
+  const today = new Date().toISOString().slice(0, 10);
   const rows = (await getDb()
     .prepare(
+      // in_use mirrors isCouponInUse: a pending or still-current accepted stay
+      // that carries this code holds the lock; a stay that has completed (an
+      // accepted one past checkout) or was cancelled/declined never does.
       `SELECT c.id, c.villa_id, c.code, c.pct, c.fixed, c.created_at,
-              v.name AS villa_name, v.kind AS villa_kind
+              v.name AS villa_name, v.kind AS villa_kind,
+              CASE WHEN EXISTS (
+                SELECT 1 FROM bookings b
+                WHERE UPPER(b.coupon_code) = UPPER(c.code)
+                  AND b.status IN ('pending', 'accepted')
+                  AND NOT (b.status = 'accepted' AND b.check_out <> '' AND b.check_out < ?)
+              ) THEN 1 ELSE 0 END AS in_use
        FROM coupons c JOIN villas v ON v.id = c.villa_id
        WHERE v.owner_id = ?
        ORDER BY c.created_at DESC, c.id DESC`,
     )
-    .all(ownerId)) as {
+    .all(today, ownerId)) as {
     id: number;
     villa_id: number;
     code: string;
@@ -2442,6 +2449,7 @@ export async function getCouponsForOwner(ownerId: number): Promise<CouponItem[]>
     created_at: string;
     villa_name: string;
     villa_kind: string;
+    in_use: number;
   }[];
   return rows.map((r) => ({
     id: r.id,
@@ -2452,6 +2460,7 @@ export async function getCouponsForOwner(ownerId: number): Promise<CouponItem[]>
     pct: r.pct,
     fixed: r.fixed,
     createdAt: r.created_at,
+    inUse: r.in_use === 1,
   }));
 }
 
@@ -2479,6 +2488,57 @@ export async function findCoupon(code: string): Promise<Coupon | null> {
     | undefined;
   if (!r) return null;
   return { id: r.id, villaId: r.villa_id, code: r.code, pct: r.pct, fixed: r.fixed };
+}
+
+/** True when `userId` has EVER applied `code` to a booking. One coupon, one use
+ *  per guest — for good — so a second checkout for the same property (or any
+ *  property; codes are globally unique) is refused.
+ *
+ *  Booking status is deliberately not considered: a code is spent the moment
+ *  it's applied at checkout, and cancelling that booking — by the guest or the
+ *  owner — does NOT hand the coupon back. Once used, always used, so nobody can
+ *  book at a discount, cancel, and redeem the same code again. Backstopped by
+ *  the bookings_coupon_once unique index in db.ts. */
+export async function hasRedeemedCoupon(
+  userId: number,
+  code: string,
+): Promise<boolean> {
+  const trimmed = code.trim();
+  if (!trimmed) return false;
+  const r = (await getDb()
+    .prepare(
+      `SELECT 1 FROM bookings
+       WHERE guest_id = ? AND UPPER(coupon_code) = UPPER(?)
+       LIMIT 1`,
+    )
+    .get(userId, trimmed)) as { "?column?": number } | undefined;
+  return r !== undefined;
+}
+
+/** True while `code` is locked to editing: a still-standing booking redeemed it
+ *  and that stay hasn't completed yet. The owner can't edit a coupon out from
+ *  under an in-flight booking — the lock lifts once every such stay completes.
+ *
+ *  "Completed" is the same notion the trips list derives: a booking is done the
+ *  moment its status is literally 'completed', or it's 'accepted' with a
+ *  checkout that has passed. So a pending redemption, or an accepted stay still
+ *  to come / in progress, holds the lock; a cancelled or declined booking never
+ *  used the coupon and never held it. Case-insensitive, matching how the code is
+ *  snapshotted onto bookings at checkout. */
+export async function isCouponInUse(code: string): Promise<boolean> {
+  const trimmed = code.trim();
+  if (!trimmed) return false;
+  const today = new Date().toISOString().slice(0, 10);
+  const r = (await getDb()
+    .prepare(
+      `SELECT 1 FROM bookings
+       WHERE UPPER(coupon_code) = UPPER(?)
+         AND status IN ('pending', 'accepted')
+         AND NOT (status = 'accepted' AND check_out <> '' AND check_out < ?)
+       LIMIT 1`,
+    )
+    .get(trimmed, today)) as { "?column?": number } | undefined;
+  return r !== undefined;
 }
 
 /** Codes starting with `prefix` (case-insensitive) — feeds the "already taken,

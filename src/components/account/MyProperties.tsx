@@ -338,6 +338,25 @@ export default function MyProperties({
                   >
                     Create booking
                   </Link>
+                  {/* Straight to the Coupons desk with THIS property already
+                      picked — never gated on the lock either: a discount code
+                      changes nothing about the listing booked guests rely on. */}
+                  <Link
+                    href={`/profile/coupons?villa=${p.id}`}
+                    className="rounded-[6px] border border-brand px-3 py-1.5 text-[12px] font-semibold text-brand transition-colors hover:bg-brand/5"
+                  >
+                    Create coupon
+                  </Link>
+                  {/* Read-only view of the listing's own settings — the same
+                      fields the editor collects. Never gated on the lock:
+                      looking changes nothing, so it stays live even while
+                      Edit/Remove are frozen by active bookings. */}
+                  <Link
+                    href={`/profile/properties/${p.id}`}
+                    className="text-[13px] font-medium text-brand underline transition-colors hover:text-brand-dark"
+                  >
+                    View
+                  </Link>
                   {/* Locked Edit/Remove stay clickable and explain themselves.
                       Disabling them left the reason in a native title bubble —
                       which browsers often don't show on a disabled control at

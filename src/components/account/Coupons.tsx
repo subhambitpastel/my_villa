@@ -22,13 +22,17 @@ import type { CouponItem } from "@/lib/queries";
 export default function Coupons({
   villas,
   coupons,
+  defaultVillaId,
 }: {
   villas: { id: number; name: string; kind: string }[];
   coupons: CouponItem[];
+  /** Property to preselect — set when "Create coupon" on a property card
+   *  brought the owner here. Already validated as theirs by the page. */
+  defaultVillaId?: number;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [villaId, setVillaId] = useState(villas[0]?.id ?? 0);
+  const [villaId, setVillaId] = useState(defaultVillaId ?? villas[0]?.id ?? 0);
   const [code, setCode] = useState("");
   const [mode, setMode] = useState<"pct" | "fixed">("pct");
   const [value, setValue] = useState("");
@@ -36,12 +40,20 @@ export default function Coupons({
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [created, setCreated] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<CouponItem | null>(null);
+  // Why a delete was refused — only reachable if the coupon became in-use
+  // between the page loading and the owner confirming (a guest redeemed it in
+  // the gap); the button itself is disabled for coupons already in use.
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   // The coupon being edited, if any — the form above doubles as its editor.
   const [editing, setEditing] = useState<CouponItem | null>(null);
 
   const num = Number(value) || 0;
 
   function startEdit(c: CouponItem) {
+    // A coupon a live booking is riding on is frozen until that stay completes
+    // — the server refuses the edit too, this just keeps the editor from opening
+    // onto something that can't be saved.
+    if (c.inUse) return;
     setEditing(c);
     setVillaId(c.villaId);
     setCode(c.code);
@@ -90,8 +102,17 @@ export default function Coupons({
   function confirmDelete() {
     if (!deleting) return;
     const id = deleting.id;
+    setDeleteError(null);
     startTransition(async () => {
-      await deleteCouponAction(id);
+      const res = await deleteCouponAction(id);
+      if (!res.ok) {
+        // Kept open so the reason (e.g. it's now in use) sits on the coupon.
+        // Refresh too, so the row behind the dialog picks up its new "In use"
+        // badge and disabled buttons.
+        setDeleteError(res.error);
+        router.refresh();
+        return;
+      }
       setDeleting(null);
       router.refresh();
     });
@@ -260,21 +281,46 @@ export default function Coupons({
                   {c.villaKind}
                 </span>
               </span>
+              {c.inUse && (
+                <span
+                  title="A booking is using this coupon — you can edit or delete it once that stay completes."
+                  className="rounded-full bg-[#fff3e0] px-2.5 py-0.5 text-[11px] font-semibold text-[#b26a00]"
+                >
+                  In use
+                </span>
+              )}
             </div>
             <div className="flex shrink-0 items-center gap-3">
+              {/* Both Edit and Delete are frozen while a live booking rides the
+                  coupon — the server refuses each until that stay completes;
+                  these just keep the owner from opening a dialog that can't
+                  go through. */}
               <button
                 type="button"
-                disabled={pending}
+                disabled={pending || c.inUse}
                 onClick={() => startEdit(c)}
-                className="text-[13px] text-brand underline hover:opacity-80 disabled:opacity-50"
+                title={
+                  c.inUse
+                    ? "A booking is using this coupon — you can edit it once that stay completes."
+                    : undefined
+                }
+                className="text-[13px] text-brand underline hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Edit
               </button>
               <button
                 type="button"
-                disabled={pending}
-                onClick={() => setDeleting(c)}
-                className="text-[13px] text-[#eb5757] underline hover:opacity-80 disabled:opacity-50"
+                disabled={pending || c.inUse}
+                onClick={() => {
+                  setDeleteError(null);
+                  setDeleting(c);
+                }}
+                title={
+                  c.inUse
+                    ? "A booking is using this coupon — you can delete it once that stay completes."
+                    : undefined
+                }
+                className="text-[13px] text-[#eb5757] underline hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Delete
               </button>
@@ -295,9 +341,12 @@ export default function Coupons({
           role="dialog"
           aria-modal="true"
           aria-label="Delete this coupon"
-          onClick={(e) =>
-            e.target === e.currentTarget && !pending && setDeleting(null)
-          }
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !pending) {
+              setDeleting(null);
+              setDeleteError(null);
+            }
+          }}
         >
           <div className="w-full max-w-[440px] rounded-[12px] bg-white p-6 shadow-[0px_20px_60px_0px_rgba(0,0,0,0.25)]">
             <h3 className="text-[18px] font-semibold text-[#121212]">
@@ -307,18 +356,29 @@ export default function Coupons({
               Guests won&rsquo;t be able to redeem it any more. Stays that
               already used it keep their discount.
             </p>
+            {deleteError && (
+              <p
+                role="alert"
+                className="mt-3 rounded-[8px] bg-[#fdecec] px-3 py-2 text-[13px] leading-relaxed text-[#c0392b]"
+              >
+                {deleteError}
+              </p>
+            )}
             <div className="mt-5 flex items-center justify-end gap-4">
               <button
                 type="button"
                 disabled={pending}
-                onClick={() => setDeleting(null)}
+                onClick={() => {
+                  setDeleting(null);
+                  setDeleteError(null);
+                }}
                 className="text-[14px] text-[#7a7a85] underline disabled:opacity-50"
               >
-                Keep coupon
+                {deleteError ? "Close" : "Keep coupon"}
               </button>
               <button
                 type="button"
-                disabled={pending}
+                disabled={pending || !!deleteError}
                 onClick={confirmDelete}
                 className="rounded-[8px] bg-[#eb5757] px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-[#d64545] disabled:opacity-60"
               >

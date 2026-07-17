@@ -162,6 +162,7 @@ export default async function HostPage({
           rooms: String(villa.rooms),
           maxGuests: String(villa.max_guests),
           peoplePerRoom: villa.people_per_room ? String(villa.people_per_room) : "",
+          maxBookingDays: villa.max_booking_days ? String(villa.max_booking_days) : "",
           facilities: villa.facilityList,
         },
         images: villa.gallery,

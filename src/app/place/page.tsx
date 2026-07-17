@@ -137,9 +137,11 @@ export default async function PlacePage({ searchParams }: Search) {
   const roomBookings = roomBased ? await getRoomBookings(villa.id) : [];
   const bookedRanges = roomBased ? [] : await getBookedRanges(villa.id);
   // What THIS guest already holds here — the per-guest room cap counts against
-  // it, so the booking card can offer only rooms the booking would accept.
-  const myRoomBookings =
-    roomBased && user ? await getGuestRoomBookings(villa.id, user.id) : [];
+  // it (hotels/resorts), and the per-guest day budget counts nights across it
+  // for EVERY kind, so it's fetched for whole-villa listings too.
+  const myRoomBookings = user
+    ? await getGuestRoomBookings(villa.id, user.id)
+    : [];
 
   // Packages are shown to guests only (owners can't book their own villa).
   const isOwnerViewing = !!user && villa.owner_id === user.id;
@@ -285,6 +287,7 @@ export default async function PlacePage({ searchParams }: Search) {
                 roomBased={roomBased}
                 totalRooms={villa.rooms}
                 peoplePerRoom={villa.people_per_room}
+                maxBookingDays={villa.max_booking_days}
                 roomBookings={roomBookings}
                 myRoomBookings={myRoomBookings}
                 discount={villa.discount}

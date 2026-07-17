@@ -49,6 +49,8 @@ export type Draft = {
     maxGuests: string;
     /** Hotels/resorts: max occupancy of one room (empty for whole-villa kinds). */
     peoplePerRoom: string;
+    /** Hotels/resorts: most nights one guest may book here (empty/"" = no limit). */
+    maxBookingDays: string;
     facilities: string[];
   };
   images: string[];
@@ -89,6 +91,9 @@ export const DEFAULT_DRAFT: Draft = {
     rooms: "",
     maxGuests: "",
     peoplePerRoom: "",
+    // A new listing starts with a 30-night per-guest cap pre-filled; the owner
+    // can raise it, lower it, or clear the field for no limit.
+    maxBookingDays: "30",
     facilities: [],
   },
   images: DEFAULT_IMAGES,

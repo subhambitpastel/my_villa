@@ -247,7 +247,11 @@ Then **one capacity field that depends on the kind**:
 - **Hotel / Resort → "Guests per Room"** ("How many guests fit in one room? e.g.
   2"). A helper reads *"Guests book individual rooms — total capacity is rooms ×
   guests per room."* Your listing's max guests is computed as **rooms ×
-  guests-per-room**.
+  guests-per-room**. Hotels/resorts also get an optional **"Max Booking Days per
+  Guest"** field ("Leave blank for no limit — e.g. 4"): the most distinct nights one
+  guest may book across all their stays here. They can still take any number of rooms
+  on those nights; past the limit they're routed to a call so you can arrange it.
+  Blank/0 means no limit (clamped 0–365 server-side).
 - **Everything else → "Maximum Number of Guests"** ("How many guests can stay?
   e.g. 6"), which you set directly (clamped 1–30 server-side).
 
@@ -641,8 +645,8 @@ this package? … removes the package from your villa and can't be undone."*
 
 Guests book a package by choosing **only a start date** — nights, guest count, and
 price all come from the package, and the whole bundle is snapshotted onto their
-booking so history survives edits. Packages are **exempt** from the guest's
-6-room cap and the 30-night limit; coupons still apply to them.
+booking so history survives edits. Packages are **exempt** from the property's
+per-guest booking-days limit and the 30-night limit; coupons still apply to them.
 
 ---
 
@@ -695,10 +699,10 @@ payment-pending stay you arranged simply withdraws it (nothing was held or paid)
 
 ## 19. Call Requests: when guests need you to arrange it
 
-Some stays the self-serve flow won't take: **more than 6 rooms for one guest**, or
-**a stay longer than 30 nights**. When a guest hits either, their Reserve button
-becomes *"Request a call from the host"*, and their request lands in your **Call
-Requests** (`/profile/calls`).
+Some stays the self-serve flow won't take: **more nights than your per-guest
+booking-days limit** (if you set one), or **a single stay longer than 30 nights**.
+When a guest hits either, their Reserve button becomes *"Request a call from the
+host"*, and their request lands in your **Call Requests** (`/profile/calls`).
 
 Header: *"{NN} Call Requests"* (zero-padded). Intro: *"Guests who wanted a stay
 that can't be completed online — more rooms than one guest may book, or a longer
@@ -748,8 +752,8 @@ The form:
   **cannot pick yourself**, and the search excludes you.
 - **Dates** — no maximum length applies to an owner booking. For hotels/resorts
   it shows per-night availability.
-- **Rooms** (hotels/resorts) — 1…full inventory. Clamped to real inventory, **not**
-  to the guest's 6-room allowance. Sold out shows *"Sold out for these dates"*.
+- **Rooms** (hotels/resorts) — 1…full inventory. Clamped to real inventory only
+  (rooms are never rationed per guest). Sold out shows *"Sold out for these dates"*.
 - **Adjusted stay** (when the room count isn't free every night) — an amber panel
   offering *"Book it with this adjustment"* (each night gets what it has, guest
   pays only for rooms they get) or *"Keep N rooms for the whole stay"*.
@@ -969,7 +973,8 @@ something the app doesn't do.
 | Package length | Fixed (exact), presets 3 / 7 / 28 nights, curated any |
 | Package inclusions | **1–20**, all mandatory |
 | Package price | One flat all-inclusive total, **no service fee** |
-| Guest self-serve room cap | **6 rooms/night/guest** (packages & owner bookings exempt) |
+| Guest self-serve room cap | **None** — a guest may book every room the property has |
+| Guest self-serve day limit | **Host-set per property** (max nights/guest; 0 = none; packages & owner bookings exempt) |
 | Guest self-serve stay length | **30 nights** (packages & owner bookings exempt) |
 | Call-request note / chat message | **500 characters** |
 | Chat | **Real-time** over WebSocket; degrades to notifications if offline |
