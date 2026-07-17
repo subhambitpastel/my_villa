@@ -189,9 +189,13 @@ export default function PaymentForm({
   // occupancy and price — the guest only picks a start date — so editing returns
   // to the package page (start-date-only), never the villa's free date picker
   // where they could shorten a 7-night package. A nightly stay carries its
-  // dates, guests, rooms and chosen services back so the card reopens as it was.
+  // dates, guests, rooms and chosen services back so the card reopens as it was
+  // — including a modify top-up, whose manage page would otherwise reopen on
+  // the booking's OLD shape and silently drop the changes being paid for.
   const editHref = modify
-    ? `/booking?id=${modify.bookingId}`
+    ? `/booking?id=${modify.bookingId}&in=${checkIn}&out=${checkOut}&guests=${guests}` +
+      (roomBased ? `&rooms=${rooms}` : "") +
+      (services.length > 0 ? `&svc=${services.join(",")}` : "")
     : isPackage
       ? `/package?id=${packageId}&in=${checkIn}`
       : `/place?id=${villaId}&in=${checkIn}&out=${checkOut}&guests=${guests}` +

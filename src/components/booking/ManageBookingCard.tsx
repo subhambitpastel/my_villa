@@ -90,6 +90,7 @@ export default function ManageBookingCard({
   originalExtras = [],
   originalTotal = 0,
   locked = false,
+  draft = null,
   couponCode = "",
   discPct = 0,
   discFixed = 0,
@@ -126,6 +127,16 @@ export default function ManageBookingCard({
   /** Set when this booking is a package: its length, occupancy and price are
    *  fixed, so the guest may only shift the start date. */
   packageStay?: { nights: number; price: number } | null;
+  /** An in-progress edit carried back from checkout (the payment page's "Edit"
+   *  links), seeding the editor so the guest's pending changes survive the
+   *  round trip. The BOOKING's stored values stay the comparison baseline. */
+  draft?: {
+    checkIn?: string;
+    checkOut?: string;
+    guests?: number;
+    rooms?: number;
+    svc?: number[];
+  } | null;
   /** The booking's own discount, re-applied to every re-priced total so an
    *  edit never silently drops it: the coupon it was bought with (labelled by
    *  `couponCode`, price floored at $1) or the owner's promised discount. */
@@ -320,6 +331,7 @@ export default function ManageBookingCard({
       services={services}
       originalExtras={originalExtras}
       originalTotal={originalTotal}
+      draft={draft}
       couponCode={couponCode}
       discPct={discPct}
       discFixed={discFixed}
@@ -352,6 +364,7 @@ function NightlyManageCard({
   services,
   originalExtras,
   originalTotal,
+  draft = null,
   couponCode = "",
   discPct = 0,
   discFixed = 0,
@@ -381,6 +394,15 @@ function NightlyManageCard({
   services: VillaService[];
   originalExtras: number[];
   originalTotal: number;
+  /** Pending edit carried back from checkout — seeds the pickers below; the
+   *  booking's stored values remain the changed/delta baseline. */
+  draft?: {
+    checkIn?: string;
+    checkOut?: string;
+    guests?: number;
+    rooms?: number;
+    svc?: number[];
+  } | null;
   /** The booking's own discount, re-applied to every re-priced total: the
    *  coupon it was bought with (labelled by `couponCode`, floored at $1) or
    *  the owner's promised discount. */
@@ -388,16 +410,20 @@ function NightlyManageCard({
   discPct?: number;
   discFixed?: number;
 }) {
-  const [checkIn, setCheckIn] = useState(initialCheckIn);
-  const [checkOut, setCheckOut] = useState(initialCheckOut);
-  const [roomsSel, setRoomsSel] = useState(Math.max(1, initialRooms));
-  const [guestsSel, setGuestsSel] = useState(Math.max(1, initialGuests));
+  const [checkIn, setCheckIn] = useState(draft?.checkIn ?? initialCheckIn);
+  const [checkOut, setCheckOut] = useState(draft?.checkOut ?? initialCheckOut);
+  const [roomsSel, setRoomsSel] = useState(
+    Math.max(1, draft?.rooms ?? initialRooms),
+  );
+  const [guestsSel, setGuestsSel] = useState(
+    Math.max(1, draft?.guests ?? initialGuests),
+  );
   const paidServices = services
     .map((s, i) => ({ service: s, index: i }))
     .filter(({ service }) => service.price > 0);
   const [chosen, setChosen] = useState<number[]>(() => {
     const paid = new Set(paidServices.map((p) => p.index));
-    return originalExtras.filter((i) => paid.has(i));
+    return (draft?.svc ?? originalExtras).filter((i) => paid.has(i));
   });
   const [showUnavailable, setShowUnavailable] = useState(false);
 

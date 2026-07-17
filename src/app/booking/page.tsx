@@ -16,7 +16,7 @@ import {
   getVillaReviewDistribution,
 } from "@/lib/queries";
 import { isRoomBased, planRoomNights } from "@/lib/rooms";
-import { dayFromNow, nightsBetween } from "@/lib/dates";
+import { dayFromNow, nightsBetween, parseDay } from "@/lib/dates";
 import { quote } from "@/lib/pricing";
 import { loginHref } from "@/lib/returnTo";
 
@@ -29,9 +29,19 @@ export const metadata: Metadata = {
 export default async function ManageBookingPage({
   searchParams,
 }: {
-  searchParams: Promise<{ id?: string }>;
+  searchParams: Promise<{
+    id?: string;
+    /** In-progress edit carried back from the payment page's "Edit" links, so
+     *  the editor reopens with the changes being paid for instead of the
+     *  booking's stored shape. All optional; ignored when malformed. */
+    in?: string;
+    out?: string;
+    guests?: string;
+    rooms?: string;
+    svc?: string;
+  }>;
 }) {
-  const { id } = await searchParams;
+  const { id, ...draftParams } = await searchParams;
 
   const user = await getCurrentUser();
   if (!user) redirect(loginHref(`/booking${id ? `?id=${id}` : ""}`));
@@ -110,6 +120,36 @@ export default async function ManageBookingPage({
   );
   const originalTotal =
     Math.round((originalBase - originalDiscount) * 100) / 100;
+
+  // The pending edit the guest carried back from checkout, validated loosely —
+  // the editor clamps and re-validates everything (dates, inventory, caps)
+  // exactly as if the guest had picked these values by hand.
+  const draftGuests = Number(draftParams.guests);
+  const draftRooms = Number(draftParams.rooms);
+  const draft = {
+    checkIn:
+      parseDay(draftParams.in) && parseDay(draftParams.out)
+        ? draftParams.in
+        : undefined,
+    checkOut:
+      parseDay(draftParams.in) && parseDay(draftParams.out)
+        ? draftParams.out
+        : undefined,
+    guests:
+      Number.isInteger(draftGuests) && draftGuests >= 1 ? draftGuests : undefined,
+    rooms:
+      Number.isInteger(draftRooms) && draftRooms >= 1 ? draftRooms : undefined,
+    svc: draftParams.svc
+      ? [
+          ...new Set(
+            draftParams.svc
+              .split(",")
+              .map((n) => Number(n))
+              .filter((n) => Number.isInteger(n) && n >= 0),
+          ),
+        ]
+      : undefined,
+  };
 
   return (
     <>
@@ -202,6 +242,7 @@ export default async function ManageBookingPage({
               originalExtras={originalExtras}
               originalTotal={originalTotal}
               locked={booking.locked}
+              draft={draft}
               couponCode={booking.couponCode}
               discPct={booking.discPct}
               discFixed={booking.discFixed}
