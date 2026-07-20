@@ -46,6 +46,7 @@ export default function BookingCard({
   defaultGuests = 2,
   defaultRooms,
   defaultServices = [],
+  carriedCoupon = "",
   maxGuests,
   today,
   bookedRanges,
@@ -73,6 +74,10 @@ export default function BookingCard({
   defaultRooms?: number;
   /** Paid-service indices to preselect (carried back when editing from checkout). */
   defaultServices?: number[];
+  /** A coupon the guest already applied at checkout, carried back when they
+   *  came here to edit — handed straight to the checkout link so returning
+   *  does not silently drop the discount. Validated only on the payment page. */
+  carriedCoupon?: string;
   /** Guest capacity the villa owner set — caps the guest picker. */
   maxGuests: number;
   today: string;
@@ -394,7 +399,9 @@ export default function BookingCard({
   // count as a total and refusing "you already hold these dates".
   const paymentUrl = `/payment?villa=${villaId}&in=${effIn}&out=${effOut}&guests=${guests}${
     roomBased ? `&rooms=${adjusted ? roomsWanted : rooms}` : ""
-  }${adjusted ? "&flex=1" : ""}${addMode ? "&add=1" : ""}`;
+  }${adjusted ? "&flex=1" : ""}${addMode ? "&add=1" : ""}${
+    carriedCoupon ? `&coupon=${encodeURIComponent(carriedCoupon)}` : ""
+  }`;
 
   // Checkout carries the picked services as indices; prices are re-read from
   // the villa on the server, so the client can never set its own amounts.

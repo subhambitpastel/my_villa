@@ -192,15 +192,24 @@ export default function PaymentForm({
   // dates, guests, rooms and chosen services back so the card reopens as it was
   // — including a modify top-up, whose manage page would otherwise reopen on
   // the booking's OLD shape and silently drop the changes being paid for.
+  /* An applied coupon rides along too. Going back to change the dates is not
+     giving up the discount — losing it there means retyping a code the guest
+     already entered, on a total that silently jumped. A modify top-up never
+     carries one (coupons belong to a new booking), so only the two
+     new-booking paths take it. */
+  const couponParam = couponCode
+    ? `&coupon=${encodeURIComponent(couponCode)}`
+    : "";
   const editHref = modify
     ? `/booking?id=${modify.bookingId}&in=${checkIn}&out=${checkOut}&guests=${guests}` +
       (roomBased ? `&rooms=${rooms}` : "") +
       (services.length > 0 ? `&svc=${services.join(",")}` : "")
     : isPackage
-      ? `/package?id=${packageId}&in=${checkIn}`
+      ? `/package?id=${packageId}&in=${checkIn}${couponParam}`
       : `/place?id=${villaId}&in=${checkIn}&out=${checkOut}&guests=${guests}` +
         `&rooms=${rooms}` +
-        (services.length > 0 ? `&svc=${services.join(",")}` : "");
+        (services.length > 0 ? `&svc=${services.join(",")}` : "") +
+        couponParam;
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();

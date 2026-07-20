@@ -34,6 +34,9 @@ type Search = {
     rooms?: string;
     /** Chosen paid-service indices, carried back when editing from checkout. */
     svc?: string;
+    /** A coupon already applied at checkout, carried back when editing from
+     *  there so returning does not silently drop the discount. */
+    coupon?: string;
     /** The filtered /search URL to return to (set when arriving from a result). */
     from?: string;
   }>;
@@ -74,6 +77,7 @@ export default async function PlacePage({ searchParams }: Search) {
     guests: guestsParam,
     rooms: roomsParam,
     svc: svcParam,
+    coupon: couponParam,
     from,
   } = await searchParams;
   const backHref = backToSearchHref(from);
@@ -112,6 +116,9 @@ export default async function PlacePage({ searchParams }: Search) {
   const defaultServices = (svcParam ? svcParam.split(",") : [])
     .map((n) => Number(n))
     .filter((n) => Number.isInteger(n) && n >= 0);
+  // Passed straight back out on the Reserve link. The payment page is the only
+  // thing that validates a code — carrying it is not trusting it.
+  const carriedCoupon = (couponParam ?? "").trim().slice(0, 40);
 
   if (!villa) {
     return (
@@ -279,6 +286,7 @@ export default async function PlacePage({ searchParams }: Search) {
                 defaultGuests={defaultGuests}
                 defaultRooms={defaultRooms}
                 defaultServices={defaultServices}
+                carriedCoupon={carriedCoupon}
                 maxGuests={villa.max_guests}
                 today={dayFromNow(0)}
                 bookedRanges={bookedRanges}
