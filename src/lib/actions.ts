@@ -2122,16 +2122,30 @@ export async function updateReviewAction(
   const db = getDb();
   const review = (await db
     .prepare(
-      "SELECT id, villa_id, created_at FROM reviews WHERE booking_id = ? AND user_id = ?",
+      "SELECT id, villa_id, created_at, stars, comment FROM reviews WHERE booking_id = ? AND user_id = ?",
     )
     .get(bookingId, user.id)) as
-    | { id: number; villa_id: number; created_at: string }
+    | {
+        id: number;
+        villa_id: number;
+        created_at: string;
+        stars: number;
+        comment: string;
+      }
     | undefined;
   if (!review) return fail("You haven't reviewed this stay.");
   if (!canEditReview(review.created_at))
     return fail(
       `A review can only be changed within ${REVIEW_EDIT_HOURS} hours of writing it.`,
     );
+
+  // An edit that changes nothing is not an edit. Saying so here matters more
+  // than saving a write: the update below sends the review back to the
+  // moderation queue, so a no-op save would pull an already published review
+  // off the property for a re-read that has nothing new to read. The composer
+  // disables its save button on the same rule; this catches a stale client.
+  if (value === review.stars && text === review.comment.trim())
+    return { ok: true };
 
   await db
     .prepare(

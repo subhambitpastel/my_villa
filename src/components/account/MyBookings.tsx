@@ -496,13 +496,18 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
     id: number;
     stars: number;
     editing: boolean;
+    /** What the review said when the composer opened — an edit that changes
+     *  nothing is not a save, and letting it through would send an already
+     *  published review back to the moderation queue for no reason. */
+    wasStars: number;
+    wasComment: string;
   } | null>(null);
   const [comment, setComment] = useState("");
   const [reviewError, setReviewError] = useState<string | null>(null);
 
   // Clicking a star on a completed stay opens the composer with that rating.
   function openReview(id: number, stars: number) {
-    setReviewing({ id, stars, editing: false });
+    setReviewing({ id, stars, editing: false, wasStars: 0, wasComment: "" });
     setComment("");
     setReviewError(null);
   }
@@ -510,13 +515,19 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
   // Reopening what they already wrote, inside the 24h window.
   function openEdit(b: BookingItem) {
     if (!b.myReview) return;
-    setReviewing({ id: b.id, stars: b.myReview.stars, editing: true });
+    setReviewing({
+      id: b.id,
+      stars: b.myReview.stars,
+      editing: true,
+      wasStars: b.myReview.stars,
+      wasComment: b.myReview.comment,
+    });
     setComment(b.myReview.comment);
     setReviewError(null);
   }
 
   function submitReview() {
-    if (!reviewing) return;
+    if (!reviewing || reviewUnchanged) return;
     const { id, stars, editing } = reviewing;
     setReviewError(null);
     startTransition(async () => {
@@ -531,6 +542,15 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
       router.refresh();
     });
   }
+
+  /* Nothing to save: same stars, same words (trimmed — trailing spaces are
+     not an edit). Only ever true while EDITING; a new review always has
+     something to say. */
+  const reviewUnchanged =
+    reviewing !== null &&
+    reviewing.editing &&
+    reviewing.stars === reviewing.wasStars &&
+    comment.trim() === reviewing.wasComment.trim();
 
   return (
     <div className="rounded-lg border border-line/60 bg-white p-6 sm:p-8">
@@ -822,7 +842,12 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
               </button>
               <button
                 type="button"
-                disabled={pending}
+                disabled={pending || reviewUnchanged}
+                title={
+                  reviewUnchanged
+                    ? "Change the rating or what you wrote to save."
+                    : undefined
+                }
                 onClick={submitReview}
                 className="rounded-[8px] bg-brand px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-brand-dark disabled:opacity-60"
               >
