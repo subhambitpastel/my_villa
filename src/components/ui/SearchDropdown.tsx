@@ -18,6 +18,7 @@ export default function SearchDropdown({
   ariaLabel,
   buttonClassName = "",
   searchPlaceholder = "Search…",
+  formatLabel,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -25,6 +26,9 @@ export default function SearchDropdown({
   ariaLabel: string;
   buttonClassName?: string;
   searchPlaceholder?: string;
+  /** Custom label for the closed trigger (e.g. `Guest: ${o.label}`) — same
+   *  contract as `Dropdown`, so a row of filters can name itself. */
+  formatLabel?: (opt: SearchDropdownOption) => string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -91,7 +95,9 @@ export default function SearchDropdown({
         }}
         className={buttonClassName}
       >
-        <span className="truncate">{selected ? selected.label : ""}</span>
+        <span className="truncate">
+          {selected ? (formatLabel ? formatLabel(selected) : selected.label) : ""}
+        </span>
         <svg
           width="11"
           height="7"

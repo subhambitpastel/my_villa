@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { rateStayAction } from "@/lib/actions";
+import { rateStayAction, updateReviewAction } from "@/lib/actions";
 import Dropdown from "@/components/ui/Dropdown";
 import AccountSearch from "@/components/account/AccountSearch";
 import { matchesSearch } from "@/lib/textSearch";
@@ -27,26 +27,55 @@ function Star({ filled, size = 14 }: { filled: boolean; size?: number }) {
 }
 
 /** Five clickable stars until rated, then a read-only row of the given stars. */
+const REVIEW_STATE: Record<string, { label: string; className: string }> = {
+  pending: { label: "In review", className: "text-[#a06a00]" },
+  approved: { label: "Published", className: "text-[#1c7d5c]" },
+  rejected: { label: "Not published", className: "text-[#eb5757]" },
+};
+
 function StarRater({
   rated,
+  review,
   disabled,
   onRate,
+  onEdit,
 }: {
   rated: number | null;
+  review: BookingItem["myReview"];
   disabled: boolean;
   onRate: (stars: number) => void;
+  onEdit: () => void;
 }) {
   const [hover, setHover] = useState(0);
 
   if (rated) {
+    const state = review ? REVIEW_STATE[review.status] : null;
     return (
-      <span
-        className="flex items-center gap-0.5"
-        aria-label={`You rated this stay ${rated} out of 5 stars`}
-      >
-        {[1, 2, 3, 4, 5].map((n) => (
-          <Star key={n} filled={n <= rated} />
-        ))}
+      <span className="flex flex-col items-end gap-0.5">
+        <span
+          className="flex items-center gap-0.5"
+          aria-label={`You rated this stay ${rated} out of 5 stars`}
+        >
+          {[1, 2, 3, 4, 5].map((n) => (
+            <Star key={n} filled={n <= rated} />
+          ))}
+        </span>
+        {state && (
+          <span className={`text-[11px] font-semibold ${state.className}`}>
+            {state.label}
+          </span>
+        )}
+        {review?.canEdit && (
+          <button
+            type="button"
+            onClick={onEdit}
+            disabled={disabled}
+            title={`You can change this for another ${review.hoursLeft} hour${review.hoursLeft === 1 ? "" : "s"}.`}
+            className="text-[11px] text-brand underline hover:opacity-80 disabled:opacity-60"
+          >
+            Edit ({review.hoursLeft}h left)
+          </button>
+        )}
       </span>
     );
   }
@@ -463,22 +492,41 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
     historyLatest,
   );
 
-  const [reviewing, setReviewing] = useState<{ id: number; stars: number } | null>(
-    null,
-  );
+  const [reviewing, setReviewing] = useState<{
+    id: number;
+    stars: number;
+    editing: boolean;
+  } | null>(null);
   const [comment, setComment] = useState("");
+  const [reviewError, setReviewError] = useState<string | null>(null);
 
   // Clicking a star on a completed stay opens the composer with that rating.
   function openReview(id: number, stars: number) {
-    setReviewing({ id, stars });
+    setReviewing({ id, stars, editing: false });
     setComment("");
+    setReviewError(null);
+  }
+
+  // Reopening what they already wrote, inside the 24h window.
+  function openEdit(b: BookingItem) {
+    if (!b.myReview) return;
+    setReviewing({ id: b.id, stars: b.myReview.stars, editing: true });
+    setComment(b.myReview.comment);
+    setReviewError(null);
   }
 
   function submitReview() {
     if (!reviewing) return;
-    const { id, stars } = reviewing;
+    const { id, stars, editing } = reviewing;
+    setReviewError(null);
     startTransition(async () => {
-      await rateStayAction(id, stars, comment.trim());
+      const res = editing
+        ? await updateReviewAction(id, stars, comment.trim())
+        : await rateStayAction(id, stars, comment.trim());
+      if (!res.ok) {
+        setReviewError(res.error);
+        return;
+      }
       setReviewing(null);
       router.refresh();
     });
@@ -652,8 +700,10 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
                 {b.status === "completed" && (
                   <StarRater
                     rated={b.myRating}
+                    review={b.myReview}
                     disabled={pending}
                     onRate={(stars) => openReview(b.id, stars)}
+                    onEdit={() => openEdit(b)}
                   />
                 )}
               </>
@@ -724,10 +774,12 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
         >
           <div className="w-full max-w-[440px] rounded-[12px] bg-white p-6 shadow-[0px_20px_60px_0px_rgba(0,0,0,0.25)]">
             <h3 className="text-[18px] font-semibold text-[#121212]">
-              Review your stay
+              {reviewing.editing ? "Edit your review" : "Review your stay"}
             </h3>
             <p className="mt-1 text-[13px] text-[#7a7a85]">
-              Share how it went — your review helps other guests decide.
+              {reviewing.editing
+                ? "Change it while it's still fresh — an edit goes back for review before it appears."
+                : "Share how it went — your review helps other guests decide."}
             </p>
             <div className="mt-4 flex items-center gap-1.5">
               {[1, 2, 3, 4, 5].map((n) => (
@@ -751,6 +803,15 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
               placeholder="What did you love? Anything the next guest should know?"
               className="mt-4 w-full resize-none rounded-[8px] border border-[#d9d9d9] p-3 text-[14px] text-[#121212] placeholder:text-[#9d9da6] focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
             />
+            <p className="mt-3 rounded-[8px] bg-[#fdf9f0] px-3 py-2 text-[12px] leading-[1.5] text-[#7a6a45]">
+              Reviews are checked before they go live, and you can change yours
+              for 24 hours after posting.
+            </p>
+            {reviewError && (
+              <p role="alert" className="mt-3 text-[13px] font-medium text-[#c0392b]">
+                {reviewError}
+              </p>
+            )}
             <div className="mt-4 flex items-center justify-end gap-4">
               <button
                 type="button"
@@ -765,7 +826,11 @@ export default function MyBookings({ bookings }: { bookings: BookingItem[] }) {
                 onClick={submitReview}
                 className="rounded-[8px] bg-brand px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-brand-dark disabled:opacity-60"
               >
-                {pending ? "Submitting…" : "Submit review"}
+                {pending
+                  ? "Submitting…"
+                  : reviewing.editing
+                    ? "Save changes"
+                    : "Submit review"}
               </button>
             </div>
           </div>

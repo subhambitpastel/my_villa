@@ -2,6 +2,7 @@
 import { cookies } from "next/headers";
 import { randomBytes } from "node:crypto";
 import { getDb, type UserRow } from "./db";
+import { nowIso, nowMs } from "./clock";
 
 const COOKIE_NAME = "myvilla_session";
 const SESSION_DAYS = 30;
@@ -10,7 +11,7 @@ export type SessionUser = Omit<UserRow, "password_hash">;
 
 export async function createSession(userId: number) {
   const token = randomBytes(32).toString("hex");
-  const expires = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
+  const expires = new Date(nowMs() + SESSION_DAYS * 24 * 60 * 60 * 1000);
   await getDb()
     .prepare("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)")
     .run(token, userId, expires.toISOString());
@@ -39,16 +40,18 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   const token = cookieStore.get(COOKIE_NAME)?.value;
   if (!token) return null;
 
+  // disabled_at IS NULL: an account an admin disabled loses its live sessions
+  // instantly — the row simply stops resolving, whatever cookie is presented.
   const row = (await getDb()
     .prepare(
       `SELECT u.id, u.email, u.customer_id, u.full_name, u.gender, u.dob, u.address,
               u.emergency, u.phone_code, u.phone_number, u.country, u.avatar,
               u.pay_methods, u.pay_account_type, u.card_number, u.hosting_enabled,
-              u.created_at
+              u.is_admin, u.disabled_at, u.created_at
        FROM sessions s JOIN users u ON u.id = s.user_id
-       WHERE s.token = ? AND s.expires_at > ?`,
+       WHERE s.token = ? AND s.expires_at > ? AND u.disabled_at IS NULL`,
     )
-    .get(token, new Date().toISOString())) as SessionUser | undefined;
+    .get(token, nowIso())) as SessionUser | undefined;
 
   return row ?? null;
 }

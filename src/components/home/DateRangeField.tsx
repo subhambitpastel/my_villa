@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { addDays, addMonths, nightsBetween } from "@/lib/dates";
+import { now as clockNow } from "@/lib/clock";
 
 /* eslint-disable @next/next/no-img-element */
 
@@ -37,7 +38,7 @@ const prevDayKey = (key: string) => {
 };
 
 function todayKey() {
-  const now = new Date();
+  const now = clockNow();
   return keyOf(now.getFullYear(), now.getMonth(), now.getDate());
 }
 

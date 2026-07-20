@@ -22,7 +22,9 @@ export type NotificationType =
   /** Either side: the other one wrote in a call request's thread. */
   | "chat_message"
   /** Owner: a guest rated a finished stay. */
-  | "review";
+  | "review"
+  /** Either side: MyVilla support acted on their listing, coupon or stay. */
+  | "moderation";
 
 export type NotificationItem = {
   id: number;
@@ -55,6 +57,8 @@ export const NOTIFICATION_TONE: Record<
   // Someone is mid-conversation and waiting on a reply.
   chat_message: { bg: "bg-[#e9e8fd]", fg: "text-brand" },
   review: { bg: "bg-[#e9e8fd]", fg: "text-brand" },
+  // Support stepped in — same weight as something being lost.
+  moderation: { bg: "bg-[#fdecec]", fg: "text-[#c0392b]" },
 };
 
 /** Prefix for the screen-reader label, so a notification announces what KIND it
@@ -67,6 +71,7 @@ export const NOTIFICATION_KIND_LABEL: Record<NotificationType, string> = {
   call_request: "Call request",
   chat_message: "New message",
   review: "New review",
+  moderation: "Moderation notice",
 };
 
 /** Most recent notifications the bell holds. It's a glance, not an archive —

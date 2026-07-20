@@ -8,6 +8,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { hashPasswordSync } from "./password";
 import { allocateCustomerId } from "./customerId";
 import { dayFromNow, formatRange } from "./dates";
+import { nowIso, nowMs } from "./clock";
 import { quote } from "./pricing";
 
 const { Pool } = pg;
@@ -41,6 +42,8 @@ export type UserRow = {
   pay_account_type: string; // "Credit Card or Debit Card" | "Bank Account" | …
   card_number: string; // host payout card/account, stored as entered (demo only)
   hosting_enabled: number; // 1 = host tools unlocked (auto-set on first listing)
+  is_admin: number; // 1 = platform super-admin (/admin access)
+  disabled_at: string | null; // set = account disabled by an admin; NULL = active
   created_at: string;
 };
 
@@ -165,6 +168,8 @@ CREATE TABLE IF NOT EXISTS users (
   pay_account_type TEXT NOT NULL DEFAULT '',
   card_number      TEXT NOT NULL DEFAULT '',
   hosting_enabled INTEGER NOT NULL DEFAULT 0,
+  is_admin      INTEGER NOT NULL DEFAULT 0,
+  disabled_at   TEXT,
   created_at    TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
@@ -277,6 +282,11 @@ CREATE TABLE IF NOT EXISTS reviews (
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   stars      INTEGER NOT NULL CHECK (stars BETWEEN 1 AND 5),
   comment    TEXT NOT NULL DEFAULT '',
+  -- Reviews are moderated: a new one waits for an admin at /admin/reviews and
+  -- counts for nothing publicly until approved. Rejected ones stay on the row
+  -- (the booking is still "reviewed") but never surface.
+  status     TEXT NOT NULL DEFAULT 'pending'
+             CHECK (status IN ('pending', 'approved', 'rejected')),
   created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
@@ -411,6 +421,11 @@ ALTER TABLE packages ADD COLUMN IF NOT EXISTS nights INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE packages ADD COLUMN IF NOT EXISTS max_guests INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE packages ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'curated';
 ALTER TABLE packages ADD COLUMN IF NOT EXISTS discount INTEGER NOT NULL DEFAULT 0;
+-- Review moderation. The ADD defaults to 'approved' so reviews written BEFORE
+-- moderation existed stay visible (they were already public); the SET DEFAULT
+-- immediately after makes every review written from now on wait for an admin.
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'approved';
+ALTER TABLE reviews ALTER COLUMN status SET DEFAULT 'pending';
 -- This column was called archived_at before the feature was renamed to "Lock".
 -- RENAME rather than add: the ADD COLUMN below would happily create an empty
 -- locked_at beside the old column, quietly putting every already-delisted
@@ -440,6 +455,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS card_number      TEXT NOT NULL DEFAUL
 -- Nullable + no default: it can't be generated in DDL, so existing rows are
 -- backfilled by backfillCustomerIds() right after this schema runs.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS customer_id TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_at TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS users_customer_id_key ON users(customer_id);
 ALTER TABLE call_requests ADD COLUMN IF NOT EXISTS guests  INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE call_requests ADD COLUMN IF NOT EXISTS message TEXT NOT NULL DEFAULT '';
@@ -509,7 +526,7 @@ FROM (
   SELECT v.id,
          COUNT(r.id) AS cnt,
          COALESCE(ROUND(AVG(r.stars)::numeric, 2), 0) AS avg
-  FROM villas v LEFT JOIN reviews r ON r.villa_id = v.id
+  FROM villas v LEFT JOIN reviews r ON r.villa_id = v.id AND r.status = 'approved'
   GROUP BY v.id
 ) agg
 WHERE villas.id = agg.id
@@ -581,14 +598,35 @@ async function seed(pool: pg.Pool, force: boolean) {
     ],
   );
 
+  // The platform super-admin — signs in at /admin/login (password myvilla123
+  // like every demo account) and sees the whole platform, not just their own.
+  const adminId = await insUser(
+    "admin@myvilla.com",
+    "MyVilla Admin",
+    "",
+    "",
+    "",
+    "",
+    "/images/host/avatar.png",
+  );
+  await pool.query("UPDATE users SET is_admin = 1 WHERE id = $1", [adminId]);
+
   const tenants: number[] = [];
-  for (const [email, name, avatar] of [
-    ["alena@myvilla.com", "Alena James", "/images/profile/tenant-1.jpg"],
-    ["rachiel@myvilla.com", "Rachiel Simen", "/images/profile/tenant-2.jpg"],
-    ["micheal@myvilla.com", "Micheal Han", "/images/profile/tenant-3.jpg"],
-    ["alex@myvilla.com", "Alex Whitmen", "/images/profile/tenant-4.jpg"],
+  // Each demo guest carries a country and a dialable number: the owner's Rent
+  // Requests and the admin's booking list both show how to reach them, and a
+  // blank there reads as missing data rather than a deliberate gap.
+  for (const [email, name, avatar, country, code, phone] of [
+    ["alena@myvilla.com", "Alena James", "/images/profile/tenant-1.jpg", "United Kingdom", "+44", "7700 900112"],
+    ["rachiel@myvilla.com", "Rachiel Simen", "/images/profile/tenant-2.jpg", "United States", "+1", "415 555 0139"],
+    ["micheal@myvilla.com", "Micheal Han", "/images/profile/tenant-3.jpg", "Singapore", "+65", "8123 4567"],
+    ["alex@myvilla.com", "Alex Whitmen", "/images/profile/tenant-4.jpg", "Australia", "+61", "412 345 678"],
   ]) {
-    tenants.push(await insUser(email, name, "", "", "", "", avatar));
+    const id = await insUser(email, name, "", "", "", country, avatar);
+    await pool.query(
+      "UPDATE users SET phone_code = $2, phone_number = $3 WHERE id = $1",
+      [id, code, phone],
+    );
+    tenants.push(id);
   }
 
   const FACILITIES = JSON.stringify(["Wifi", "Free Parking"]);
@@ -721,20 +759,124 @@ async function seed(pool: pg.Pool, force: boolean) {
   await book(bund, 0, -48, -45, 3, "completed", "-2 months");
   await book(hunza, 1, -80, -76, 4, "completed", "-3 months");
 
-  const seedReviews: Array<[number, number, number, number, number, string, number, string]> = [
-    [bund, 0, -60, -57, 3, "-2 months", 5, "Absolutely stunning views over the Bund. Spotless throughout, and the host left a welcome basket. Would book again in a heartbeat."],
-    [bund, 1, -95, -91, 2, "-3 months", 4, "Great location right by the water. Warm, comfortable apartment and a smooth check-in."],
-    [hunza, 1, -120, -116, 4, "-4 months", 5, "Waking up to the Hunza valley was unreal. Peaceful, clean, and the kitchen had everything we needed."],
-    [hunza, 2, -150, -143, 1, "-5 months", 4, "A proper mountain retreat. A bit of a drive to get there, but worth every minute for the scenery."],
-    [shan, 0, -62, -58, 2, "-2 months", 5, "The Shan Luxus lived up to its name — modern, quiet and beautifully finished. Highly recommend."],
-    [shan, 3, -35, -32, 3, "-1 months", 4, "Comfortable stay, responsive host, and a lovely neighbourhood to explore in the evenings."],
+  /* Money variety on the demo bookings, so every column of the admin's booking
+     list has something real in it instead of a row of dashes: a coupon
+     redemption, an owner-granted discount, and an upgraded stay where the
+     guest already paid for the smaller one. */
+
+  // A coupon redemption — the code is snapshotted with its discount, exactly
+  // the way createBookingAction stores it at checkout.
+  const couponStay = await book(shan, 1, 26, 29, 2, "accepted", "-4 days");
+  await pool.query(
+    "UPDATE bookings SET disc_pct = 10, coupon_code = 'SUMMER10' WHERE id = $1",
+    [couponStay],
+  );
+  // A discount the owner granted on the phone (no coupon involved).
+  const discountedStay = await book(hunza, 3, 18, 22, 2, "accepted", "-6 days");
+  await pool.query("UPDATE bookings SET disc_fixed = 75 WHERE id = $1", [
+    discountedStay,
+  ]);
+  // An upgrade the owner fulfilled: a bigger stay still owed for, with the
+  // value of the stay the guest already paid credited against it.
+  const upgradedStay = await book(bund, 2, 30, 34, 6, "accepted", "-1 days");
+  await pool.query(
+    "UPDATE bookings SET payment_due = 1, paid_credit = 412.50, disc_pct = 5 WHERE id = $1",
+    [upgradedStay],
+  );
+
+  /* Coupons the demo host is running. SUMMER10 is deliberately the code the
+     stay above redeemed, so it shows as "in use" (and refuses deletion). */
+  for (const [villaId, code, pct, fixed] of [
+    [shan, "SUMMER10", 10, 0],
+    [hunza, "MOUNTAIN25", 0, 25],
+    [bund, "BUND15", 15, 0],
+  ] as Array<[number, string, number, number]>) {
+    await pool.query(
+      "INSERT INTO coupons (villa_id, code, pct, fixed) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+      [villaId, code, pct, fixed],
+    );
+  }
+
+  /* Call requests — guests asking the host to arrange a stay the self-serve
+     flow won't take (more rooms than are free, or a longer stay than the
+     nightly cap). One is still open, so it badges the owner's Call Requests
+     tab and the admin sidebar; one has already been dealt with. */
+  const insCall = (
+    villaId: number,
+    guestId: number,
+    inOffset: number,
+    outOffset: number,
+    rooms: number,
+    guests: number,
+    message: string,
+    status: string,
+    createdOffset: string,
+  ) =>
+    pool.query(
+      `INSERT INTO call_requests (villa_id, guest_id, check_in, check_out, rooms, guests, message, services, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, ${TS("$10")})`,
+      [
+        villaId,
+        guestId,
+        dayFromNow(inOffset),
+        dayFromNow(outOffset),
+        rooms,
+        guests,
+        message,
+        JSON.stringify([{ name: "Airport Pickup", price: 25 }]),
+        status,
+        createdOffset,
+      ],
+    );
+  await insCall(
+    shan,
+    tenants[2],
+    40,
+    54,
+    9,
+    18,
+    "We need nine rooms for a family wedding — could you call me to sort out the details?",
+    "open",
+    "-2 days",
+  );
+  await insCall(
+    hunza,
+    tenants[0],
+    60,
+    95,
+    2,
+    4,
+    "Looking at a five-week stay in the valley. Happy to discuss a longer-term rate.",
+    "done",
+    "-9 days",
+  );
+
+  /* Reviews across all three moderation states, so the admin queue has real
+     work in it and the guest side shows each state. The approved ones are the
+     ratings the seeded listings advertise; only they count toward a villa's
+     average (see the recompute at the end of SCHEMA). */
+  const seedReviews: Array<
+    [number, number, number, number, number, string, number, string, string]
+  > = [
+    [bund, 0, -60, -57, 3, "-2 months", 5, "Absolutely stunning views over the Bund. Spotless throughout, and the host left a welcome basket. Would book again in a heartbeat.", "approved"],
+    [bund, 1, -95, -91, 2, "-3 months", 4, "Great location right by the water. Warm, comfortable apartment and a smooth check-in.", "approved"],
+    [hunza, 1, -120, -116, 4, "-4 months", 5, "Waking up to the Hunza valley was unreal. Peaceful, clean, and the kitchen had everything we needed.", "approved"],
+    [hunza, 2, -150, -143, 1, "-5 months", 4, "A proper mountain retreat. A bit of a drive to get there, but worth every minute for the scenery.", "approved"],
+    [shan, 0, -62, -58, 2, "-2 months", 5, "The Shan Luxus lived up to its name — modern, quiet and beautifully finished. Highly recommend.", "approved"],
+    [shan, 3, -35, -32, 3, "-1 months", 4, "Comfortable stay, responsive host, and a lovely neighbourhood to explore in the evenings.", "approved"],
+    // Waiting on an admin — these are what /admin/reviews opens on.
+    [bund, 2, -12, -9, 2, "-8 days", 5, "Second stay here and still faultless. The new coffee machine is a lovely touch.", "pending"],
+    [hunza, 3, -16, -12, 2, "-6 days", 3, "Beautiful setting, but the hot water was patchy for two of the four mornings.", "pending"],
+    // Read and turned down — kept on the booking (so it can't be re-reviewed)
+    // but never shown and never counted.
+    [shan, 2, -20, -17, 2, "-11 days", 1, "Booked the wrong week by mistake, leaving this here so I remember. Ignore.", "rejected"],
   ];
-  for (const [villaId, tIdx, inOff, outOff, guests, age, stars, comment] of seedReviews) {
+  for (const [villaId, tIdx, inOff, outOff, guests, age, stars, comment, status] of seedReviews) {
     const bookingId = await book(villaId, tIdx, inOff, outOff, guests, "completed", age);
     await pool.query(
-      `INSERT INTO reviews (booking_id, villa_id, user_id, stars, comment, created_at)
-       VALUES ($1,$2,$3,$4,$5, ${TS("$6")})`,
-      [bookingId, villaId, tenants[tIdx], stars, comment, age],
+      `INSERT INTO reviews (booking_id, villa_id, user_id, stars, comment, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6, ${TS("$7")})`,
+      [bookingId, villaId, tenants[tIdx], stars, comment, status, age],
     );
   }
 
@@ -749,8 +891,8 @@ async function seed(pool: pg.Pool, force: boolean) {
   // Derive reviewed villas' aggregates from their real reviews.
   await pool.query(
     `UPDATE villas SET
-       reviews = (SELECT COUNT(*) FROM reviews WHERE villa_id = villas.id),
-       rating  = COALESCE((SELECT ROUND(AVG(stars)::numeric, 2) FROM reviews WHERE villa_id = villas.id), 0)
+       reviews = (SELECT COUNT(*) FROM reviews WHERE villa_id = villas.id AND status = 'approved'),
+       rating  = COALESCE((SELECT ROUND(AVG(stars)::numeric, 2) FROM reviews WHERE villa_id = villas.id AND status = 'approved'), 0)
      WHERE id IN (SELECT DISTINCT villa_id FROM reviews)`,
   );
 
@@ -851,7 +993,7 @@ async function init(): Promise<pg.Pool> {
   await backfillCustomerIds(pool);
   // Sweep expired sessions / reset tokens so those tables don't grow forever.
   try {
-    const now = new Date().toISOString();
+    const now = nowIso();
     await pool.query("DELETE FROM sessions WHERE expires_at < $1", [now]);
     await pool.query("DELETE FROM password_resets WHERE expires_at < $1", [now]);
   } catch {
@@ -962,7 +1104,7 @@ export async function tx<T>(fn: () => Promise<T> | T): Promise<T> {
 /** "Posted 3 weeks ago" style label from a UTC "YYYY-MM-DD HH:MM:SS" timestamp. */
 export function timeAgo(sqliteUtc: string, prefix = ""): string {
   const then = new Date(sqliteUtc.replace(" ", "T") + "Z").getTime();
-  const mins = Math.max(0, Math.round((Date.now() - then) / 60000));
+  const mins = Math.max(0, Math.round((nowMs() - then) / 60000));
   let label: string;
   if (mins < 2) label = "just now";
   else if (mins < 60) label = `${mins} minutes ago`;

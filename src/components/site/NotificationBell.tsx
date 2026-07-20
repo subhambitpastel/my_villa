@@ -23,6 +23,8 @@ function KindIcon({ type }: { type: NotificationType }) {
     // A speech bubble — the only kind that's someone talking to you.
     chat_message: "M4 5h16v11H8l-4 4z",
     review: "M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.7l5.9-.9z",
+    // A shield — support acted on something of theirs.
+    moderation: "M12 3l7 3v6c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6z",
   };
   const tone = NOTIFICATION_TONE[type];
   return (

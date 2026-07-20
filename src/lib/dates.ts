@@ -1,3 +1,5 @@
+import { now as clockNow, nowMs } from "./clock";
+
 // Date helpers for bookings. Dates travel as plain YYYY-MM-DD strings and are
 // interpreted in UTC so server and client always agree.
 const MONTHS = [
@@ -41,7 +43,7 @@ export function formatRange(checkIn: string, checkOut: string): string {
 
 /** Today + `offset` days as YYYY-MM-DD (UTC). */
 export function dayFromNow(offset: number): string {
-  const d = new Date(Date.now() + offset * 86_400_000);
+  const d = new Date(nowMs() + offset * 86_400_000);
   return d.toISOString().slice(0, 10);
 }
 
@@ -80,7 +82,7 @@ export const MAX_STAY_NIGHTS = 30;
  *  old today. Use it as `max` on a DOB date picker so under-age dates can't be
  *  chosen, and to validate (a dob is old enough when `dob <= maxDob()`). */
 export function maxDob(minAge = 18): string {
-  const now = new Date();
+  const now = clockNow();
   const y = now.getUTCFullYear() - minAge;
   const m = String(now.getUTCMonth() + 1).padStart(2, "0");
   const d = String(now.getUTCDate()).padStart(2, "0");

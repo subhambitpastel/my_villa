@@ -51,9 +51,15 @@ import {
   type RoomSegment,
 } from "./rooms";
 import type { GuestOption } from "./guests";
-import type { NotificationType } from "./notifications";
 import { hashPasswordSync, verifyPassword } from "./password";
+import { nowIso, nowMs, nowStamp, todayKey } from "./clock";
 import { createSession, destroySession, getCurrentUser } from "./session";
+import { notify, displayName } from "./notify";
+import {
+  canEditReview,
+  recomputeVillaRating,
+  REVIEW_EDIT_HOURS,
+} from "./reviews";
 import { appBaseUrl, sendEmail } from "./email";
 import { clientIp, rateLimit } from "./rateLimit";
 import { MAX_VILLA_IMAGES, MIN_VILLA_IMAGES } from "@/components/host/draft";
@@ -131,12 +137,18 @@ export async function loginAction(formData: FormData): Promise<ActionResult> {
   const password = String(formData.get("password") ?? "");
 
   const user = (await getDb()
-    .prepare("SELECT id, password_hash FROM users WHERE email = ?")
-    .get(email)) as Pick<UserRow, "id" | "password_hash"> | undefined;
+    .prepare("SELECT id, password_hash, disabled_at FROM users WHERE email = ?")
+    .get(email)) as
+    | Pick<UserRow, "id" | "password_hash" | "disabled_at">
+    | undefined;
 
   if (!user || !verifyPassword(password, user.password_hash)) {
     return fail("Incorrect email or password.");
   }
+  // Only after the password checks out — a wrong-password probe never learns
+  // whether an account exists or is disabled.
+  if (user.disabled_at)
+    return fail("This account has been disabled. Contact support.");
 
   await createSession(user.id);
   return { ok: true };
@@ -198,7 +210,7 @@ export async function resetPasswordAction(
     .prepare(
       "SELECT user_id FROM password_resets WHERE token = ? AND expires_at > ?",
     )
-    .get(token, new Date().toISOString())) as { user_id: number } | undefined;
+    .get(token, nowIso())) as { user_id: number } | undefined;
   if (!reset) return fail("Invalid or expired reset link. Start over.");
 
   // Set the password, consume the token, and revoke every existing session for
@@ -289,7 +301,7 @@ export async function completeGuestProfileAction(input: {
   const dob = parseDay(input.dob);
   if (!dob) return fail("Please enter a valid date of birth.");
   const age =
-    (Date.now() - dob.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+    (nowMs() - dob.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
   if (age < 18) return fail("You must be at least 18 years old to book stays.");
   if (age > 120) return fail("Please enter a valid date of birth.");
   if (!input.address.trim()) return fail("Home address is required.");
@@ -677,7 +689,7 @@ export async function setVillaLockedAction(
 
   await db
     .prepare("UPDATE villas SET locked_at = ? WHERE id = ?")
-    .run(locked ? new Date().toISOString() : null, villaId);
+    .run(locked ? nowIso() : null, villaId);
 
   revalidateVillaViews();
   // The listing leaves/rejoins the packages pages and guests' favourites too.
@@ -887,53 +899,13 @@ export async function setPackageLockedAction(
   if (!user) return fail("You must be signed in.");
   const res = await getDb()
     .prepare("UPDATE packages SET locked_at = ? WHERE id = ? AND owner_id = ?")
-    .run(locked ? new Date().toISOString() : null, packageId, user.id);
+    .run(locked ? nowIso() : null, packageId, user.id);
   if (res.changes === 0) return fail("Package not found.");
   revalidatePackageViews();
   return { ok: true };
 }
 
 /* -------------------------- notifications -------------------------- */
-
-/**
- * Tell `userId` that something happened.
- *
- * Never throws. A notification is a side-effect of the real thing — a booking,
- * a cancellation, a review — and none of those should fail because the news
- * about them couldn't be filed. A missed notification is a small loss; a
- * booking that blew up while telling someone about it is a much bigger one.
- *
- * The wording is passed in already written, and stored as-is: the villa may be
- * renamed or deleted later, and "Alena booked The Bund" should still read true.
- */
-async function notify(input: {
-  /** Who it's FOR — never the person who caused it. */
-  userId: number;
-  type: NotificationType;
-  title: string;
-  body?: string;
-  /** Where clicking it should land them. */
-  href?: string;
-}): Promise<void> {
-  try {
-    await getDb()
-      .prepare(
-        `INSERT INTO notifications (user_id, type, title, body, href)
-         VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(
-        input.userId,
-        input.type,
-        input.title,
-        input.body ?? "",
-        input.href ?? "",
-      );
-    // The bell is in the header of every page, so its count is stale everywhere.
-    revalidatePath("/", "layout");
-  } catch {
-    /* see above: the event itself matters more than the news of it */
-  }
-}
 
 /** The villa's owner and name, for addressing a notification about it. */
 async function villaOwnerFor(
@@ -944,10 +916,6 @@ async function villaOwnerFor(
     .get(villaId)) as { owner_id: number; name: string } | undefined;
   return v ? { ownerId: v.owner_id, name: v.name } : null;
 }
-
-/** The signed-in person's display name, for "X booked your villa". */
-const displayName = (u: { full_name: string; email: string }) =>
-  u.full_name.trim() || u.email;
 
 /**
  * Mark this user's notifications read. Read/unread is only an indication — it
@@ -962,7 +930,7 @@ export async function markNotificationsReadAction(): Promise<ActionResult> {
       `UPDATE notifications SET read_at = ?
        WHERE user_id = ? AND read_at IS NULL`,
     )
-    .run(new Date().toISOString(), user.id);
+    .run(nowIso(), user.id);
   revalidatePath("/", "layout");
   return { ok: true };
 }
@@ -1317,7 +1285,7 @@ export async function createBookingAction(input: {
   // Free-form nightly stays are capped; a package's length is host-fixed above.
   if (!pkg && nightsBetween(checkIn, checkOut) > MAX_STAY_NIGHTS)
     return fail(`Stays can be at most ${MAX_STAY_NIGHTS} nights.`);
-  if (checkIn < new Date().toISOString().slice(0, 10))
+  if (checkIn < todayKey())
     return fail("Check-in cannot be in the past.");
 
   const villa = (await db
@@ -1603,7 +1571,7 @@ export async function cancelBookingAction(
   // 'pending' is here too: that's an unpaid stay the host arranged, and the
   // guest declining it is the same action — they're walking away from something
   // they never asked for and never paid for.
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayKey();
   const res = await getDb()
     .prepare(
       `UPDATE bookings SET status = 'cancelled', payment_due = 0
@@ -1703,7 +1671,7 @@ export async function updateBookingAction(
     return fail("Please pick valid check-in and check-out dates.");
   if (nightsBetween(input.checkIn, input.checkOut) < 1)
     return fail("Check-out must be after check-in.");
-  if (input.checkIn < new Date().toISOString().slice(0, 10))
+  if (input.checkIn < todayKey())
     return fail("Check-in cannot be in the past.");
 
   const guests = Math.trunc(input.guests);
@@ -1884,7 +1852,7 @@ export async function modifyBookingAction(
     return fail("Check-out must be after check-in.");
   if (nightsBetween(input.checkIn, input.checkOut) > MAX_STAY_NIGHTS)
     return fail(`Stays can be at most ${MAX_STAY_NIGHTS} nights.`);
-  if (input.checkIn < new Date().toISOString().slice(0, 10))
+  if (input.checkIn < todayKey())
     return fail("Check-in cannot be in the past.");
 
   const db = getDb();
@@ -2095,7 +2063,7 @@ export async function rateStayAction(
 
   // Only finished stays can be rated: explicitly completed, or confirmed
   // with a checkout date in the past (how the UI derives "Completed").
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayKey();
   const completed =
     booking.status === "completed" ||
     (booking.status === "accepted" &&
@@ -2109,36 +2077,74 @@ export async function rateStayAction(
     .get(bookingId);
   if (already) return fail("You have already rated this stay.");
 
-  // Insert the review and fold it into the villa's running average atomically.
+  // Stored as PENDING: it counts for nothing publicly, and the villa's rating
+  // is untouched, until an admin approves it at /admin/reviews.
   try {
-    await tx(async () => {
-      await db.prepare(
-        "INSERT INTO reviews (booking_id, villa_id, user_id, stars, comment) VALUES (?, ?, ?, ?, ?)",
-      ).run(bookingId, booking.villa_id, user.id, value, text);
-      await db.prepare(
-        `UPDATE villas
-         SET rating = ROUND(((rating * reviews + ?) / (reviews + 1.0))::numeric, 2),
-             reviews = reviews + 1
-         WHERE id = ?`,
-      ).run(value, booking.villa_id);
-    });
+    // created_at is stamped from the APP clock, not the database's: the
+    // 24-hour edit window is measured against it, and a test running on a
+    // shifted clock must be able to write a review that is genuinely "now".
+    await db.prepare(
+      "INSERT INTO reviews (booking_id, villa_id, user_id, stars, comment, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(bookingId, booking.villa_id, user.id, value, text, nowStamp());
   } catch {
     return fail("Something went wrong saving your rating. Please try again.");
   }
 
-  // A rating is the host's reputation moving — worth telling them, good or bad.
-  const rated = await villaOwnerFor(booking.villa_id);
-  if (rated)
-    await notify({
-      userId: rated.ownerId,
-      type: "review",
-      title: `${displayName(user)} rated ${rated.name} ${value} star${value === 1 ? "" : "s"}`,
-      body: text || "No comment left.",
-      href: "/account",
-    });
+  // The host is NOT told yet: a pending review isn't public, and news of a
+  // rating they can't see (and that may never appear) is just noise.
+  // adminSetReviewStatusAction tells them if and when it goes live.
+  revalidatePath("/profile/bookings");
+  revalidatePath("/admin/reviews");
+  return { ok: true };
+}
+
+/**
+ * Rewrite a review you already left.
+ *
+ * Open for REVIEW_EDIT_HOURS from when it was written — a day to reconsider,
+ * then the words stand. Editing always sends it back to PENDING: an approved
+ * review that could be silently rewritten afterwards would make moderation
+ * meaningless, so a changed review is re-read before it goes back up.
+ */
+export async function updateReviewAction(
+  bookingId: number,
+  stars: number,
+  comment: string = "",
+): Promise<ActionResult> {
+  const user = await getCurrentUser();
+  if (!user) return fail("You must be signed in.");
+
+  const value = Math.trunc(stars);
+  if (!(value >= 1 && value <= 5))
+    return fail("Rating must be between 1 and 5 stars.");
+  const text = comment.trim().slice(0, 1000);
+
+  const db = getDb();
+  const review = (await db
+    .prepare(
+      "SELECT id, villa_id, created_at FROM reviews WHERE booking_id = ? AND user_id = ?",
+    )
+    .get(bookingId, user.id)) as
+    | { id: number; villa_id: number; created_at: string }
+    | undefined;
+  if (!review) return fail("You haven't reviewed this stay.");
+  if (!canEditReview(review.created_at))
+    return fail(
+      `A review can only be changed within ${REVIEW_EDIT_HOURS} hours of writing it.`,
+    );
+
+  await db
+    .prepare(
+      "UPDATE reviews SET stars = ?, comment = ?, status = 'pending' WHERE id = ?",
+    )
+    .run(value, text, review.id);
+  // It may have been approved and counting until now — take it back out of the
+  // average while it waits to be re-read.
+  await recomputeVillaRating(review.villa_id);
 
   revalidateVillaViews();
   revalidatePath("/profile/bookings");
+  revalidatePath("/admin/reviews");
   return { ok: true };
 }
 
@@ -2378,7 +2384,7 @@ export async function createOwnerBookingAction(input: {
     return fail("Check-out must be after check-in.");
   // Deliberately no MAX_STAY_NIGHTS check: length is one of the limits an owner
   // is trusted to set for a booking they're arranging themselves.
-  if (checkIn < new Date().toISOString().slice(0, 10))
+  if (checkIn < todayKey())
     return fail("Check-in cannot be in the past.");
 
   // Occupancy IS capped — an owner can offer more rooms, not more beds. The
@@ -2655,7 +2661,7 @@ export async function payBookingAction(
     (booking.status !== "pending" && booking.status !== "accepted")
   )
     return fail("This booking isn't awaiting payment any more.");
-  if (booking.check_in < new Date().toISOString().slice(0, 10))
+  if (booking.check_in < todayKey())
     return fail("This stay has already started and can no longer be paid for.");
 
   let ok = false;
