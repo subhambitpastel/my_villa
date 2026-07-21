@@ -186,7 +186,7 @@ export default function MyProperties({
             <li
               key={p.id}
               className={`flex gap-4 overflow-hidden rounded-[6px] shadow-[0px_4px_14px_0px_rgba(0,0,0,0.09)] sm:gap-5 ${
-                locked[p.id]
+                locked[p.id] || p.adminLocked
                   ? "bg-[#fffafa] ring-1 ring-inset ring-[#eb5757]/35"
                   : "bg-white"
               }`}
@@ -201,7 +201,7 @@ export default function MyProperties({
                   fill
                   sizes="135px"
                   className={`object-cover transition-[filter] ${
-                    locked[p.id] ? "opacity-60 grayscale" : ""
+                    locked[p.id] || p.adminLocked ? "opacity-60 grayscale" : ""
                   }`}
                 />
               </div>
@@ -213,7 +213,7 @@ export default function MyProperties({
                   <span className="rounded-[3px] bg-brand/10 px-2 py-0.5 text-[10px] font-medium text-brand">
                     {p.kind}
                   </span>
-                  {featured[p.id] && !locked[p.id] && (
+                  {featured[p.id] && !locked[p.id] && !p.adminLocked && (
                     <span className="flex items-center gap-1 rounded-[3px] bg-[#fff3d6] px-2 py-0.5 text-[10px] font-semibold text-[#a06a00]">
                       <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                         <path d="M12 2l2.9 6.3L22 9.2l-5 4.9 1.2 7L12 17.8 5.8 21l1.2-7-5-4.9 7.1-.9z" />
@@ -230,6 +230,19 @@ export default function MyProperties({
                         <path d="M3 7h18v3H3zM5 10h14v10H5zM10 14h4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                       </svg>
                       Locked
+                    </span>
+                  )}
+                  {/* Support's lock. Called out separately from the owner's own
+                      "Locked" chip, because this one they can't undo. */}
+                  {p.adminLocked && (
+                    <span
+                      title="MyVilla support locked this listing. Only support can unlock it."
+                      className="flex items-center gap-1 rounded-[3px] bg-[#3a1f1f] px-2 py-0.5 text-[10px] font-semibold text-white"
+                    >
+                      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M7 10V7a5 5 0 0110 0v3M5 10h14v11H5z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      Locked by support
                     </span>
                   )}
                 </span>
@@ -293,18 +306,22 @@ export default function MyProperties({
                       to promote it there would buy nothing — shut the toggle. */}
                   <span
                     title={
-                      locked[p.id]
-                        ? "Restore this listing before featuring it — locked listings don't appear on the home page."
-                        : undefined
+                      p.adminLocked
+                        ? "MyVilla support locked this listing, so it can't be promoted. Please contact support."
+                        : locked[p.id]
+                          ? "Restore this listing before featuring it — locked listings don't appear on the home page."
+                          : undefined
                     }
                     className={`flex items-center gap-2 text-[12px] font-medium ${
-                      locked[p.id] ? "text-[#a8a8b0]" : "text-[#121212]"
+                      locked[p.id] || p.adminLocked
+                        ? "text-[#a8a8b0]"
+                        : "text-[#121212]"
                     }`}
                   >
                     Feature
                     <Toggle
-                      on={!!featured[p.id] && !locked[p.id]}
-                      disabled={pending || !!locked[p.id]}
+                      on={!!featured[p.id] && !locked[p.id] && !p.adminLocked}
+                      disabled={pending || !!locked[p.id] || p.adminLocked}
                       onClick={() => toggleFeatured(p)}
                       label={`Feature ${p.name}`}
                     />
@@ -312,16 +329,25 @@ export default function MyProperties({
                   {/* Deliberately NOT gated on locks: active bookings are the
                       very reason to lock rather than remove — the stays go
                       ahead while the listing stops taking new ones. */}
+                  {/* Frozen while support holds its own lock — the listing is
+                      off the market either way, and letting this switch move
+                      would read as "unlocked" when it isn't. */}
                   <span
-                    title="Locked listings are hidden from search and take no new bookings. Stays already booked still go ahead."
+                    title={
+                      p.adminLocked
+                        ? "MyVilla support locked this listing. Only support can unlock it — please contact support."
+                        : "Locked listings are hidden from search and take no new bookings. Stays already booked still go ahead."
+                    }
                     className={`flex items-center gap-2 text-[12px] font-medium ${
-                      locked[p.id] ? "text-[#eb5757]" : "text-[#121212]"
+                      locked[p.id] || p.adminLocked
+                        ? "text-[#eb5757]"
+                        : "text-[#121212]"
                     }`}
                   >
                     Lock
                     <Toggle
-                      on={!!locked[p.id]}
-                      disabled={pending}
+                      on={!!locked[p.id] || p.adminLocked}
+                      disabled={pending || p.adminLocked}
                       onClick={() => toggleLocked(p)}
                       label={`Lock ${p.name}`}
                       tone="danger"
@@ -329,15 +355,30 @@ export default function MyProperties({
                   </span>
                 </div>
                 <div className="flex flex-col items-end gap-2">
-                  {/* Booking on a guest's behalf. Never gated on the lock: the
-                      lock protects the listing's DETAILS from changing under
-                      booked guests, and taking another booking doesn't. */}
-                  <Link
-                    href={`/host/booking?villa=${p.id}`}
-                    className="rounded-[6px] bg-brand px-3 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-brand-dark"
-                  >
-                    Create booking
-                  </Link>
+                  {/* Booking on a guest's behalf. Not gated on the OWNER's own
+                      lock — that one only closes the self-serve door, and an
+                      owner arranging a stay by hand is exactly what's left. Nor
+                      on the booking lock, which protects the listing's DETAILS
+                      from changing under booked guests. Support's lock is the
+                      one that stops it: createOwnerBookingAction refuses those
+                      outright, so offering the button would walk the owner to a
+                      form that can only tell them no. */}
+                  {p.adminLocked ? (
+                    <span
+                      aria-disabled="true"
+                      title="MyVilla support locked this listing, so no new bookings can be made on it — not even on a guest's behalf. Please contact support."
+                      className="cursor-not-allowed rounded-[6px] bg-[#ececf0] px-3 py-1.5 text-[12px] font-semibold text-[#a8a8b0]"
+                    >
+                      Create booking
+                    </span>
+                  ) : (
+                    <Link
+                      href={`/host/booking?villa=${p.id}`}
+                      className="rounded-[6px] bg-brand px-3 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-brand-dark"
+                    >
+                      Create booking
+                    </Link>
+                  )}
                   {/* Straight to the Coupons desk with THIS property already
                       picked — never gated on the lock either: a discount code
                       changes nothing about the listing booked guests rely on. */}

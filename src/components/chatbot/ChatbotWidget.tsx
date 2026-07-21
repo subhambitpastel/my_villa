@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
 import Link from "next/link";
 import MiniMarkdown from "./MiniMarkdown";
 
@@ -20,6 +21,12 @@ const GREETING =
   "Hi! I'm the MyVilla assistant. Ask me anything about booking, hosting, packages, payments or your account.";
 
 export default function ChatbotWidget() {
+  // The assistant answers as a guest or a host ("your bookings", "your
+  // listings") — it has nothing to say to the back office, and a member-facing
+  // bubble floating over the admin panel is exactly the blurred line the admin
+  // shell exists to remove. The root layout mounts this on every page, so the
+  // one place it doesn't belong opts out here.
+  const onAdmin = usePathname().startsWith("/admin");
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
@@ -240,6 +247,8 @@ export default function ChatbotWidget() {
     setView("chat");
     setInput("");
   }
+
+  if (onAdmin) return null;
 
   return (
     <>

@@ -34,6 +34,13 @@ const STARS = [
   { value: "1", label: "1 star" },
 ];
 
+const HISTORY_LABEL: Record<string, string> = {
+  submitted: "Written",
+  edited: "Rewritten",
+  approved: "Published",
+  rejected: "Turned down",
+};
+
 const FILTERS = [
   { value: "pending", label: "Awaiting review" },
   { value: "all", label: "All reviews" },
@@ -81,6 +88,14 @@ export default function AdminReviews({
     null,
   );
   const [busyId, setBusyId] = useState<number | null>(null);
+  /* Turning a review down opens a dialog for the reason — it is required, and
+     it is what the guest is shown, so it cannot be an afterthought typed into
+     a toast. */
+  const [rejecting, setRejecting] = useState<AdminReviewItem | null>(null);
+  const [reason, setReason] = useState("");
+  const [reasonError, setReasonError] = useState("");
+  /** Which reviews have their history open. */
+  const [openHistory, setOpenHistory] = useState<number[]>([]);
   const [pending, startTransition] = useTransition();
   const router = useRouter();
 
@@ -159,11 +174,19 @@ export default function AdminReviews({
       ? published.reduce((s, r) => s + r.stars, 0) / published.length
       : 0;
 
-  function decide(r: AdminReviewItem, next: "approved" | "rejected") {
+  function decide(r: AdminReviewItem, next: "approved" | "rejected", note = "") {
     setBusyId(r.id);
     startTransition(async () => {
-      const res = await adminSetReviewStatusAction(r.id, next);
+      const res = await adminSetReviewStatusAction(r.id, next, note);
       setBusyId(null);
+      if (!res.ok && next === "rejected") {
+        // Keep the dialog open with the words already typed.
+        setReasonError(res.error);
+        return;
+      }
+      setRejecting(null);
+      setReason("");
+      setReasonError("");
       setMessage({
         ok: res.ok,
         text: res.ok
@@ -173,6 +196,17 @@ export default function AdminReviews({
       if (res.ok) router.refresh();
     });
   }
+
+  function openReject(r: AdminReviewItem) {
+    setRejecting(r);
+    setReason("");
+    setReasonError("");
+  }
+
+  const toggleHistory = (id: number) =>
+    setOpenHistory((open) =>
+      open.includes(id) ? open.filter((x) => x !== id) : [...open, id],
+    );
 
   return (
     <div className="rounded-lg border border-line/60 bg-white p-6 sm:p-8">
@@ -295,8 +329,11 @@ export default function AdminReviews({
                     {STATUS_LABEL[r.status]}
                   </span>
                   {r.editable && (
-                    <span className="rounded-[3px] bg-[#f1f0f6] px-1.5 py-0.5 text-[10px] font-medium text-[#5a5a66]">
-                      author can still edit
+                    <span
+                      className="rounded-[3px] bg-[#f1f0f6] px-1.5 py-0.5 text-[10px] font-medium text-[#5a5a66]"
+                      title={`The author can still rewrite this for another ${r.editLeft.replace(" left", "")}. Anything you decide now may apply to different words.`}
+                    >
+                      author can still edit · {r.editLeft}
                     </span>
                   )}
                 </span>
@@ -325,6 +362,66 @@ export default function AdminReviews({
                 </p>
               )}
 
+              {/* Why it was turned down — kept visible after the guest rewrites
+                  it, since it is the context for judging the next version, but
+                  dropped once the review is published. At that point the matter
+                  is settled and a standing red strip misreads as the verdict;
+                  the rejection lives on in the history below. */}
+              {(() => {
+                const lastRejection =
+                  r.status === "approved"
+                    ? undefined
+                    : [...r.history]
+                        .reverse()
+                        .find((e) => e.kind === "rejected" && e.note);
+                return lastRejection ? (
+                  <p className="mt-2 rounded-[6px] bg-[#fdecec] px-3 py-2 text-[13px] leading-[1.5] text-[#c0392b]">
+                    <span className="font-semibold">
+                      Turned down {lastRejection.when}:
+                    </span>{" "}
+                    {lastRejection.note}
+                  </p>
+                ) : null;
+              })()}
+
+              {r.history.length > 0 && (
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    onClick={() => toggleHistory(r.id)}
+                    aria-expanded={openHistory.includes(r.id)}
+                    className="text-[12px] text-brand underline hover:opacity-80"
+                  >
+                    {openHistory.includes(r.id) ? "Hide" : "Show"} history (
+                    {r.history.length})
+                  </button>
+                  {openHistory.includes(r.id) && (
+                    <ol className="mt-2 space-y-2 border-l-2 border-[#ececf0] pl-3">
+                      {r.history.map((e) => (
+                        <li key={e.id} className="text-[12px] leading-[1.5]">
+                          <span className="font-semibold text-[#121212]">
+                            {HISTORY_LABEL[e.kind]}
+                          </span>{" "}
+                          <span className="text-[#7a7a85]">
+                            by {e.actorName} · {e.when}
+                          </span>
+                          {e.note && (
+                            <span className="block text-[#c0392b]">
+                              &ldquo;{e.note}&rdquo;
+                            </span>
+                          )}
+                          {(e.kind === "submitted" || e.kind === "edited") && (
+                            <span className="block text-[#3a3a44]">
+                              {e.stars}★{e.comment ? ` — ${e.comment}` : ""}
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </div>
+              )}
+
               <div className="mt-3 flex flex-wrap items-center gap-4 border-t border-[#ececf0] pt-3">
                 {r.status !== "approved" && (
                   <button
@@ -339,7 +436,7 @@ export default function AdminReviews({
                 {r.status !== "rejected" && (
                   <button
                     type="button"
-                    onClick={() => decide(r, "rejected")}
+                    onClick={() => openReject(r)}
                     disabled={pending && busyId === r.id}
                     className="text-[13px] text-[#eb5757] underline hover:opacity-80 disabled:opacity-60"
                   >
@@ -351,6 +448,67 @@ export default function AdminReviews({
           ))
         )}
       </ul>
+
+      {rejecting && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={(e) => e.target === e.currentTarget && !pending && setRejecting(null)}
+        >
+          <div className="w-full max-w-[480px] rounded-[12px] bg-white p-6 shadow-[0px_20px_60px_0px_rgba(0,0,0,0.25)]">
+            <p className="text-[16px] font-semibold text-[#121212]">
+              {rejecting.status === "approved" ? "Unpublish" : "Turn down"} this
+              review?
+            </p>
+            <p className="mt-2 text-[14px] leading-[1.5] text-[#4a4a4a]">
+              {rejecting.authorName} is shown what you write here, so say what
+              would need to change. It stays on the review&apos;s history even
+              after they rewrite it.
+            </p>
+            <textarea
+              value={reason}
+              onChange={(e) => {
+                setReason(e.target.value);
+                setReasonError("");
+              }}
+              maxLength={500}
+              rows={3}
+              autoFocus
+              placeholder="e.g. It names another guest — please remove that and resubmit."
+              className="mt-4 w-full resize-none rounded-[8px] border border-[#d9d9d9] p-3 text-[14px] text-[#121212] placeholder:text-[#9d9da6] focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
+            />
+            {reasonError && (
+              <p role="alert" className="mt-2 text-[13px] font-medium text-[#c0392b]">
+                {reasonError}
+              </p>
+            )}
+            <div className="mt-5 flex items-center justify-end gap-4">
+              <button
+                type="button"
+                onClick={() => setRejecting(null)}
+                disabled={pending}
+                className="text-[14px] text-[#7a7a85] underline disabled:opacity-60"
+              >
+                Never mind
+              </button>
+              <button
+                type="button"
+                onClick={() => decide(rejecting, "rejected", reason)}
+                disabled={pending || reason.trim().length < 3}
+                title={
+                  reason.trim().length < 3
+                    ? "Write the reason the guest will see."
+                    : undefined
+                }
+                className="rounded-[8px] bg-[#eb5757] px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-[#d64545] disabled:opacity-60"
+              >
+                {pending ? "Saving…" : "Turn it down"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

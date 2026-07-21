@@ -15,11 +15,21 @@ import {
 } from "./dates";
 import { bookingReference, quote } from "./pricing";
 import { allocateCustomerId, customerIdPrefix } from "./customerId";
+import { couponSuggestions, validateCoupon } from "./coupons";
 import { MAX_CALL_MESSAGE, MAX_CHAT_MESSAGE } from "./callRequest";
 // Plain JS, shared by value with the custom server through globalThis — see
 // realtime/bus.mjs for why it can't just be another module under lib/.
 import { issueTicket, publishChat } from "../../realtime/bus.mjs";
-import { parsePackageType, presetNights, presetDiscount } from "./packageTypes";
+import {
+  cleanPackagePrice,
+  normalizeInclusions,
+  parsePackageType,
+  resolvedDiscount,
+  resolvedNights,
+  validatePackageInput,
+  type PackageInput,
+  type PackageVilla,
+} from "./packageTypes";
 import {
   findCoupon,
   getCouponCodesLike,
@@ -53,11 +63,18 @@ import {
 import type { GuestOption } from "./guests";
 import { hashPasswordSync, verifyPassword } from "./password";
 import { nowIso, nowMs, nowStamp, todayKey } from "./clock";
-import { createSession, destroySession, getCurrentUser } from "./session";
+import {
+  createSession,
+  destroySession,
+  getCurrentUser,
+  isAdminAccount,
+  type SessionUser,
+} from "./session";
 import { notify, displayName } from "./notify";
 import {
   canEditReview,
   recomputeVillaRating,
+  recordReviewEvent,
   REVIEW_EDIT_HOURS,
 } from "./reviews";
 import { appBaseUrl, sendEmail } from "./email";
@@ -71,6 +88,25 @@ const TOO_MANY = "Too many attempts. Please wait a minute and try again.";
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const fail = (error: string) => ({ ok: false as const, error });
+
+/**
+ * The signed-in MEMBER — a guest or host acting for themselves.
+ *
+ * Every action in this file is a member action: booking, listing, paying,
+ * reviewing, favouriting. An admin is not a member — the back office moderates
+ * the marketplace and never trades on it — so an admin session resolves to
+ * nobody here, and each action refuses it with its own "signed in" message.
+ * (`getCurrentUser` still answers "who holds this cookie", which is what
+ * /admin and adminActions ask.)
+ *
+ * This is the authoritative half of the boundary. The proxy keeps admins off
+ * the member pages, but a proxy is an optimistic check by design; a forged
+ * POST that skips it lands here, where it fails.
+ */
+async function currentMember(): Promise<SessionUser | null> {
+  const holder = await getCurrentUser();
+  return isAdminAccount(holder) ? null : holder;
+}
 
 function revalidateVillaViews() {
   revalidatePath("/");
@@ -240,7 +276,7 @@ export async function updateProfileAction(profile: {
   dob: string;
   address: string;
 }): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   if (profile.dob.trim() && !isAtLeastAge(profile.dob))
@@ -267,7 +303,7 @@ export async function updateProfileAction(profile: {
 export async function setHostingModeAction(
   enabled: boolean,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   if (!enabled) {
@@ -294,7 +330,7 @@ export async function completeGuestProfileAction(input: {
   dob: string;
   address: string;
 }): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   if (!input.fullName.trim()) return fail("Full name is required.");
@@ -481,7 +517,7 @@ export async function createVillaAction(
     payment?: PaymentInput;
   },
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in to host a villa.");
   const invalid = validateVillaInput(input);
   if (invalid) return fail(invalid);
@@ -554,7 +590,7 @@ export async function updateVillaAction(
   input: VillaInput,
   payment?: PaymentInput,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
   const invalid = validateVillaInput(input);
   if (invalid) return fail(invalid);
@@ -630,7 +666,7 @@ export async function setVillaFeaturedAction(
   villaId: number,
   featured: boolean,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   const res = await getDb()
@@ -645,7 +681,7 @@ export async function setVillaFeaturedAction(
 }
 
 export async function deleteVillaAction(villaId: number): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   const db = getDb();
@@ -678,14 +714,26 @@ export async function setVillaLockedAction(
   villaId: number,
   locked: boolean,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   const db = getDb();
-  const villa = await db
-    .prepare("SELECT id FROM villas WHERE id = ? AND owner_id = ?")
-    .get(villaId, user.id);
+  const villa = (await db
+    .prepare(
+      "SELECT id, admin_locked_at FROM villas WHERE id = ? AND owner_id = ?",
+    )
+    .get(villaId, user.id)) as
+    | { id: number; admin_locked_at: string | null }
+    | undefined;
   if (!villa) return fail("Property not found.");
+
+  // Support's lock outranks the owner's: while it stands, the listing is off the
+  // market and this switch is frozen — otherwise an owner could flip their own
+  // lock off and read the listing as live when it isn't. Only an admin lifts it.
+  if (villa.admin_locked_at !== null)
+    return fail(
+      "MyVilla support has locked this listing. Only support can unlock it — please contact support.",
+    );
 
   await db
     .prepare("UPDATE villas SET locked_at = ? WHERE id = ?")
@@ -701,85 +749,19 @@ export async function setVillaLockedAction(
 
 /* ---------------------------- packages ---------------------------- */
 
-type PackageInput = {
-  villaId: number;
-  name: string;
-  description: string;
-  type: string;
-  nights: number;
-  maxGuests: number;
-  discount: number;
-  price: number;
-  inclusions: string[];
-};
-
-/** A preset type (weekend/weekly/monthly) fixes the nights server-side, so a
- *  tampered client can't claim a "Monthly Retreat" with 2 nights. */
-function resolvedNights(input: PackageInput): number {
-  return presetNights(parsePackageType(input.type)) ?? Math.max(1, Math.trunc(input.nights));
-}
-
-/** Presets fix the advertised discount too; curated is the owner's own 0–90%. */
-function resolvedDiscount(input: PackageInput): number {
-  const preset = presetDiscount(parsePackageType(input.type));
-  if (preset !== null) return preset;
-  return Math.min(90, Math.max(0, Math.trunc(Number(input.discount)) || 0));
-}
-
-/** Trim, drop blanks, cap the list so a package can't carry junk/huge input. */
-function normalizeInclusions(list: string[] | undefined): string[] {
-  return (list ?? [])
-    .map((s) => String(s ?? "").trim())
-    .filter((s) => s !== "")
-    .slice(0, 20);
-}
-
-type OwnedVilla = {
-  kind: string;
-  rooms: number;
-  people_per_room: number;
-  max_guests: number;
-};
-
+/** The villa a package is being attached to, when the caller must own it. */
 async function getOwnedVilla(
   villaId: number,
   userId: number,
-): Promise<OwnedVilla | null> {
+): Promise<PackageVilla | null> {
   const row = (await getDb()
     .prepare(
       "SELECT kind, rooms, people_per_room, max_guests FROM villas WHERE id = ? AND owner_id = ?",
     )
-    .get(villaId, userId)) as OwnedVilla | undefined;
+    .get(villaId, userId)) as PackageVilla | undefined;
   return row ?? null;
 }
 
-/** Most guests a package on this villa may declare — room-based villas cap at
- *  rooms × per-room occupancy, whole-villa kinds at the villa's max_guests. */
-function villaGuestCapacity(v: OwnedVilla): number {
-  return isRoomBased(v.kind)
-    ? Math.max(1, v.rooms * v.people_per_room)
-    : Math.max(1, v.max_guests);
-}
-
-function validatePackageInput(
-  input: PackageInput,
-  villa: OwnedVilla,
-): string | null {
-  if (!input.name.trim()) return "Package name is required.";
-  if (!(resolvedNights(input) >= 1))
-    return "A package must run for at least 1 night.";
-  const guests = Math.trunc(input.maxGuests);
-  if (!(guests >= 1)) return "A package must be for at least 1 guest.";
-  const cap = villaGuestCapacity(villa);
-  if (guests > cap)
-    return `This villa fits up to ${cap} guest${cap === 1 ? "" : "s"}.`;
-  if (!(Number(input.price) >= 0)) return "Price can't be negative.";
-  if (normalizeInclusions(input.inclusions).length === 0)
-    return "Add at least one inclusion to the package.";
-  return null;
-}
-
-const cleanPrice = (v: number) => Math.round((Number(v) || 0) * 100) / 100;
 
 function revalidatePackageViews() {
   revalidatePath("/profile/packages");
@@ -790,7 +772,7 @@ function revalidatePackageViews() {
 export async function createPackageAction(
   input: PackageInput,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
   const villa = await getOwnedVilla(input.villaId, user.id);
   if (!villa) return fail("You can only add packages to your own villa.");
@@ -812,7 +794,7 @@ export async function createPackageAction(
       resolvedNights(input),
       Math.max(1, Math.trunc(input.maxGuests)),
       resolvedDiscount(input),
-      cleanPrice(input.price),
+      cleanPackagePrice(input.price),
       JSON.stringify(normalizeInclusions(input.inclusions)),
     );
   revalidatePackageViews();
@@ -823,7 +805,7 @@ export async function updatePackageAction(
   packageId: number,
   input: PackageInput,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
   const villa = await getOwnedVilla(input.villaId, user.id);
   if (!villa) return fail("You can only add packages to your own villa.");
@@ -864,7 +846,7 @@ export async function updatePackageAction(
       resolvedNights(input),
       maxGuests,
       resolvedDiscount(input),
-      cleanPrice(input.price),
+      cleanPackagePrice(input.price),
       JSON.stringify(normalizeInclusions(input.inclusions)),
       packageId,
       user.id,
@@ -877,7 +859,7 @@ export async function updatePackageAction(
 export async function deletePackageAction(
   packageId: number,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
   const res = await getDb()
     .prepare("DELETE FROM packages WHERE id = ? AND owner_id = ?")
@@ -895,7 +877,7 @@ export async function setPackageLockedAction(
   packageId: number,
   locked: boolean,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
   const res = await getDb()
     .prepare("UPDATE packages SET locked_at = ? WHERE id = ? AND owner_id = ?")
@@ -923,7 +905,7 @@ async function villaOwnerFor(
  * per-item read state to manage.
  */
 export async function markNotificationsReadAction(): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
   await getDb()
     .prepare(
@@ -958,7 +940,7 @@ export async function requestCallAction(input: {
    *  chose these before asking, so they shouldn't have to say them again. */
   services?: number[];
 }): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in to request a call.");
   if (!rateLimit(`callreq:${user.id}`, 5, 60_000)) return fail(TOO_MANY);
 
@@ -1057,7 +1039,7 @@ export async function requestCallAction(input: {
 export async function resolveCallRequestAction(
   requestId: number,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
   const db = getDb();
   const res = await db
@@ -1118,7 +1100,7 @@ export async function sendCallMessageAction(input: {
   requestId: number;
   body: string;
 }): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in to send a message.");
   if (!rateLimit(`chat:${user.id}`, 20, 60_000)) return fail(TOO_MANY);
 
@@ -1175,7 +1157,7 @@ export async function sendCallMessageAction(input: {
  * Returns "" when signed out, so a logged-out page simply never connects.
  */
 export async function issueChatTicketAction(): Promise<string> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return "";
   // Cheap, but it mints credentials — don't let a loop spray the ticket store.
   if (!rateLimit(`chatticket:${user.id}`, 30, 60_000)) return "";
@@ -1187,7 +1169,7 @@ export async function issueChatTicketAction(): Promise<string> {
 export async function markCallChatReadAction(
   requestId: number,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   const peers = await chatPeers(requestId);
@@ -1256,7 +1238,7 @@ export async function createBookingAction(input: {
    *  trusted from the displayed price. */
   couponCode?: string;
 }): Promise<BookingResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in to book.");
 
   const db = getDb();
@@ -1290,7 +1272,7 @@ export async function createBookingAction(input: {
 
   const villa = (await db
     .prepare(
-      `SELECT id, owner_id, name, kind, rooms, max_guests, people_per_room, max_booking_days, services, locked_at
+      `SELECT id, owner_id, name, kind, rooms, max_guests, people_per_room, max_booking_days, services, locked_at, admin_locked_at
        FROM villas WHERE id = ?`,
     )
     .get(input.villaId)) as
@@ -1305,14 +1287,16 @@ export async function createBookingAction(input: {
         max_booking_days: number;
         services: string;
         locked_at: string | null;
+        admin_locked_at: string | null;
       }
     | undefined;
   if (!villa) return fail("This villa no longer exists.");
   if (villa.owner_id === user.id)
     return fail("You cannot book your own villa.");
-  // The owner locked this listing: existing stays are honoured, new ones are
-  // refused. This is the single gate every new booking passes through.
-  if (villa.locked_at !== null)
+  // Either lock closes the listing to new bookings — the owner's own or
+  // support's. Existing stays are honoured regardless. This is the single gate
+  // every new booking passes through.
+  if (villa.locked_at !== null || villa.admin_locked_at !== null)
     return fail("This property is no longer taking bookings.");
 
   // Package occupancy is fixed at the package's max_guests; otherwise the guest
@@ -1563,7 +1547,7 @@ export async function createBookingAction(input: {
 export async function cancelBookingAction(
   bookingId: number,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   // A booking can't be cancelled once its start date has passed — cancellation
@@ -1615,7 +1599,7 @@ export async function cancelBookingAction(
 export async function ownerCancelBookingAction(
   bookingId: number,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   // 'pending' included so an owner can withdraw a stay they arranged but the
@@ -1664,7 +1648,7 @@ export async function updateBookingAction(
   bookingId: number,
   input: { checkIn: string; checkOut: string; guests: number },
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   if (!parseDay(input.checkIn) || !parseDay(input.checkOut))
@@ -1681,7 +1665,7 @@ export async function updateBookingAction(
   const booking = (await db
     .prepare(
       `SELECT b.id, b.villa_id, b.status, b.rooms, b.room_plan, b.package, b.check_in, b.check_out,
-              v.kind, v.max_guests, v.people_per_room, v.locked_at,
+              v.kind, v.max_guests, v.people_per_room, v.locked_at, v.admin_locked_at,
               pk.locked_at AS package_locked_at
        FROM bookings b
        JOIN villas v ON v.id = b.villa_id
@@ -1702,6 +1686,7 @@ export async function updateBookingAction(
         max_guests: number;
         people_per_room: number;
         locked_at: string | null;
+        admin_locked_at: string | null;
         package_locked_at: string | null;
       }
     | undefined;
@@ -1714,7 +1699,9 @@ export async function updateBookingAction(
   // stopped taking. This action only ever moves the start date, so on an
   // locked listing it's the one thing refused. Cancelling stays available.
   if (
-    (booking.locked_at !== null || booking.package_locked_at !== null) &&
+    (booking.locked_at !== null ||
+      booking.admin_locked_at !== null ||
+      booking.package_locked_at !== null) &&
     input.checkIn !== booking.check_in
   )
     return fail(
@@ -1843,7 +1830,7 @@ export async function modifyBookingAction(
     flex?: boolean;
   },
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   if (!parseDay(input.checkIn) || !parseDay(input.checkOut))
@@ -1861,7 +1848,7 @@ export async function modifyBookingAction(
       `SELECT b.id, b.villa_id, b.status, b.package, b.room_plan,
               b.check_in, b.check_out,
               v.kind, v.max_guests, v.people_per_room, v.max_booking_days,
-              v.rooms AS total_rooms, v.services, v.locked_at
+              v.rooms AS total_rooms, v.services, v.locked_at, v.admin_locked_at
        FROM bookings b JOIN villas v ON v.id = b.villa_id
        WHERE b.id = ? AND b.guest_id = ?`,
     )
@@ -1881,6 +1868,7 @@ export async function modifyBookingAction(
         total_rooms: number;
         services: string;
         locked_at: string | null;
+        admin_locked_at: string | null;
       }
     | undefined;
   if (!booking) return fail("Booking not found.");
@@ -1891,7 +1879,7 @@ export async function modifyBookingAction(
   // committed to, and they're re-checked against live availability below like
   // any other change. Only re-dating is refused. Cancelling stays available.
   if (
-    booking.locked_at !== null &&
+    (booking.locked_at !== null || booking.admin_locked_at !== null) &&
     (input.checkIn !== booking.check_in || input.checkOut !== booking.check_out)
   )
     return fail(
@@ -2042,7 +2030,7 @@ export async function rateStayAction(
   stars: number,
   comment: string = "",
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   const value = Math.trunc(stars);
@@ -2083,9 +2071,16 @@ export async function rateStayAction(
     // created_at is stamped from the APP clock, not the database's: the
     // 24-hour edit window is measured against it, and a test running on a
     // shifted clock must be able to write a review that is genuinely "now".
-    await db.prepare(
-      "INSERT INTO reviews (booking_id, villa_id, user_id, stars, comment, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    const inserted = await db.prepare(
+      "INSERT INTO reviews (booking_id, villa_id, user_id, stars, comment, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
     ).run(bookingId, booking.villa_id, user.id, value, text, nowStamp());
+    await recordReviewEvent({
+      reviewId: inserted.lastInsertRowid as number,
+      kind: "submitted",
+      actorId: user.id,
+      stars: value,
+      comment: text,
+    });
   } catch {
     return fail("Something went wrong saving your rating. Please try again.");
   }
@@ -2111,7 +2106,7 @@ export async function updateReviewAction(
   stars: number,
   comment: string = "",
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   const value = Math.trunc(stars);
@@ -2152,6 +2147,13 @@ export async function updateReviewAction(
       "UPDATE reviews SET stars = ?, comment = ?, status = 'pending' WHERE id = ?",
     )
     .run(value, text, review.id);
+  await recordReviewEvent({
+    reviewId: review.id,
+    kind: "edited",
+    actorId: user.id,
+    stars: value,
+    comment: text,
+  });
   // It may have been approved and counting until now — take it back out of the
   // average while it waits to be re-read.
   await recomputeVillaRating(review.villa_id);
@@ -2171,7 +2173,7 @@ export type FavoriteResult =
 export async function toggleFavoriteAction(
   villaId: number,
 ): Promise<FavoriteResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return { ok: false, error: "signed-out" };
 
   const db = getDb();
@@ -2265,7 +2267,7 @@ export type UploadResult =
 export async function uploadImagesAction(
   formData: FormData,
 ): Promise<UploadResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return { ok: false, error: "You must be signed in." };
 
   const files = formData
@@ -2293,7 +2295,7 @@ export async function uploadImagesAction(
 export async function updateAvatarAction(
   formData: FormData,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   const file = formData.get("avatar");
@@ -2316,7 +2318,7 @@ export async function updateAvatarAction(
  *  listing to book someone into) and to real queries, so this can't be used as
  *  a way to enumerate the user base. */
 export async function searchGuestsAction(query: string): Promise<GuestOption[]> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return [];
   const owns = (await getDb()
     .prepare("SELECT COUNT(*) AS n FROM villas WHERE owner_id = ?")
@@ -2356,13 +2358,13 @@ export async function createOwnerBookingAction(input: {
    *  only bounded by inventory alone (no per-guest allowance for a host). */
   flex?: boolean;
 }): Promise<BookingResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   const db = getDb();
   const villa = (await db
     .prepare(
-      "SELECT id, owner_id, name, kind, rooms, max_guests, people_per_room, services, price, discount FROM villas WHERE id = ?",
+      "SELECT id, owner_id, name, kind, rooms, max_guests, people_per_room, services, price, discount, admin_locked_at FROM villas WHERE id = ?",
     )
     .get(input.villaId)) as
     | {
@@ -2376,11 +2378,20 @@ export async function createOwnerBookingAction(input: {
         services: string;
         price: number;
         discount: number;
+        admin_locked_at: string | null;
       }
     | undefined;
   if (!villa) return fail("This villa no longer exists.");
   if (villa.owner_id !== user.id)
     return fail("You can only create bookings on your own listing.");
+  // An owner may deliberately still book on their OWN lock (that's the point of
+  // locking rather than deleting). Support's lock is different: it takes the
+  // listing off the market entirely, so booking on it would just route around
+  // the moderation decision.
+  if (villa.admin_locked_at !== null)
+    return fail(
+      "MyVilla support has locked this listing, so no new bookings can be made on it.",
+    );
 
   // The stay is FOR someone else — never the owner, who can't be their own guest.
   const guestId = Math.trunc(Number(input.guestId));
@@ -2645,7 +2656,7 @@ export async function createOwnerBookingAction(input: {
 export async function payBookingAction(
   bookingId: number,
 ): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   const db = getDb();
@@ -2725,10 +2736,6 @@ export async function payBookingAction(
 
 /* -------------------------------- coupons -------------------------------- */
 
-/** Codes read like codes: 3–20 chars of A–Z, digits and hyphens. Normalised to
- *  uppercase so SAVE10 and save10 are the same coupon everywhere. */
-const COUPON_CODE_RE = /^[A-Z0-9-]{3,20}$/;
-
 export type CouponResult =
   | { ok: true }
   | {
@@ -2754,7 +2761,7 @@ export async function createCouponAction(input: {
   pct?: number;
   fixed?: number;
 }): Promise<CouponResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return { ok: false, error: "You must be signed in." };
 
   const db = getDb();
@@ -2766,48 +2773,19 @@ export async function createCouponAction(input: {
   if (!villa || villa.owner_id !== user.id)
     return { ok: false, error: "Pick one of your own properties." };
 
-  const code = input.code.trim().toUpperCase();
-  if (!COUPON_CODE_RE.test(code))
-    return {
-      ok: false,
-      error: "Codes are 3–20 letters, numbers or hyphens (e.g. SUMMER-10).",
-    };
-
-  const pct = Math.trunc(Number(input.pct ?? 0)) || 0;
-  const fixed = Math.round((Number(input.fixed ?? 0) || 0) * 100) / 100;
-  if ((pct > 0) === (fixed > 0))
-    return {
-      ok: false,
-      error: "Give the coupon ONE discount: a percentage or a fixed amount.",
-    };
-  // Never 0 and never 100: 0% is not a coupon and 100% is a free stay.
-  if (pct !== 0 && (pct < 1 || pct > 99))
-    return { ok: false, error: "A percentage discount must be between 1 and 99." };
-  // A fixed discount must be a real amount. (At redemption it still can't take
-  // the price below $1, however large it is.)
-  if (fixed < 0 || (pct === 0 && fixed <= 0))
-    return { ok: false, error: "A fixed discount must be more than $0." };
+  const checked = validateCoupon(input);
+  if (!checked.ok) return { ok: false, error: checked.error };
+  const { code, pct, fixed } = checked.values;
 
   // Codes are globally unique. On a clash, offer variations of the SAME name
   // that are actually free, so the owner keeps the code they had in mind.
   const taken = await getCouponCodesLike(code);
-  if (taken.has(code)) {
-    const candidates: string[] = [];
-    for (let n = 2; n <= 99 && candidates.length < 3; n++) {
-      const c = `${code}-${n}`.slice(0, 20);
-      if (!taken.has(c) && !candidates.includes(c)) candidates.push(c);
-    }
-    for (const suffix of ["-NEW", "-PLUS", "-VIP"]) {
-      if (candidates.length >= 3) break;
-      const c = `${code.slice(0, 20 - suffix.length)}${suffix}`;
-      if (!taken.has(c) && !candidates.includes(c)) candidates.push(c);
-    }
+  if (taken.has(code))
     return {
       ok: false,
       error: `A ${code} coupon already exists. Coupon codes are unique across MyVilla — try one of these instead:`,
-      suggestions: candidates,
+      suggestions: couponSuggestions(code, taken),
     };
-  }
 
   try {
     await db
@@ -2842,7 +2820,7 @@ export async function updateCouponAction(input: {
   pct?: number;
   fixed?: number;
 }): Promise<CouponResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return { ok: false, error: "You must be signed in." };
 
   const db = getDb();
@@ -2879,39 +2857,19 @@ export async function updateCouponAction(input: {
   if (!villa || villa.owner_id !== user.id)
     return { ok: false, error: "Pick one of your own properties." };
 
-  const code = input.code.trim().toUpperCase();
-  if (!COUPON_CODE_RE.test(code))
-    return {
-      ok: false,
-      error: "Codes are 3–20 letters, numbers or hyphens (e.g. SUMMER-10).",
-    };
-
-  const pct = Math.trunc(Number(input.pct ?? 0)) || 0;
-  const fixed = Math.round((Number(input.fixed ?? 0) || 0) * 100) / 100;
-  if ((pct > 0) === (fixed > 0))
-    return {
-      ok: false,
-      error: "Give the coupon ONE discount: a percentage or a fixed amount.",
-    };
-  if (pct !== 0 && (pct < 1 || pct > 99))
-    return { ok: false, error: "A percentage discount must be between 1 and 99." };
-  if (fixed < 0 || (pct === 0 && fixed <= 0))
-    return { ok: false, error: "A fixed discount must be more than $0." };
+  const checked = validateCoupon(input);
+  if (!checked.ok) return { ok: false, error: checked.error };
+  const { code, pct, fixed } = checked.values;
 
   // Unique across the site — except against ITSELF, so saving without
   // renaming never trips the check.
   const existing = await findCoupon(code);
   if (existing && existing.id !== coupon.id) {
     const taken = await getCouponCodesLike(code);
-    const candidates: string[] = [];
-    for (let n = 2; n <= 99 && candidates.length < 3; n++) {
-      const c = `${code}-${n}`.slice(0, 20);
-      if (!taken.has(c) && !candidates.includes(c)) candidates.push(c);
-    }
     return {
       ok: false,
       error: `A ${code} coupon already exists. Coupon codes are unique across MyVilla — try one of these instead:`,
-      suggestions: candidates,
+      suggestions: couponSuggestions(code, taken),
     };
   }
 
@@ -2942,7 +2900,7 @@ export async function updateCouponAction(input: {
  * their snapshotted discount regardless, so deleting only stops NEW redemptions.
  */
 export async function deleteCouponAction(couponId: number): Promise<ActionResult> {
-  const user = await getCurrentUser();
+  const user = await currentMember();
   if (!user) return fail("You must be signed in.");
 
   const db = getDb();

@@ -27,6 +27,13 @@ function Star({ filled, size = 14 }: { filled: boolean; size?: number }) {
 }
 
 /** Five clickable stars until rated, then a read-only row of the given stars. */
+const REVIEW_STEP: Record<string, string> = {
+  submitted: "You wrote it",
+  edited: "You rewrote it",
+  approved: "Published",
+  rejected: "Not published",
+};
+
 const REVIEW_STATE: Record<string, { label: string; className: string }> = {
   pending: { label: "In review", className: "text-[#a06a00]" },
   approved: { label: "Published", className: "text-[#1c7d5c]" },
@@ -401,6 +408,7 @@ function PackageRow({ b, actions }: { b: BookingItem; actions: React.ReactNode }
           {actions}
         </div>
       </div>
+      <ReviewNotice b={b} />
       {open && <BookingDetails b={b} />}
     </li>
   );
@@ -408,6 +416,83 @@ function PackageRow({ b, actions }: { b: BookingItem; actions: React.ReactNode }
 
 /** A bookings-table row that expands on click to reveal payment & stay details.
  *  `actions` is the right-hand status/action cell (differs for active vs history). */
+/**
+ * What became of the guest's review, on the row itself.
+ *
+ * Deliberately NOT inside the expandable details: a review that was turned
+ * down is the one thing here the guest has to act on, and a reason folded
+ * behind a click nothing advertises may as well not have been written. The
+ * verdict is always visible; the step-by-step history is a toggle, the same
+ * shape the admin's own list uses.
+ */
+function ReviewNotice({ b }: { b: BookingItem }) {
+  const [showHistory, setShowHistory] = useState(false);
+  const review = b.myReview;
+  if (!review) return null;
+
+  const rejected = review.status === "rejected";
+  const hasHistory = review.history.length > 0;
+  // Nothing worth a strip: a plain pending or published review already says so
+  // in the status beside its stars.
+  if (!rejected && !hasHistory) return null;
+
+  return (
+    <div
+      className="border-t border-[#ececf0] bg-[#faf9fc] px-4 py-3"
+      // Reading in here shouldn't toggle the booking row underneath.
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => e.stopPropagation()}
+    >
+      {rejected && (
+        <p className="rounded-[6px] bg-[#fdecec] px-3 py-2 text-[13px] leading-[1.5] text-[#c0392b]">
+          <span className="font-semibold">
+            Your review wasn&rsquo;t published{review.rejectedNote ? ":" : "."}
+          </span>{" "}
+          {review.rejectedNote ||
+            "No reason was recorded for this one — contact support if you'd like to know why."}
+        </p>
+      )}
+
+      {hasHistory && (
+        <>
+          <button
+            type="button"
+            onClick={() => setShowHistory((v) => !v)}
+            aria-expanded={showHistory}
+            className={`text-[12px] text-brand underline hover:opacity-80${rejected ? " mt-2" : ""}`}
+          >
+            {showHistory ? "Hide" : "Show"} review history ({review.history.length})
+          </button>
+          {showHistory && (
+            <ol className="mt-2 space-y-1.5 border-l-2 border-[#ececf0] pl-3">
+              {review.history.map((e) => (
+                <li key={e.id} className="text-[12px] leading-[1.5]">
+                  <span className="font-semibold text-[#121212]">
+                    {REVIEW_STEP[e.kind]}
+                  </span>{" "}
+                  <span className="text-[#9a9aa5]">
+                    {e.byAdmin ? "by MyVilla" : "by you"} · {e.when}
+                  </span>
+                  {e.note && (
+                    <span className="block text-[#c0392b]">
+                      &ldquo;{e.note}&rdquo;
+                    </span>
+                  )}
+                  {(e.kind === "submitted" || e.kind === "edited") && (
+                    <span className="block text-[#3a3a44]">
+                      {e.stars}★{e.comment ? ` — ${e.comment}` : ""}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function BookingRow({ b, actions }: { b: BookingItem; actions: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   return (
@@ -441,6 +526,7 @@ function BookingRow({ b, actions }: { b: BookingItem; actions: React.ReactNode }
           {actions}
         </span>
       </div>
+      <ReviewNotice b={b} />
       {open && <BookingDetails b={b} />}
     </li>
   );

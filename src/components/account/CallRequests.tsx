@@ -163,13 +163,25 @@ export default function CallRequests({
                         — so offer that directly, with everything the guest
                         already told us carried straight into the form. Calling
                         stays available for when there's actually more to
-                        discuss. */}
-                    <Link
-                      href={fulfilHref(c)}
-                      className="rounded-[8px] bg-brand px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-brand-dark"
-                    >
-                      Fulfil this request
-                    </Link>
+                        discuss. Unless support has locked the listing: then no
+                        booking can be made on it at all, and the host's way out
+                        of this request is the phone, not the form. */}
+                    {c.villaAdminLocked ? (
+                      <span
+                        aria-disabled="true"
+                        title="MyVilla support locked this listing, so no new bookings can be made on it — not even on a guest's behalf. Please contact support."
+                        className="cursor-not-allowed rounded-[8px] bg-[#ececf0] px-4 py-2 text-[13px] font-semibold text-[#a8a8b0]"
+                      >
+                        Fulfil this request
+                      </span>
+                    ) : (
+                      <Link
+                        href={fulfilHref(c)}
+                        className="rounded-[8px] bg-brand px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-brand-dark"
+                      >
+                        Fulfil this request
+                      </Link>
+                    )}
                     {/* Not everything needs a phone call — and a guest who
                         left a note has already started the conversation. */}
                     <ChatButton unread={c.unread} onClick={() => setChatId(c.id)} />

@@ -9,8 +9,12 @@ import AdminFilterBar, {
 import Dropdown from "@/components/ui/Dropdown";
 import SearchDropdown from "@/components/ui/SearchDropdown";
 import { matchesSearch } from "@/lib/textSearch";
-import { adminDeleteCouponAction } from "@/lib/adminActions";
-import type { CouponItem } from "@/lib/queries";
+import {
+  adminCreateCouponAction,
+  adminDeleteCouponAction,
+  adminUpdateCouponAction,
+} from "@/lib/adminActions";
+import type { AdminVillaOption, CouponItem } from "@/lib/queries";
 
 type Item = CouponItem & { ownerName: string };
 
@@ -25,20 +29,40 @@ const USE = [
   { value: "free", label: "Not in use" },
 ];
 
-export default function AdminCoupons({ items }: { items: Item[] }) {
+export default function AdminCoupons({
+  items,
+  villas,
+}: {
+  items: Item[];
+  /** Every listing on the platform — support can attach a coupon to any of them. */
+  villas: AdminVillaOption[];
+}) {
   const [query, setQuery] = useState("");
   const [villa, setVilla] = useState("all");
   const [owner, setOwner] = useState("all");
   const [kind, setKind] = useState("all");
   const [use, setUse] = useState("all");
   const [confirming, setConfirming] = useState<Item | null>(null);
+  // One form serves both jobs, exactly like the owner's desk: `editing` null
+  // while the dialog is open means "creating". Draft values plus whatever the
+  // server said about them live alongside.
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState<Item | null>(null);
+  const [villaId, setVillaId] = useState(0);
+  const [code, setCode] = useState("");
+  const [mode, setMode] = useState<"pct" | "fixed">("pct");
+  const [value, setValue] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(
     null,
   );
   const [pending, startTransition] = useTransition();
   const router = useRouter();
 
-  const villas = [...new Set(items.map((c) => c.villaName))]
+  // Filter options come from the coupons on screen (names only); the `villas`
+  // prop is the full platform pick-list the create/edit form attaches to.
+  const villaNames = [...new Set(items.map((c) => c.villaName))]
     .sort()
     .map((n) => ({ value: n, label: n }));
   const owners = [...new Set(items.map((c) => c.ownerName))]
@@ -90,6 +114,69 @@ export default function AdminCoupons({ items }: { items: Item[] }) {
     setApplied({ villa: "all", owner: "all", kind: "all", use: "all" });
   }
 
+  function openCreate() {
+    setEditing(null);
+    setVillaId(villas[0]?.id ?? 0);
+    setCode("");
+    setMode("pct");
+    setValue("");
+    setEditError(null);
+    setSuggestions([]);
+    setFormOpen(true);
+  }
+
+  function startEdit(c: Item) {
+    // Server refuses an in-use edit anyway; this stops the dialog opening onto
+    // something that can't be saved.
+    if (c.inUse) return;
+    setEditing(c);
+    setVillaId(c.villaId);
+    setCode(c.code);
+    setMode(c.pct > 0 ? "pct" : "fixed");
+    setValue(String(c.pct > 0 ? c.pct : c.fixed));
+    setEditError(null);
+    setSuggestions([]);
+    setFormOpen(true);
+  }
+
+  function closeForm() {
+    setFormOpen(false);
+    setEditing(null);
+    setEditError(null);
+    setSuggestions([]);
+  }
+
+  function saveForm() {
+    const num = Number(value) || 0;
+    const payload = {
+      villaId,
+      code,
+      pct: mode === "pct" ? Math.trunc(num) : 0,
+      fixed: mode === "fixed" ? num : 0,
+    };
+    setEditError(null);
+    setSuggestions([]);
+    startTransition(async () => {
+      const res = editing
+        ? await adminUpdateCouponAction({ couponId: editing.id, ...payload })
+        : await adminCreateCouponAction(payload);
+      if (!res.ok) {
+        setEditError(res.error);
+        setSuggestions(res.suggestions ?? []);
+        return;
+      }
+      const saved = code.trim().toUpperCase();
+      setMessage({
+        ok: true,
+        text: editing
+          ? `Coupon ${editing.code} updated to ${saved}.`
+          : `Coupon ${saved} created.`,
+      });
+      closeForm();
+      router.refresh();
+    });
+  }
+
   function remove(c: Item) {
     startTransition(async () => {
       const res = await adminDeleteCouponAction(c.id);
@@ -117,7 +204,7 @@ export default function AdminCoupons({ items }: { items: Item[] }) {
           <SearchDropdown
             value={villa}
             onChange={setVilla}
-            options={[{ value: "all", label: "All properties" }, ...villas]}
+            options={[{ value: "all", label: "All properties" }, ...villaNames]}
             ariaLabel="Filter by property"
             searchPlaceholder="Search properties…"
             buttonClassName={FILTER_BTN}
@@ -173,6 +260,19 @@ export default function AdminCoupons({ items }: { items: Item[] }) {
           </span>{" "}
           Coupons
         </h2>
+        <button
+          type="button"
+          onClick={openCreate}
+          disabled={villas.length === 0}
+          title={
+            villas.length === 0
+              ? "There are no properties to attach a coupon to yet."
+              : undefined
+          }
+          className="rounded-[8px] bg-brand px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-brand-dark disabled:opacity-50"
+        >
+          New coupon
+        </button>
       </div>
 
       <ul className="mt-4 space-y-3">
@@ -208,23 +308,194 @@ export default function AdminCoupons({ items }: { items: Item[] }) {
                   </span>
                 )}
               </span>
-              <button
-                type="button"
-                onClick={() => setConfirming(c)}
-                disabled={c.inUse}
-                title={
-                  c.inUse
-                    ? "A standing booking is using this code — it unlocks once that stay completes."
-                    : undefined
-                }
-                className="text-[13px] text-[#eb5757] underline hover:opacity-80 disabled:cursor-not-allowed disabled:text-[#c9c9cf] disabled:no-underline"
-              >
-                Delete
-              </button>
+              {/* Edit and Delete are both frozen while a standing booking is
+                  riding the code — the server refuses each until it completes. */}
+              <span className="flex shrink-0 items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => startEdit(c)}
+                  disabled={c.inUse}
+                  title={
+                    c.inUse
+                      ? "A standing booking is using this code — it unlocks once that stay completes."
+                      : undefined
+                  }
+                  className="text-[13px] text-brand underline hover:opacity-80 disabled:cursor-not-allowed disabled:text-[#c9c9cf] disabled:no-underline"
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirming(c)}
+                  disabled={c.inUse}
+                  title={
+                    c.inUse
+                      ? "A standing booking is using this code — it unlocks once that stay completes."
+                      : undefined
+                  }
+                  className="text-[13px] text-[#eb5757] underline hover:opacity-80 disabled:cursor-not-allowed disabled:text-[#c9c9cf] disabled:no-underline"
+                >
+                  Delete
+                </button>
+              </span>
             </li>
           ))
         )}
       </ul>
+
+      {formOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={editing ? "Edit this coupon" : "Create a coupon"}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => !pending && closeForm()}
+        >
+          <div
+            className="w-full max-w-[460px] rounded-[12px] bg-white p-6 shadow-[0px_20px_60px_0px_rgba(0,0,0,0.25)]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-[16px] font-semibold text-[#121212]">
+              {editing ? `Edit coupon ${editing.code}` : "New coupon"}
+            </p>
+            <p className="mt-1 text-[13px] text-[#7a7a85]">
+              {editing
+                ? `Currently on ${editing.villaName} · ${editing.ownerName}`
+                : "Attach a discount code to any property on the platform."}
+            </p>
+
+            {/* Support isn't limited to one owner's listings — every property
+                on the platform is a valid target, including re-homing an
+                existing coupon to a different one. */}
+            <p className="mt-4 text-[12px] font-medium text-[#5a5a66]">
+              Property
+            </p>
+            <div className="mt-1">
+              <SearchDropdown
+                value={String(villaId)}
+                onChange={(v) => setVillaId(Number(v))}
+                options={villas.map((v) => ({
+                  value: String(v.id),
+                  label: `${v.name}, ${v.city} · ${v.kind} — ${v.ownerName}`,
+                }))}
+                ariaLabel="Property this coupon belongs to"
+                searchPlaceholder="Search properties or owners…"
+                buttonClassName="flex w-full items-center justify-between gap-2 rounded-[8px] border-[1.5px] border-[#c9c9d4] bg-white px-3.5 py-2.5 text-left text-[14px] text-[#121212]"
+              />
+            </div>
+
+            <label
+              htmlFor="admin-coupon-code"
+              className="mt-4 block text-[12px] font-medium text-[#5a5a66]"
+            >
+              Code
+            </label>
+            <input
+              id="admin-coupon-code"
+              value={code}
+              onChange={(e) =>
+                setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, ""))
+              }
+              maxLength={20}
+              className="mt-1 w-full rounded-[8px] border-[1.5px] border-[#c9c9d4] px-3.5 py-2.5 font-mono text-[14px] tracking-wide text-[#121212] focus:border-brand focus:outline-none"
+            />
+
+            <p className="mt-4 text-[12px] font-medium text-[#5a5a66]">
+              Discount
+            </p>
+            <div className="mt-1 flex items-stretch gap-2">
+              <div className="flex shrink-0 overflow-hidden rounded-[8px] border-[1.5px] border-[#c9c9d4]">
+                {(["pct", "fixed"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setMode(m)}
+                    aria-pressed={mode === m}
+                    className={`min-w-[58px] px-3 py-2.5 text-[13px] font-semibold transition-colors ${
+                      m === "fixed" ? "border-l-[1.5px] border-[#c9c9d4]" : ""
+                    } ${
+                      mode === m
+                        ? "bg-brand text-white"
+                        : "bg-white text-[#4a4a4a] hover:bg-brand/5"
+                    }`}
+                  >
+                    {m === "pct" ? "% off" : "$ off"}
+                  </button>
+                ))}
+              </div>
+              <input
+                value={value}
+                onChange={(e) => setValue(e.target.value.replace(/[^\d.]/g, ""))}
+                inputMode="decimal"
+                placeholder={mode === "pct" ? "1–99 (%)" : "amount ($)"}
+                aria-label={mode === "pct" ? "Percent off" : "Amount off"}
+                className="w-full min-w-0 rounded-[8px] border-[1.5px] border-[#c9c9d4] px-3.5 py-2.5 text-[14px] text-[#121212] focus:border-brand focus:outline-none"
+              />
+            </div>
+
+            <p className="mt-3 text-[12px] leading-[1.5] text-[#7a7a85]">
+              {editing
+                ? "Stays that already used this code keep their original discount — this only changes future redemptions."
+                : "Guests can apply it at checkout straight away. A discount can never make a stay free — the price floors at $1."}{" "}
+              The owner is notified.
+            </p>
+
+            {editError && (
+              <div className="mt-3">
+                <p
+                  role="alert"
+                  className="rounded-[8px] bg-[#fdecec] px-3 py-2 text-[13px] leading-[1.5] text-[#c0392b]"
+                >
+                  {editError}
+                </p>
+                {suggestions.length > 0 && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {suggestions.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => {
+                          setCode(s);
+                          setEditError(null);
+                          setSuggestions([]);
+                        }}
+                        className="rounded-full border border-brand/40 bg-brand/5 px-3 py-1 font-mono text-[12.5px] font-semibold text-brand transition-colors hover:bg-brand/10"
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="mt-6 flex items-center justify-end gap-4">
+              <button
+                type="button"
+                onClick={closeForm}
+                disabled={pending}
+                className="text-[14px] text-[#7a7a85] underline disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveForm}
+                disabled={
+                  pending || !villaId || !code.trim() || (Number(value) || 0) <= 0
+                }
+                className="rounded-[8px] bg-brand px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-brand-dark disabled:opacity-60"
+              >
+                {pending
+                  ? "Saving…"
+                  : editing
+                    ? "Save changes"
+                    : "Create coupon"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {confirming && (
         <div

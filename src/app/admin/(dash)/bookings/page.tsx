@@ -18,14 +18,25 @@ export default async function AdminBookingsPage({
     /** Show one booking on its own, expanded — the reviews list links here to
      *  point at the stay a rating is about. */
     booking?: string;
+    /** Arrive with the Property filter already set to this listing — the admin
+     *  property list links here to clear the stays blocking a deletion. */
+    villa?: string;
   }>;
 }) {
   if ((await getCurrentUser())?.is_admin !== 1) return null;
-  const { booking } = await searchParams;
+  const { booking, villa } = await searchParams;
   const items = await getAllBookings();
   // Anything that isn't a positive id is ignored rather than filtering every
   // row away.
   const id = Number(booking);
   const focus = Number.isInteger(id) && id > 0 ? id : null;
-  return <AdminBookings items={items} focusBookingId={focus} />;
+  const vid = Number(villa);
+  const villaFilter = Number.isInteger(vid) && vid > 0 ? vid : null;
+  return (
+    <AdminBookings
+      items={items}
+      focusBookingId={focus}
+      initialVillaId={villaFilter}
+    />
+  );
 }

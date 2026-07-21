@@ -240,19 +240,31 @@ export default async function PlacePage({ searchParams }: Search) {
                 >
                   View rent requests
                 </Link>
-                {villa.locked_at !== null && (
-                  <p className="mt-4 rounded-[10px] bg-[#fff6e5] px-4 py-3 text-[14px] leading-[1.5] text-[#a06a00]">
-                    This listing is <span className="font-semibold">locked</span>{" "}
-                    — it&rsquo;s hidden from search and takes no new bookings.
-                    Stays already booked still go ahead. Restore it from{" "}
-                    <Link href="/profile/properties" className="underline">
-                      My Property
-                    </Link>
-                    .
+                {/* Support's lock reads differently to the owner's own: there's
+                    no "restore it yourself" to offer, so say who lifted it. */}
+                {villa.admin_locked_at !== null ? (
+                  <p className="mt-4 rounded-[10px] bg-[#fdecec] px-4 py-3 text-[14px] leading-[1.5] text-[#c0392b]">
+                    This listing was locked by{" "}
+                    <span className="font-semibold">MyVilla support</span> — it&rsquo;s
+                    hidden from search and takes no new bookings. Stays already
+                    booked still go ahead. Only support can unlock it; please
+                    contact support if you think this is a mistake.
                   </p>
+                ) : (
+                  villa.locked_at !== null && (
+                    <p className="mt-4 rounded-[10px] bg-[#fff6e5] px-4 py-3 text-[14px] leading-[1.5] text-[#a06a00]">
+                      This listing is <span className="font-semibold">locked</span>{" "}
+                      — it&rsquo;s hidden from search and takes no new bookings.
+                      Stays already booked still go ahead. Restore it from{" "}
+                      <Link href="/profile/properties" className="underline">
+                        My Property
+                      </Link>
+                      .
+                    </p>
+                  )
                 )}
               </aside>
-            ) : villa.locked_at !== null ? (
+            ) : villa.locked_at !== null || villa.admin_locked_at !== null ? (
               /* Locked: the page still renders — a guest with a booking here
                  may well follow a link to it — but there's nothing to book. */
               <aside className="h-fit w-full min-w-0 max-w-[576px] rounded-[20px] bg-white px-[41px] py-[48px] shadow-[0px_15px_50px_0px_rgba(0,0,0,0.18)] lg:mt-[60px]">

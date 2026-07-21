@@ -3,8 +3,13 @@
 // own is_admin check; nothing in the guest/owner flows imports this module.
 
 import { getDb, timeAgo, type BookingStatus } from "./db";
-import { getAllBookings, parseServiceList } from "./queries";
-import { canEditReview, type ReviewStatus } from "./reviews";
+import {
+  getAllBookings,
+  getReviewHistories,
+  parseServiceList,
+  type ReviewEvent,
+} from "./queries";
+import { canEditReview, editWindowLeft, type ReviewStatus } from "./reviews";
 import type { VillaService } from "@/components/host/draft";
 
 /** Open call requests across the whole platform — the sidebar badge. */
@@ -68,7 +73,11 @@ export async function getAdminStats(): Promise<AdminStats> {
           OR EXISTS (SELECT 1 FROM villas v WHERE v.owner_id = u.id)`,
     ),
     one("SELECT COUNT(*) AS n FROM villas"),
-    one("SELECT COUNT(*) AS n FROM villas WHERE locked_at IS NOT NULL"),
+    // Off the market for either reason — the owner's own lock or support's.
+    one(
+      `SELECT COUNT(*) AS n FROM villas
+       WHERE locked_at IS NOT NULL OR admin_locked_at IS NOT NULL`,
+    ),
     one("SELECT COUNT(*) AS n FROM call_requests WHERE status = 'open'"),
     one("SELECT COUNT(*) AS n FROM packages"),
     one("SELECT COUNT(*) AS n FROM coupons"),
@@ -259,6 +268,10 @@ export type AdminReviewItem = {
   /** The author may still rewrite it — approving now could approve different
    *  words in an hour, so the admin is told. */
   editable: boolean;
+  /** How much of that window is left ("23h left", "45m left"), or "" once the
+   *  words stand. Knowing it is closing in twenty minutes is the difference
+   *  between waiting it out and acting on something that will change. */
+  editLeft: string;
   stars: number;
   comment: string;
   authorId: number;
@@ -268,6 +281,9 @@ export type AdminReviewItem = {
   ownerId: number;
   ownerName: string;
   when: string;
+  /** Everything that has happened to it, oldest first — what an admin needs
+   *  to judge a review they have already turned down once. */
+  history: ReviewEvent[];
 };
 
 /** Every rating on the platform. Unlike the public villa list this KEEPS
@@ -305,12 +321,16 @@ export async function getAdminReviews(): Promise<AdminReviewItem[]> {
     owner_email: string;
   }[];
 
+  const histories = await getReviewHistories(rows.map((r) => r.id));
+
   return rows.map((r) => ({
     id: r.id,
     villaId: r.villa_id,
     bookingId: r.booking_id,
+    history: histories.get(r.id) ?? [],
     status: r.status,
     editable: canEditReview(r.created_at),
+    editLeft: editWindowLeft(r.created_at),
     stars: Number(r.stars),
     comment: r.comment,
     authorId: r.author_id,

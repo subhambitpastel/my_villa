@@ -4,7 +4,7 @@
 // become a publicly callable endpoint.
 
 import { getDb } from "./db";
-import { nowMs } from "./clock";
+import { nowMs, nowStamp } from "./clock";
 
 export type ReviewStatus = "pending" | "approved" | "rejected";
 
@@ -16,23 +16,54 @@ export const REVIEW_EDIT_HOURS = 24;
 /** SQL fragment: only reviews that passed moderation count publicly. */
 export const APPROVED_ONLY = "status = 'approved'";
 
-/** `created_at` is UTC text ("YYYY-MM-DD HH:MM:SS"); parse it the same way
- *  timeAgo does. Returns ms since the review was written. */
+const WINDOW_MS = REVIEW_EDIT_HOURS * 60 * 60 * 1000;
+
+/**
+ * How long ago a review was written, in ms. `created_at` is UTC text
+ * ("YYYY-MM-DD HH:MM:SS"), parsed the way timeAgo parses it.
+ *
+ * Never negative. A row stamped ahead of "now" is treated as written this
+ * instant — nothing can be younger than new. That happens for real: the
+ * pretend clock (lib/clock) is an offset that keeps ticking, so a review
+ * written during one run sits a few minutes past the moment the NEXT run
+ * starts from. Without this, the window would read as longer than it is.
+ */
 function ageMs(createdAt: string, now = nowMs()): number {
   const written = new Date(createdAt.replace(" ", "T") + "Z").getTime();
-  return Number.isFinite(written) ? now - written : Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(written)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, now - written);
 }
 
 /** Still inside the author's editing window? */
 export function canEditReview(createdAt: string, now = nowMs()): boolean {
-  return ageMs(createdAt, now) < REVIEW_EDIT_HOURS * 60 * 60 * 1000;
+  return ageMs(createdAt, now) < WINDOW_MS;
 }
 
 /** Whole hours left to edit (0 once the window has closed) — for the guest's
- *  "you can still change this for N hours" line. */
+ *  "you can still change this for N hours" line. Capped at the window itself:
+ *  a label promising 25 hours of a 24-hour window is simply wrong, whatever
+ *  the clocks are doing. */
 export function editHoursLeft(createdAt: string, now = nowMs()): number {
-  const left = REVIEW_EDIT_HOURS * 60 * 60 * 1000 - ageMs(createdAt, now);
-  return left > 0 ? Math.ceil(left / (60 * 60 * 1000)) : 0;
+  const left = WINDOW_MS - ageMs(createdAt, now);
+  if (left <= 0) return 0;
+  return Math.min(REVIEW_EDIT_HOURS, Math.ceil(left / (60 * 60 * 1000)));
+}
+
+/**
+ * The same window as a short label — "23h left", "45m left" — or "" once it
+ * has closed. For the admin, who is deciding whether to act on words that may
+ * still change under them.
+ *
+ * Minutes below the hour mark on purpose: rounding the last fifty-nine minutes
+ * up to "1h left" reads as a comfortable margin at the exact moment there
+ * isn't one.
+ */
+export function editWindowLeft(createdAt: string, now = nowMs()): string {
+  const left = WINDOW_MS - ageMs(createdAt, now);
+  if (left <= 0) return "";
+  const minutes = Math.ceil(left / (60 * 1000));
+  if (minutes >= 60) return `${editHoursLeft(createdAt, now)}h left`;
+  return `${minutes}m left`;
 }
 
 /**
@@ -55,4 +86,47 @@ export async function recomputeVillaRating(villaId: number): Promise<void> {
        WHERE id = ?`,
     )
     .run(villaId, villaId, villaId);
+}
+
+/** Longest a rejection reason may be — long enough to explain, short enough
+ *  to read on a booking row. */
+export const MAX_REVIEW_NOTE = 500;
+
+/**
+ * Record a step in a review's life.
+ *
+ * Never throws: the history is a record OF the decision, not part of making
+ * it, and a booking flow that blew up while filing its own paperwork would be
+ * a worse failure than a missing line. Snapshots the stars and words so a
+ * later edit cannot rewrite what an admin was looking at.
+ */
+export async function recordReviewEvent(input: {
+  reviewId: number;
+  kind: "submitted" | "edited" | "approved" | "rejected";
+  actorId: number;
+  byAdmin?: boolean;
+  note?: string;
+  stars?: number;
+  comment?: string;
+}): Promise<void> {
+  try {
+    await getDb()
+      .prepare(
+        `INSERT INTO review_events
+           (review_id, kind, actor_id, by_admin, note, stars, comment, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.reviewId,
+        input.kind,
+        input.actorId,
+        input.byAdmin ? 1 : 0,
+        (input.note ?? "").trim().slice(0, MAX_REVIEW_NOTE),
+        input.stars ?? 0,
+        input.comment ?? "",
+        nowStamp(),
+      );
+  } catch {
+    /* see above */
+  }
 }

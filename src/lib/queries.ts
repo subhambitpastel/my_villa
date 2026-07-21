@@ -27,6 +27,7 @@ import {
   type NotificationType,
 } from "./notifications";
 import { parsePackageType, type PackageType } from "./packageTypes";
+import type { PricingVilla } from "./packageForm";
 import { quote } from "./pricing";
 import { nightsBetween } from "./dates";
 
@@ -53,6 +54,9 @@ export type PropertyItem = {
   /** Owner locked this listing: no new bookings and hidden from guests, while
    *  bookings already made still stand. */
   locked: boolean;
+  /** MyVilla support locked this listing. Same market effect as `locked`, but
+   *  the owner can't lift it — only an admin can. */
+  adminLocked: boolean;
 };
 
 export type CatalogVilla = {
@@ -111,9 +115,15 @@ export type BookingItem = {
   /** The guest's own review of this stay, whatever its moderation state —
    *  they always see what they wrote and where it stands. Null while unrated. */
   myReview: {
+    /** The review row itself — what its history hangs off. */
+    id: number;
     stars: number;
     comment: string;
     status: ReviewStatus;
+    /** Why MyVilla turned it down, when it stands rejected. "" otherwise. */
+    rejectedNote: string;
+    /** Everything that has happened to it, oldest first. */
+    history: ReviewEvent[];
     /** Still inside the 24h window in which the author may rewrite it. */
     canEdit: boolean;
     /** Whole hours of that window left (0 once closed). */
@@ -315,6 +325,7 @@ function toProperty(v: VillaRow): PropertyItem {
     featured: v.featured === 1,
     discount: v.discount,
     locked: v.locked_at !== null,
+    adminLocked: v.admin_locked_at !== null,
   };
 }
 
@@ -372,16 +383,68 @@ export async function getAllVillasAdmin(): Promise<AdminVillaItem[]> {
   }));
 }
 
+/** One listing as a pick-list row for the admin's property pickers. */
+export type AdminVillaOption = {
+  id: number;
+  name: string;
+  kind: string;
+  city: string;
+  ownerName: string;
+};
+
+/** Every listing on the platform as a dropdown option — locked ones included,
+ *  since support may well be setting a discount up on one. Deliberately light
+ *  (no ratings, gallery or facilities): a picker row shows four fields. */
+export async function getVillaOptionsAdmin(): Promise<AdminVillaOption[]> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT v.id, v.name, v.kind, v.city,
+              o.full_name AS owner_name, o.email AS owner_email
+       FROM villas v JOIN users o ON o.id = v.owner_id
+       ORDER BY v.name ASC, v.id ASC`,
+    )
+    .all()) as {
+    id: number;
+    name: string;
+    kind: string;
+    city: string;
+    owner_name: string;
+    owner_email: string;
+  }[];
+  return rows.map((v) => ({
+    id: v.id,
+    name: v.name,
+    kind: v.kind,
+    city: v.city,
+    ownerName: v.owner_name || v.owner_email,
+  }));
+}
+
+/**
+ * A villa is on the market only while NEITHER lock is set: the owner's own
+ * (`locked_at`) or support's (`admin_locked_at`, which the owner can't lift).
+ * Every guest-facing query filters on this, so the two locks are impossible to
+ * tell apart from the outside — only who may lift one differs.
+ *
+ * `alias` is the villas table's alias in the surrounding query ("" when the
+ * query selects from `villas` unaliased).
+ */
+export const villaLive = (alias = "v"): string => {
+  const p = alias ? `${alias}.` : "";
+  return `${p}locked_at IS NULL AND ${p}admin_locked_at IS NULL`;
+};
+
 // Shared column list + row mapper for the three package-listing queries.
 const PKG_COLS = `p.id, p.villa_id, p.name, p.description, p.type, p.nights, p.max_guests,
   p.discount, p.price, p.inclusions, p.locked_at, v.name AS villa_name, v.city AS villa_city,
-  v.kind AS villa_kind, v.image AS villa_image, v.locked_at AS villa_locked_at`;
+  v.kind AS villa_kind, v.image AS villa_image, v.locked_at AS villa_locked_at,
+  v.admin_locked_at AS villa_admin_locked_at`;
 
 /** A package is bookable only when neither it nor its villa is locked —
  *  locking a villa takes its packages down with it. Guest-facing package
  *  listings all filter on this; the owner's own listing deliberately doesn't,
  *  so they can still see and unlock them. */
-const LIVE_PACKAGE = "p.locked_at IS NULL AND v.locked_at IS NULL";
+const LIVE_PACKAGE = `p.locked_at IS NULL AND ${villaLive()}`;
 
 type PackageJoinRow = {
   id: number;
@@ -400,6 +463,7 @@ type PackageJoinRow = {
   villa_kind: string;
   villa_image: string;
   villa_locked_at: string | null;
+  villa_admin_locked_at: string | null;
 };
 
 function toPackageItem(r: PackageJoinRow): PackageItem {
@@ -419,7 +483,10 @@ function toPackageItem(r: PackageJoinRow): PackageItem {
     price: Number(r.price),
     inclusions: parseJsonList(r.inclusions),
     locked: r.locked_at !== null,
-    villaLocked: r.villa_locked_at !== null,
+    // Either lock on the villa suppresses its packages — the owner's own or
+    // support's. The owner can only clear the first.
+    villaLocked:
+      r.villa_locked_at !== null || r.villa_admin_locked_at !== null,
   };
 }
 
@@ -441,20 +508,57 @@ export async function getPackagesForOwner(
 /** Every package on the platform, locked ones included, with its owner —
  *  the admin's view. */
 export async function getAllPackagesAdmin(): Promise<
-  (PackageItem & { ownerName: string })[]
+  (PackageItem & {
+    ownerName: string;
+    activeBookings: number;
+    /** The villa's own rate and capacity — the admin's edit form re-prices a
+     *  package exactly as its owner's form does, and can't do that without
+     *  the numbers the price is derived from. */
+    villa: PricingVilla;
+  })[]
 > {
+  // activeBookings mirrors getPackageBookingLock: a stay still to come, or one
+  // waiting to be paid for. Editing the guest count is blocked while any
+  // exist, and deleting says how many there are rather than leaving the admin
+  // to guess who is affected.
+  const today = todayKey();
   const rows = (await getDb()
     .prepare(
-      `SELECT ${PKG_COLS}, o.full_name AS owner_name, o.email AS owner_email
+      `SELECT ${PKG_COLS}, o.full_name AS owner_name, o.email AS owner_email,
+              v.price AS villa_price, v.discount AS villa_discount,
+              v.rooms AS villa_rooms, v.people_per_room AS villa_people_per_room,
+              v.max_guests AS villa_max_guests,
+              (SELECT COUNT(*) FROM bookings b
+                WHERE b.package_id = p.id
+                  AND b.check_out >= ?
+                  AND b.status IN ('pending', 'accepted')) AS active_bookings
        FROM packages p
        JOIN villas v ON v.id = p.villa_id
        JOIN users o ON o.id = p.owner_id
        ORDER BY p.created_at DESC, p.id DESC`,
     )
-    .all()) as (PackageJoinRow & { owner_name: string; owner_email: string })[];
+    .all(today)) as (PackageJoinRow & {
+    owner_name: string;
+    owner_email: string;
+    active_bookings: number;
+    villa_price: number;
+    villa_discount: number;
+    villa_rooms: number;
+    villa_people_per_room: number;
+    villa_max_guests: number;
+  })[];
   return rows.map((r) => ({
     ...toPackageItem(r),
     ownerName: r.owner_name || r.owner_email,
+    activeBookings: Number(r.active_bookings),
+    villa: {
+      kind: r.villa_kind,
+      price: Number(r.villa_price),
+      discount: Number(r.villa_discount),
+      rooms: Number(r.villa_rooms),
+      peoplePerRoom: Number(r.villa_people_per_room),
+      maxGuests: Number(r.villa_max_guests),
+    },
   }));
 }
 
@@ -477,6 +581,31 @@ export async function getVillaLocksForOwner(
         GROUP BY v.id`,
     )
     .all(today, ownerId)) as { villa_id: number; n: number; last_out: string }[];
+  return Object.fromEntries(
+    rows.map((r) => [
+      r.villa_id,
+      { active: Number(r.n), lastCheckOut: r.last_out },
+    ]),
+  );
+}
+
+/** The same live-booking counts across EVERY listing, keyed by villa id
+ *  (absent = none). Lets the admin's property list say up front why a delete
+ *  will be refused, instead of only after it's attempted. */
+export async function getVillaLocksAdmin(): Promise<
+  Record<number, BookingLock>
+> {
+  const today = todayKey();
+  const rows = (await getDb()
+    .prepare(
+      `SELECT b.villa_id,
+              COUNT(b.id) AS n,
+              COALESCE(MAX(b.check_out), '') AS last_out
+         FROM bookings b
+        WHERE b.check_out >= ? AND b.status IN ('pending', 'accepted')
+        GROUP BY b.villa_id`,
+    )
+    .all(today)) as { villa_id: number; n: number; last_out: string }[];
   return Object.fromEntries(
     rows.map((r) => [
       r.villa_id,
@@ -563,7 +692,8 @@ export async function getPackageById(
       `SELECT p.id, p.villa_id, p.owner_id, p.name, p.nights, p.max_guests,
               p.price, p.inclusions, p.locked_at, v.kind AS villa_kind,
               v.rooms AS villa_rooms, v.people_per_room AS people_per_room,
-              v.max_guests AS villa_max_guests, v.locked_at AS villa_locked_at
+              v.max_guests AS villa_max_guests, v.locked_at AS villa_locked_at,
+              v.admin_locked_at AS villa_admin_locked_at
        FROM packages p JOIN villas v ON v.id = p.villa_id
        WHERE p.id = ?`,
     )
@@ -583,6 +713,7 @@ export async function getPackageById(
         people_per_room: number;
         villa_max_guests: number;
         villa_locked_at: string | null;
+        villa_admin_locked_at: string | null;
       }
     | undefined;
   if (!row) return null;
@@ -599,8 +730,12 @@ export async function getPackageById(
     maxGuests: Number(row.max_guests),
     price: Number(row.price),
     inclusions: parseJsonList(row.inclusions),
-    // Either flag makes the package unbookable — the booking action refuses it.
-    locked: row.locked_at !== null || row.villa_locked_at !== null,
+    // Any of the three makes the package unbookable — the booking action
+    // refuses it: the package's own lock, the owner's villa lock, or support's.
+    locked:
+      row.locked_at !== null ||
+      row.villa_locked_at !== null ||
+      row.villa_admin_locked_at !== null,
   };
 }
 
@@ -643,6 +778,7 @@ export async function getPackageDetail(
               v.id AS villa_id, v.name AS villa_name, v.city AS villa_city,
               v.kind AS villa_kind, v.image AS villa_image, v.images AS villa_images,
               v.description AS villa_description, v.locked_at AS villa_locked_at,
+              v.admin_locked_at AS villa_admin_locked_at,
               v.rooms AS villa_rooms, v.people_per_room AS people_per_room, v.owner_id AS owner_id,
               ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
        FROM packages p JOIN villas v ON v.id = p.villa_id
@@ -667,6 +803,7 @@ export async function getPackageDetail(
         villa_images: string;
         villa_description: string;
         villa_locked_at: string | null;
+        villa_admin_locked_at: string | null;
         villa_rooms: number;
         people_per_room: number;
         owner_id: number;
@@ -697,7 +834,10 @@ export async function getPackageDetail(
     ownerId: row.owner_id,
     rating: Number(row.rvw_rating),
     reviews: Number(row.rvw_count),
-    locked: row.locked_at !== null || row.villa_locked_at !== null,
+    locked:
+      row.locked_at !== null ||
+      row.villa_locked_at !== null ||
+      row.villa_admin_locked_at !== null,
   };
 }
 
@@ -711,7 +851,7 @@ export async function getCatalogVillas(
           .prepare(
             `SELECT v.*, ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
              FROM villas v
-             WHERE v.locked_at IS NULL AND v.owner_id != ?
+             WHERE ${villaLive()} AND v.owner_id != ?
              ORDER BY v.created_at DESC, v.id DESC LIMIT ?`,
           )
           .all(excludeOwnerId, limit)
@@ -719,7 +859,7 @@ export async function getCatalogVillas(
           .prepare(
             `SELECT v.*, ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
              FROM villas v
-             WHERE v.locked_at IS NULL
+             WHERE ${villaLive()}
              ORDER BY v.created_at DESC, v.id DESC LIMIT ?`,
           )
           .all(limit)
@@ -740,7 +880,7 @@ export async function getFeaturedVillas(
           .prepare(
             `SELECT v.*, ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
              FROM villas v
-             WHERE v.featured = 1 AND v.locked_at IS NULL AND v.owner_id != ?
+             WHERE v.featured = 1 AND ${villaLive()} AND v.owner_id != ?
              ORDER BY v.created_at DESC, v.id DESC LIMIT ?`,
           )
           .all(excludeOwnerId, limit)
@@ -748,7 +888,7 @@ export async function getFeaturedVillas(
           .prepare(
             `SELECT v.*, ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
              FROM villas v
-             WHERE v.featured = 1 AND v.locked_at IS NULL
+             WHERE v.featured = 1 AND ${villaLive()}
              ORDER BY v.created_at DESC, v.id DESC LIMIT ?`,
           )
           .all(limit)
@@ -868,7 +1008,8 @@ function villaSearchWhere(
   // A locked listing is never a search result — it takes no new bookings, so
   // surfacing it would only lead to a dead end. Unlocking brings it straight
   // back. This sits here so /search and the amenity chips agree automatically.
-  const where: string[] = ["locked_at IS NULL"];
+  // Either lock counts: the owner's own, or support's.
+  const where: string[] = [villaLive("")];
   const params: (string | number)[] = [];
 
   if (filters.q) {
@@ -1157,6 +1298,9 @@ export type CallRequestItem = {
   villaId: number;
   guestId: number;
   villaName: string;
+  /** Support has locked the listing, so no booking can be made on it — the
+   *  "fulfil this" shortcut leads nowhere and says so instead. */
+  villaAdminLocked: boolean;
   guestName: string;
   guestEmail: string;
   /** The guest's public customer ID — what they'd quote on the phone. */
@@ -1197,6 +1341,7 @@ export async function getCallRequestsForOwner(
       `SELECT c.id, c.villa_id, c.guest_id, c.check_in, c.check_out, c.rooms,
               c.guests, c.message, c.services, c.created_at,
               v.name AS villa_name, v.services AS villa_services,
+              v.admin_locked_at AS villa_admin_locked_at,
               u.full_name, u.email, u.customer_id, u.phone_code, u.phone_number,
               u.avatar
        FROM call_requests c
@@ -1218,6 +1363,7 @@ export async function getCallRequestsForOwner(
     created_at: string;
     villa_name: string;
     villa_services: string;
+    villa_admin_locked_at: string | null;
     full_name: string;
     email: string;
     customer_id: string | null;
@@ -1251,6 +1397,7 @@ export async function getCallRequestsForOwner(
     services: asked,
     serviceIdx,
     villaName: r.villa_name,
+    villaAdminLocked: r.villa_admin_locked_at !== null,
     guestName: r.full_name || r.email,
     guestEmail: r.email,
     guestCustomerId: r.customer_id ?? "",
@@ -1643,7 +1790,7 @@ export async function getBookingForManage(
               b.disc_pct, b.disc_fixed, b.paid_credit, b.coupon_code,
               v.name AS villa_name, v.city AS villa_city, v.image AS villa_image,
               v.price, v.discount, v.max_guests, v.rooms, v.kind, v.people_per_room,
-              v.locked_at, pk.locked_at AS package_locked_at
+              v.locked_at, v.admin_locked_at, pk.locked_at AS package_locked_at
        FROM bookings b
        JOIN villas v ON v.id = b.villa_id
        LEFT JOIN packages pk ON pk.id = b.package_id
@@ -1676,6 +1823,7 @@ export async function getBookingForManage(
         kind: string;
         people_per_room: number;
         locked_at: string | null;
+        admin_locked_at: string | null;
         package_locked_at: string | null;
       }
     | undefined;
@@ -1720,7 +1868,10 @@ export async function getBookingForManage(
     bookingRooms: Math.max(1, row.booking_rooms),
     extras: parseServiceList(row.extras),
     package: pkgSnap,
-    locked: row.locked_at !== null || row.package_locked_at !== null,
+    locked:
+      row.locked_at !== null ||
+      row.admin_locked_at !== null ||
+      row.package_locked_at !== null,
     roomPlan: isRoomBased(row.kind) ? parseRoomPlan(row.room_plan) : null,
     couponCode: row.coupon_code,
     discPct: row.disc_pct,
@@ -1797,7 +1948,7 @@ export async function getVillaCities(): Promise<string[]> {
   const rows = (await getDb()
     .prepare(
       `SELECT DISTINCT city FROM villas
-       WHERE city != '' AND locked_at IS NULL ORDER BY city ASC`,
+       WHERE city != '' AND ${villaLive("")} ORDER BY city ASC`,
     )
     .all()) as { city: string }[];
   return rows.map((r) => r.city);
@@ -1809,7 +1960,7 @@ export async function getVillaCities(): Promise<string[]> {
 export async function getMaxVillaGuests(): Promise<number> {
   const row = (await getDb()
     .prepare(
-      "SELECT COALESCE(MAX(max_guests), 0) AS n FROM villas WHERE locked_at IS NULL",
+      `SELECT COALESCE(MAX(max_guests), 0) AS n FROM villas WHERE ${villaLive("")}`,
     )
     .get()) as { n: number };
   return Math.max(1, row.n);
@@ -1828,7 +1979,7 @@ export async function getMaxGuestsByType(): Promise<MaxGuestsByType> {
          COALESCE(MAX(max_guests) FILTER (WHERE kind = 'Hotel'), 0) AS hotel,
          COALESCE(MAX(max_guests) FILTER (WHERE kind NOT IN ('Resort','Hotel')), 0) AS rent
        FROM villas
-       WHERE locked_at IS NULL`,
+       WHERE ${villaLive("")}`,
     )
     .get()) as { resort: number; hotel: number; rent: number };
   return {
@@ -1847,7 +1998,7 @@ export async function getFavoriteVillas(userId: number): Promise<CatalogVilla[]>
       `SELECT v.*, ${RVW_COUNT} AS rvw_count, ${RVW_RATING} AS rvw_rating
        FROM favorites f
        JOIN villas v ON v.id = f.villa_id
-       WHERE f.user_id = ? AND v.locked_at IS NULL
+       WHERE f.user_id = ? AND ${villaLive()}
        ORDER BY f.created_at DESC, v.id DESC`,
     )
     .all(userId)) as VillaWithReviews[];
@@ -1950,6 +2101,7 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
               b.disc_pct, b.disc_fixed, b.paid_credit, b.coupon_code,
               v.name AS villa_name, v.city AS villa_city, v.kind AS villa_kind,
               v.price AS villa_price, v.discount AS villa_discount,
+              rv.id AS my_review_id,
               rv.stars AS my_rating, rv.comment AS my_comment,
               rv.status AS my_review_status, rv.created_at AS my_review_at
        FROM bookings b
@@ -1980,13 +2132,44 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
     villa_kind: string;
     villa_price: number;
     villa_discount: number;
+    my_review_id: number | null;
     my_rating: number | null;
     my_comment: string | null;
     my_review_status: ReviewStatus | null;
     my_review_at: string | null;
   }>;
+
+  const histories = await getReviewHistories(
+    rows
+      .map((r) => r.my_review_id)
+      .filter((id): id is number => typeof id === "number"),
+  );
   const today = todayKey();
   return rows.map((r) => {
+    /* The guest always sees their own review whatever its state, plus why it
+       was turned down and everything that has happened to it. The reason is
+       read from the history rather than stored on the review, so it survives
+       the edit they make in response. */
+    const reviewStatus = r.my_review_status ?? "pending";
+    const history =
+      r.my_review_id !== null ? histories.get(r.my_review_id) ?? [] : [];
+    const reviewView =
+      r.my_rating !== null && r.my_review_at && r.my_review_id !== null
+        ? {
+            id: r.my_review_id,
+            stars: r.my_rating,
+            comment: r.my_comment ?? "",
+            status: reviewStatus,
+            rejectedNote:
+              reviewStatus === "rejected"
+                ? [...history].reverse().find((e) => e.kind === "rejected")
+                    ?.note ?? ""
+                : "",
+            history,
+            canEdit: canEditReview(r.my_review_at),
+            hoursLeft: editHoursLeft(r.my_review_at),
+          }
+        : null;
     const roomBased = isRoomBased(r.villa_kind);
     const rooms = Math.max(1, r.rooms);
     const nights =
@@ -2049,21 +2232,85 @@ export async function getBookingsForGuest(guestId: number): Promise<BookingItem[
           : null,
       couponCode: r.coupon_code,
       myRating: r.my_rating,
-      myReview:
-        r.my_rating !== null && r.my_review_at
-          ? {
-              stars: r.my_rating,
-              comment: r.my_comment ?? "",
-              status: r.my_review_status ?? "pending",
-              canEdit: canEditReview(r.my_review_at),
-              hoursLeft: editHoursLeft(r.my_review_at),
-            }
-          : null,
+      myReview: reviewView,
       extras,
       package: pkg,
       plan: roomBased ? parseRoomPlan(r.room_plan) : null,
     };
   });
+}
+
+/** One step in a review's life, newest last. */
+export type ReviewEvent = {
+  id: number;
+  kind: "submitted" | "edited" | "approved" | "rejected";
+  /** The admin's reason for turning it down; "" on every other kind. */
+  note: string;
+  /** What the review said at that moment — a later edit never rewrites it. */
+  stars: number;
+  comment: string;
+  /** Who acted, and whether they acted as MyVilla rather than as the guest. */
+  actorName: string;
+  byAdmin: boolean;
+  when: string;
+};
+
+/**
+ * The history of the given reviews, keyed by review id.
+ *
+ * One query for all of them: these lists render a row per booking or per
+ * review, and asking per row is how a page ends up making thirty round trips
+ * to say the same thing.
+ */
+export async function getReviewHistories(
+  reviewIds: number[],
+): Promise<Map<number, ReviewEvent[]>> {
+  const out = new Map<number, ReviewEvent[]>();
+  const ids = [...new Set(reviewIds)].filter((n) => Number.isInteger(n) && n > 0);
+  if (ids.length === 0) return out;
+
+  const rows = (await getDb()
+    .prepare(
+      `SELECT e.id, e.review_id, e.kind, e.note, e.stars, e.comment,
+              e.by_admin, e.created_at,
+              u.full_name AS actor_name, u.email AS actor_email
+       FROM review_events e
+       LEFT JOIN users u ON u.id = e.actor_id
+       WHERE e.review_id = ANY(?)
+       ORDER BY e.review_id, e.id`,
+    )
+    .all(ids)) as {
+    id: number;
+    review_id: number;
+    kind: ReviewEvent["kind"];
+    note: string;
+    stars: number;
+    comment: string;
+    by_admin: number;
+    created_at: string;
+    actor_name: string | null;
+    actor_email: string | null;
+  }[];
+
+  for (const r of rows) {
+    const list = out.get(r.review_id) ?? [];
+    list.push({
+      id: r.id,
+      kind: r.kind,
+      note: r.note,
+      stars: Number(r.stars),
+      comment: r.comment,
+      // An admin acts as MyVilla, not as a person — the guest has no business
+      // knowing which member of staff read their review.
+      actorName: r.by_admin === 1
+        ? "MyVilla"
+        : r.actor_name || r.actor_email || "the guest",
+      byAdmin: r.by_admin === 1,
+      when: timeAgo(r.created_at),
+    });
+    out.set(r.review_id, list);
+  }
+  return out;
 }
 
 export type ReviewItem = {

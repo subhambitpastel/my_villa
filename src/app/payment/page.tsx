@@ -361,7 +361,11 @@ export default async function PaymentPage({
   // Paying for a stay that already exists is exempt for the same reason modify
   // is: the booking was made before (or despite) the lock, and the guest
   // still owes for it.
-  if (villa.locked_at !== null && !params.modify && !payBooking)
+  if (
+    (villa.locked_at !== null || villa.admin_locked_at !== null) &&
+    !params.modify &&
+    !payBooking
+  )
     redirect(`/place?id=${villa.id}`);
 
   const roomBased = isRoomBased(villa.kind);

@@ -18,10 +18,13 @@ import { quote } from "@/lib/pricing";
 import {
   PACKAGE_TYPES,
   packageTypeLabel,
-  presetNights,
-  presetDiscount,
   type PackageType,
 } from "@/lib/packageTypes";
+import {
+  applyPreset as applyPresetTo,
+  repriceFromDiscount as repriceTo,
+  type PricingVilla,
+} from "@/lib/packageForm";
 
 const input =
   "block w-full rounded-[8px] border border-[#d9d9d9] bg-white px-4 py-2.5 text-[14px] text-ink placeholder:text-[#9d9da6] focus:outline-none focus:border-brand focus:ring-2 focus:ring-brand/20";
@@ -63,46 +66,31 @@ function villaCapacity(v: PropertyItem): number {
     : Math.max(1, v.maxGuests);
 }
 
-/** Apply a preset type: fix the nights and auto-price it off the villa's nightly
- *  rate (villa price × nights − long-stay discount + fee = the tier's total). */
-function applyPreset(
+/** The villa a form is pricing against, in the shape the shared package-form
+ *  rules take (see lib/packageForm.ts — the admin's edit dialog runs on the
+ *  very same ones, so both sides re-price identically). */
+function pricingVilla(
   f: Form,
-  type: PackageType,
   villas: PropertyItem[],
-): Form {
-  const nights = presetNights(type);
-  if (nights === null) return { ...f, type: "curated" };
-  const villa =
-    f.villaId === "" ? undefined : villas.find((v) => v.id === f.villaId);
-  const price = villa ? quote(villa.price, nights).total : 0;
-  return {
-    ...f,
-    type,
-    nights: String(nights),
-    discount: String(presetDiscount(type) ?? 0),
-    price: villa ? price.toFixed(2) : "",
-  };
+): PricingVilla | undefined {
+  const v = f.villaId === "" ? undefined : villas.find((x) => x.id === f.villaId);
+  return v
+    ? {
+        kind: v.kind,
+        price: v.price,
+        discount: v.discount,
+        rooms: v.rooms,
+        peoplePerRoom: v.peoplePerRoom,
+        maxGuests: v.maxGuests,
+      }
+    : undefined;
 }
 
-/** For a curated package with a discount %, keep the all-inclusive price in sync
- *  with that discount — price = the regular booking price, less the plan's % —
- *  so a "30% off" plan actually costs 30% less and the shown guest savings track
- *  the discount. No discount (or a preset, which prices itself) leaves price be. */
-function repriceFromDiscount(f: Form, villas: PropertyItem[]): Form {
-  if (f.type !== "curated") return f;
-  const d = parseInt(f.discount, 10) || 0;
-  const nights = parseInt(f.nights, 10) || 0;
-  const villa =
-    f.villaId === "" ? undefined : villas.find((v) => v.id === f.villaId);
-  if (!villa || nights < 1 || d <= 0) return f;
-  const guests = parseInt(f.maxGuests, 10) || 0;
-  const rooms = isRoomBased(villa.kind)
-    ? roomsForGuests(villa.kind, guests, villa.peoplePerRoom)
-    : 1;
-  const normal = quote(villa.price * rooms, nights, villa.discount).total;
-  const price = Math.round(normal * (1 - d / 100) * 100) / 100;
-  return { ...f, price: price.toFixed(2) };
-}
+const applyPreset = (f: Form, type: PackageType, villas: PropertyItem[]): Form =>
+  applyPresetTo(f, type, pricingVilla(f, villas));
+
+const repriceFromDiscount = (f: Form, villas: PropertyItem[]): Form =>
+  repriceTo(f, pricingVilla(f, villas));
 
 export default function MyPackages({
   villas,

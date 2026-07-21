@@ -7,6 +7,10 @@ import { nowIso, nowMs } from "./clock";
 const COOKIE_NAME = "myvilla_session";
 const SESSION_DAYS = 30;
 
+/** The session cookie's name, for the one caller that can't use `cookies()` —
+ *  the proxy, which reads the raw request. */
+export const SESSION_COOKIE = COOKIE_NAME;
+
 export type SessionUser = Omit<UserRow, "password_hash">;
 
 export async function createSession(userId: number) {
@@ -55,3 +59,27 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 
   return row ?? null;
 }
+
+/**
+ * Does this raw cookie token belong to a platform admin?
+ *
+ * The proxy's question, and only the proxy's: it runs before the app and so
+ * can't use `cookies()` or `getCurrentUser()`. Same liveness rules as
+ * getCurrentUser — an expired session or a disabled account is nobody, which
+ * is what keeps a stale cookie from pinning someone inside the back office.
+ */
+export async function isAdminToken(token: string): Promise<boolean> {
+  const row = (await getDb()
+    .prepare(
+      `SELECT u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id
+       WHERE s.token = ? AND s.expires_at > ? AND u.disabled_at IS NULL`,
+    )
+    .get(token, nowIso())) as { is_admin: number } | undefined;
+  return row?.is_admin === 1;
+}
+
+/** True for the platform's back-office account — NOT a member of the
+ *  marketplace. Admins moderate what others list and book; they never list or
+ *  book themselves, so every member-side action refuses them. */
+export const isAdminAccount = (user: SessionUser | null | undefined): boolean =>
+  user?.is_admin === 1;

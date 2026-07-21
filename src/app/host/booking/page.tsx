@@ -145,6 +145,30 @@ export default async function OwnerBookingPage({
             </>
           }
           rightColumn={
+            /* Support's lock blocks this flow entirely — unlike the owner's own
+               lock, which deliberately still allows booking for a guest. The
+               form isn't rendered at all rather than shown and refused on
+               submit: createOwnerBookingAction would reject it, and filling in
+               a stay only to be told no at the end is worse than being told
+               now. The entry points (My Property, Call Requests) are disabled
+               to match, so this page is only reached by a direct URL — or by a
+               lock applied while it sat open. */
+            villa.admin_locked_at !== null ? (
+              <div className="w-full max-w-[576px] lg:mt-[60px]">
+                <p className="rounded-[10px] bg-[#fdecec] px-5 py-4 text-[14px] leading-[1.5] text-[#c0392b]">
+                  <span className="font-semibold">{villa.name}</span> was locked
+                  by <span className="font-semibold">MyVilla support</span>, so
+                  no new bookings can be made on it — including on a
+                  guest&rsquo;s behalf. Please contact support.
+                </p>
+                <Link
+                  href="/profile/properties"
+                  className="mt-4 inline-block rounded-[8px] border border-brand px-4 py-2 text-[13px] font-semibold text-brand transition-colors hover:bg-brand/5"
+                >
+                  Back to My Property
+                </Link>
+              </div>
+            ) : (
             <div className="w-full max-w-[576px] lg:mt-[60px]">
               <div className="mb-4 rounded-[10px] bg-brand/10 px-5 py-4 text-[14px] leading-[1.5] text-brand-dark">
                 You&rsquo;re booking{" "}
@@ -194,6 +218,7 @@ export default async function OwnerBookingPage({
                 }
               />
             </div>
+            )
           }
         />
       </main>

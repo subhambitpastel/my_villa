@@ -70,6 +70,9 @@ export type VillaRow = {
   image: string;
   images: string; // JSON string[] — gallery, first entry doubles as cover
   locked_at: string | null; // set = locked (no new bookings, hidden from browse)
+  /** Support's lock — same market effect as locked_at, but only an admin can
+   *  lift it. Live requires BOTH this and locked_at to be NULL. */
+  admin_locked_at: string | null;
   created_at: string;
 };
 
@@ -201,6 +204,11 @@ CREATE TABLE IF NOT EXISTS villas (
   -- and drops out of search/browse, while bookings already made still stand.
   -- NULL = live. Nullable rather than a boolean so we keep the "when".
   locked_at TEXT,
+  -- Support's own lock, with exactly the same market effect as locked_at but
+  -- held by MyVilla, not the owner: only an admin can lift it, so an owner
+  -- can't undo a moderation decision by flipping their own switch. The two are
+  -- independent — a listing is live only while BOTH are NULL.
+  admin_locked_at TEXT,
   created_at  TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
 
@@ -289,6 +297,31 @@ CREATE TABLE IF NOT EXISTS reviews (
              CHECK (status IN ('pending', 'approved', 'rejected')),
   created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
 );
+
+-- Every step a review goes through: written, rewritten, published, turned
+-- down. Append-only, and it keeps a SNAPSHOT of the stars and words as they
+-- were at that moment, so a later edit cannot rewrite what an admin was
+-- actually looking at when they decided. The note column carries the admin's
+-- reason for turning one down — the guest is owed that, and it has to survive
+-- the edit they make in response.
+CREATE TABLE IF NOT EXISTS review_events (
+  id         SERIAL PRIMARY KEY,
+  review_id  INTEGER NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL
+             CHECK (kind IN ('submitted', 'edited', 'approved', 'rejected')),
+  -- Who acted. Kept nullable so deleting an account leaves the history
+  -- standing rather than tearing a hole in it.
+  actor_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  -- 1 = an admin did this, 0 = the review's author. Stored rather than derived
+  -- because is_admin can change afterwards, and this must read true forever.
+  by_admin   INTEGER NOT NULL DEFAULT 0,
+  note       TEXT NOT NULL DEFAULT '',
+  stars      INTEGER NOT NULL DEFAULT 0,
+  comment    TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')
+);
+
+CREATE INDEX IF NOT EXISTS review_events_review ON review_events (review_id, id);
 
 -- Owner-defined stay packages: a named, fixed bundle of included experiences
 -- (airport pickup, sightseeing, meals…) offered on one villa at a single price.
@@ -449,6 +482,9 @@ END $$;
 -- Nullable with no default, so every existing listing stays live on upgrade.
 ALTER TABLE villas   ADD COLUMN IF NOT EXISTS locked_at TEXT;
 ALTER TABLE packages ADD COLUMN IF NOT EXISTS locked_at TEXT;
+-- Support's lock (see the villas table comment). Additive: existing rows come
+-- back NULL, so nothing already listed changes state on deploy.
+ALTER TABLE villas   ADD COLUMN IF NOT EXISTS admin_locked_at TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS pay_methods      TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS pay_account_type TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS card_number      TEXT NOT NULL DEFAULT '';
@@ -516,6 +552,18 @@ DO $$ BEGIN
     WHERE coupon_code <> '';
 EXCEPTION WHEN others THEN NULL;
 END $$;
+
+-- Reviews written before there was a history to write get their opening step,
+-- so their timeline starts somewhere real instead of mid-air. Only 'submitted'
+-- is synthesised: the row itself knows who wrote it, when, and what it says.
+-- A decision is NOT invented — an "approved" event with a guessed time and no
+-- reason would be a fabricated audit line, and the point of this table is that
+-- its lines are true. Skipped for any review that already has history, so it
+-- is a no-op on every start after the first.
+INSERT INTO review_events (review_id, kind, actor_id, by_admin, stars, comment, created_at)
+SELECT r.id, 'submitted', r.user_id, 0, r.stars, r.comment, r.created_at
+FROM reviews r
+WHERE NOT EXISTS (SELECT 1 FROM review_events e WHERE e.review_id = r.id);
 
 -- Keep each villa's denormalized rating/reviews true to the reviews table.
 -- rateStayAction maintains these on new reviews; this corrects any villa that
@@ -873,11 +921,38 @@ async function seed(pool: pg.Pool, force: boolean) {
   ];
   for (const [villaId, tIdx, inOff, outOff, guests, age, stars, comment, status] of seedReviews) {
     const bookingId = await book(villaId, tIdx, inOff, outOff, guests, "completed", age);
-    await pool.query(
+    const rv = await pool.query(
       `INSERT INTO reviews (booking_id, villa_id, user_id, stars, comment, status, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6, ${TS("$7")})`,
+       VALUES ($1,$2,$3,$4,$5,$6, ${TS("$7")}) RETURNING id`,
       [bookingId, villaId, tenants[tIdx], stars, comment, status, age],
     );
+    const reviewId = (rv.rows[0] as { id: number }).id;
+    /* Each demo review carries the history it would have had: written by the
+       guest, then decided on (or still waiting). The turned-down one carries
+       its reason — a rejection with no explanation is exactly what the
+       history exists to prevent. */
+    await pool.query(
+      `INSERT INTO review_events (review_id, kind, actor_id, by_admin, stars, comment, created_at)
+       VALUES ($1,'submitted',$2,0,$3,$4, ${TS("$5")})`,
+      [reviewId, tenants[tIdx], stars, comment, age],
+    );
+    if (status !== "pending") {
+      await pool.query(
+        `INSERT INTO review_events (review_id, kind, actor_id, by_admin, note, stars, comment, created_at)
+         VALUES ($1,$2,$3,1,$4,$5,$6, ${TS("$7")})`,
+        [
+          reviewId,
+          status,
+          adminId,
+          status === "rejected"
+            ? "This is about booking the wrong week rather than the stay itself, so there's nothing here for the next guest to go on. Rewrite it about the stay and we'll take another look."
+            : "",
+          stars,
+          comment,
+          age,
+        ],
+      );
+    }
   }
 
   // Seed villas are inserted without a gallery — give each its cover plus stock

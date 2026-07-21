@@ -335,16 +335,23 @@ function facet(
 export default function AdminBookings({
   items,
   focusBookingId = null,
+  initialVillaId = null,
 }: {
   items: RequestItem[];
   /** Show just this booking, expanded — set by ?booking=N, which is how the
    *  reviews list points at the stay a rating is about. */
   focusBookingId?: number | null;
+  /** Land with the Property filter already on this listing — set by ?villa=N,
+   *  how the admin property list sends someone to clear the stays blocking a
+   *  deletion. Seeds the APPLIED filter too, not just the draft, so the list is
+   *  narrowed on arrival rather than after a "Show results" click. */
+  initialVillaId?: number | null;
 }) {
+  const initialProperty = initialVillaId ? String(initialVillaId) : "all";
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const [guest, setGuest] = useState("all");
-  const [property, setProperty] = useState("all");
+  const [property, setProperty] = useState(initialProperty);
   const [owner, setOwner] = useState("all");
   const [headcount, setHeadcount] = useState("all");
   const [stayFrom, setStayFrom] = useState<string | null>(null);
@@ -398,7 +405,7 @@ export default function AdminBookings({
   const [applied, setApplied] = useState({
     status: "all",
     guest: "all",
-    property: "all",
+    property: initialProperty,
     owner: "all",
     headcount: "all",
     stayFrom: null as string | null,

@@ -11,17 +11,27 @@ import AdminFilterBar, {
 import Dropdown from "@/components/ui/Dropdown";
 import SearchDropdown from "@/components/ui/SearchDropdown";
 import { matchesSearch } from "@/lib/textSearch";
-import { adminSetVillaLockedAction } from "@/lib/adminActions";
-import type { AdminVillaItem } from "@/lib/queries";
+import {
+  adminDeleteVillaAction,
+  adminSetVillaAdminLockedAction,
+  adminSetVillaLockedAction,
+} from "@/lib/adminActions";
+import type { AdminVillaItem, BookingLock } from "@/lib/queries";
+import { formatDay } from "@/lib/dates";
 
 const CHIP = "rounded-[3px] px-2 py-0.5 text-[11px] font-semibold";
 
 const STATE = [
   { value: "all", label: "All listings" },
   { value: "live", label: "Taking bookings" },
-  { value: "locked", label: "Locked" },
+  { value: "locked", label: "Locked (any)" },
+  { value: "admin-locked", label: "Admin locked" },
   { value: "featured", label: "Featured" },
 ];
+
+/** Which lock a confirmation is about. "owner" flips the host's own switch (they
+ *  can undo it); "admin" is support's, which only support can lift. */
+type LockScope = "owner" | "admin";
 
 // Rooms, guests, price and rating are ranked, not enumerated: "which are the
 // biggest / dearest / best rated" is the question worth asking of a list this
@@ -37,15 +47,28 @@ const SORTS = [
 
 export default function AdminProperties({
   items,
+  locks = {},
 }: {
   items: AdminVillaItem[];
+  /** Live bookings per villa id (absent = none). A listing with any of these
+   *  can't be deleted — the stays have to be cancelled first. */
+  locks?: Record<number, BookingLock>;
 }) {
   const [query, setQuery] = useState("");
   const [owner, setOwner] = useState("all");
   const [kind, setKind] = useState("all");
   const [state, setState] = useState("all");
   const [sort, setSort] = useState("newest");
-  const [confirming, setConfirming] = useState<AdminVillaItem | null>(null);
+  const [confirming, setConfirming] = useState<{
+    villa: AdminVillaItem;
+    scope: LockScope;
+  } | null>(null);
+  // Deletion gets its own dialog — it's irreversible and cascades, so it can't
+  // share the lock confirmation's copy.
+  const [deleting, setDeleting] = useState<AdminVillaItem | null>(null);
+  // Why a delete was refused (active bookings). Shown in the dialog rather than
+  // the top banner, so the reason sits next to the thing being deleted.
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(
     null,
   );
@@ -80,10 +103,14 @@ export default function AdminProperties({
       applied.state === "all"
         ? true
         : applied.state === "live"
-          ? !v.locked
+          ? // Live means neither lock — an admin-locked listing is off the
+            // market even if the owner's own switch is open.
+            !v.locked && !v.adminLocked
           : applied.state === "locked"
-            ? v.locked
-            : v.featured,
+            ? v.locked || v.adminLocked
+            : applied.state === "admin-locked"
+              ? v.adminLocked
+              : v.featured,
     )
     .filter((v) => matchesSearch(query, v.name, v.city, v.kind, v.ownerName))
     .sort((a, b) => {
@@ -129,17 +156,43 @@ export default function AdminProperties({
     setApplied({ owner: "all", kind: "all", state: "all", sort: "newest" });
   }
 
-  function toggleLock(v: AdminVillaItem) {
+  function toggleLock(v: AdminVillaItem, scope: LockScope) {
+    const wasLocked = scope === "admin" ? v.adminLocked : v.locked;
     startTransition(async () => {
-      const res = await adminSetVillaLockedAction(v.id, !v.locked);
+      const res =
+        scope === "admin"
+          ? await adminSetVillaAdminLockedAction(v.id, !wasLocked)
+          : await adminSetVillaLockedAction(v.id, !wasLocked);
       setConfirming(null);
       setMessage({
         ok: res.ok,
         text: res.ok
-          ? `${v.name} ${v.locked ? "unlocked" : "locked"}.`
+          ? `${v.name} ${scope === "admin" ? "admin-" : ""}${
+              wasLocked ? "unlocked" : "locked"
+            }.`
           : res.error,
       });
       if (res.ok) router.refresh();
+    });
+  }
+
+  // Live bookings on the listing the delete dialog is open for, if any. Their
+  // presence is what makes the deletion impossible, so the dialog leads with it
+  // and the confirm button stays shut.
+  const blockingLock = deleting ? locks[deleting.id] : undefined;
+
+  function removeVilla(v: AdminVillaItem) {
+    setDeleteError(null);
+    startTransition(async () => {
+      const res = await adminDeleteVillaAction(v.id);
+      if (!res.ok) {
+        // Kept open: the refusal is actionable (cancel the stays, or lock it).
+        setDeleteError(res.error);
+        return;
+      }
+      setDeleting(null);
+      setMessage({ ok: true, text: `${v.name} deleted.` });
+      router.refresh();
     });
   }
 
@@ -256,6 +309,15 @@ export default function AdminProperties({
                       Locked
                     </span>
                   )}
+                  {/* Distinct from "Locked": this one the owner can't lift. */}
+                  {v.adminLocked && (
+                    <span
+                      title="Locked by MyVilla support — the owner can't unlock this."
+                      className={`${CHIP} bg-[#3a1f1f] text-white`}
+                    >
+                      Admin locked
+                    </span>
+                  )}
                 </div>
                 <p className="mt-1 text-[13px] text-[#7a7a85]">
                   Owner: {v.ownerName}
@@ -265,13 +327,42 @@ export default function AdminProperties({
                   up to {v.maxGuests} guests · {v.rating.toFixed(1)}★ (
                   {v.reviews})
                 </p>
-                <button
-                  type="button"
-                  onClick={() => setConfirming(v)}
-                  className="mt-3 rounded-[8px] border border-brand px-4 py-1.5 text-[13px] font-semibold text-brand transition-colors hover:bg-brand/5"
-                >
-                  {v.locked ? "Unlock listing" : "Lock listing"}
-                </button>
+                {/* Two locks, side by side. The first flips the OWNER'S switch
+                    (they can undo it); the second is support's own, which they
+                    can't — hence the heavier styling. */}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setConfirming({ villa: v, scope: "owner" })}
+                    className="rounded-[8px] border border-brand px-4 py-1.5 text-[13px] font-semibold text-brand transition-colors hover:bg-brand/5"
+                  >
+                    {v.locked ? "Unlock listing" : "Lock listing"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirming({ villa: v, scope: "admin" })}
+                    title="Support's own lock — the owner cannot unlock this one."
+                    className={`rounded-[8px] px-4 py-1.5 text-[13px] font-semibold transition-colors ${
+                      v.adminLocked
+                        ? "bg-[#3a1f1f] text-white hover:bg-[#512c2c]"
+                        : "border border-[#eb5757] text-[#eb5757] hover:bg-[#eb5757]/5"
+                    }`}
+                  >
+                    {v.adminLocked ? "Admin unlock" : "Admin lock listing"}
+                  </button>
+                  {/* Irreversible and cascading, so it sits apart from the
+                      locks and states its consequences in the dialog. */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDeleteError(null);
+                      setDeleting(v);
+                    }}
+                    className="rounded-[8px] bg-[#eb5757] px-4 py-1.5 text-[13px] font-semibold text-white transition-colors hover:bg-[#d64545]"
+                  >
+                    Delete
+                  </button>
+                </div>
               </div>
             </li>
           ))
@@ -289,35 +380,188 @@ export default function AdminProperties({
             className="w-full max-w-[440px] rounded-[12px] bg-white p-6 shadow-[0px_20px_60px_0px_rgba(0,0,0,0.25)]"
             onClick={(e) => e.stopPropagation()}
           >
+            {(() => {
+              const { villa: cv, scope } = confirming;
+              const isAdmin = scope === "admin";
+              const wasLocked = isAdmin ? cv.adminLocked : cv.locked;
+              return (
+                <>
+                  <p className="text-[16px] font-semibold text-[#121212]">
+                    {wasLocked ? "Unlock" : "Lock"}
+                    {isAdmin ? " (support lock)" : ""} {cv.name}?
+                  </p>
+                  <p className="mt-2 text-[14px] leading-[1.5] text-[#4a4a4a]">
+                    {wasLocked
+                      ? isAdmin
+                        ? "Support's lock is lifted. The listing goes back on the market unless the owner's own lock is still on — that setting is left exactly as they had it."
+                        : "It will start taking new bookings again and reappear in search."
+                      : isAdmin
+                        ? "It stops taking NEW bookings and leaves search, and the owner CANNOT unlock it — their own switch is frozen and they can't book for a guest either. Stays already booked go ahead as normal."
+                        : "It stops taking NEW bookings and leaves search. Stays already booked go ahead as normal. The owner can undo this themselves."}{" "}
+                    {cv.ownerName} is notified that support did this.
+                  </p>
+                  <div className="mt-6 flex items-center justify-end gap-4">
+                    <button
+                      type="button"
+                      onClick={() => setConfirming(null)}
+                      disabled={pending}
+                      className="text-[14px] text-[#7a7a85] underline disabled:opacity-60"
+                    >
+                      Never mind
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => toggleLock(cv, scope)}
+                      disabled={pending}
+                      className={`rounded-[8px] px-5 py-2 text-[14px] font-semibold text-white transition-colors disabled:opacity-60 ${
+                        isAdmin && !wasLocked
+                          ? "bg-[#eb5757] hover:bg-[#d64545]"
+                          : "bg-brand hover:bg-brand-dark"
+                      }`}
+                    >
+                      {pending
+                        ? "Saving…"
+                        : wasLocked
+                          ? "Yes, unlock"
+                          : isAdmin
+                            ? "Yes, admin lock"
+                            : "Yes, lock"}
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {deleting && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Delete this property"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => {
+            if (!pending) {
+              setDeleting(null);
+              setDeleteError(null);
+            }
+          }}
+        >
+          <div
+            className="w-full max-w-[460px] rounded-[12px] bg-white p-6 shadow-[0px_20px_60px_0px_rgba(0,0,0,0.25)]"
+            onClick={(e) => e.stopPropagation()}
+          >
             <p className="text-[16px] font-semibold text-[#121212]">
-              {confirming.locked ? "Unlock" : "Lock"} {confirming.name}?
+              Delete {deleting.name}, {deleting.city}?
             </p>
+
+            {/* Said BEFORE the attempt, not after it fails: a listing guests
+                are still booked into can't be deleted at all, and the way
+                forward is to clear those stays first. Mirrors the owner's own
+                delete refusal, with a link straight to the filtered list. */}
+            {blockingLock && (
+              <div className="mt-3 rounded-[8px] border border-[#f3c9c9] bg-[#fdecec] p-3.5">
+                <p className="text-[13px] font-semibold text-[#c0392b]">
+                  This property can&rsquo;t be deleted yet — it has{" "}
+                  {blockingLock.active} active booking
+                  {blockingLock.active === 1 ? "" : "s"}.
+                </p>
+                <p className="mt-1.5 text-[13px] leading-[1.5] text-[#8a4b44]">
+                  Guests are still booked into it
+                  {blockingLock.lastCheckOut ? (
+                    <>
+                      {" "}
+                      — the last checks out on{" "}
+                      <span className="font-semibold">
+                        {formatDay(blockingLock.lastCheckOut)}
+                      </span>
+                    </>
+                  ) : null}
+                  . Cancel all of its bookings first, then delete the property.
+                  To take it off the market right now without cancelling on
+                  anyone, use <span className="font-semibold">Admin lock</span>{" "}
+                  instead.
+                </p>
+                <Link
+                  href={`/admin/bookings?villa=${deleting.id}`}
+                  className="mt-2.5 inline-flex items-center gap-1.5 rounded-[6px] bg-[#eb5757] px-3 py-1.5 text-[12.5px] font-semibold text-white transition-colors hover:bg-[#d64545]"
+                >
+                  View &amp; cancel its bookings
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M9 5l7 7-7 7" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </Link>
+              </div>
+            )}
+
+            <p className="mt-3 text-[14px] leading-[1.5] text-[#4a4a4a]">
+              {blockingLock ? "Once those stays are cancelled, deleting" : "This"}{" "}
+              <span className="font-semibold">permanently</span> removes the
+              listing owned by {deleting.ownerName}, and everything attached to
+              it goes with it:
+            </p>
+            <ul className="mt-2 space-y-1 text-[13px] leading-[1.5] text-[#4a4a4a]">
+              {[
+                "its packages and coupons",
+                "its reviews and ratings",
+                "past bookings and their history",
+                "guests' saved favourites and call requests",
+              ].map((t) => (
+                <li key={t} className="flex gap-2">
+                  <span
+                    aria-hidden
+                    className="mt-[7px] h-[4px] w-[4px] shrink-0 rounded-full bg-[#c4c4c4]"
+                  />
+                  <span>{t}</span>
+                </li>
+              ))}
+            </ul>
             <p className="mt-2 text-[14px] leading-[1.5] text-[#4a4a4a]">
-              {confirming.locked
-                ? "It will start taking new bookings again and reappear in search."
-                : "It stops taking NEW bookings and leaves search. Stays already booked go ahead as normal."}{" "}
-              {confirming.ownerName} is notified that support did this.
+              It can&rsquo;t be undone.
+              {!blockingLock && (
+                <>
+                  {" "}
+                  To take it off the market without destroying any of this, use{" "}
+                  <span className="font-semibold">Admin lock</span> instead.
+                </>
+              )}
             </p>
+            {deleteError && (
+              <p
+                role="alert"
+                className="mt-3 rounded-[8px] bg-[#fdecec] px-3 py-2 text-[13px] leading-[1.5] text-[#c0392b]"
+              >
+                {deleteError}
+              </p>
+            )}
             <div className="mt-6 flex items-center justify-end gap-4">
               <button
                 type="button"
-                onClick={() => setConfirming(null)}
+                onClick={() => {
+                  setDeleting(null);
+                  setDeleteError(null);
+                }}
                 disabled={pending}
                 className="text-[14px] text-[#7a7a85] underline disabled:opacity-60"
               >
-                Never mind
+                {deleteError || blockingLock ? "Close" : "Never mind"}
               </button>
+              {/* Shut while stays are live: the action refuses it anyway, and
+                  offering a button that can only fail is worse than not
+                  offering it. Reopens by itself once they're cancelled. */}
               <button
                 type="button"
-                onClick={() => toggleLock(confirming)}
-                disabled={pending}
-                className="rounded-[8px] bg-brand px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-brand-dark disabled:opacity-60"
+                onClick={() => removeVilla(deleting)}
+                disabled={pending || !!deleteError || !!blockingLock}
+                title={
+                  blockingLock
+                    ? "Cancel this property's bookings first."
+                    : undefined
+                }
+                className="rounded-[8px] bg-[#eb5757] px-5 py-2 text-[14px] font-semibold text-white transition-colors hover:bg-[#d64545] disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {pending
-                  ? "Saving…"
-                  : confirming.locked
-                    ? "Yes, unlock"
-                    : "Yes, lock"}
+                {pending ? "Deleting…" : "Yes, delete it"}
               </button>
             </div>
           </div>
